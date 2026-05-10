@@ -100,6 +100,8 @@ def test_english_readme_and_docs_are_linked():
     assert "Multi-bot" in english_readme
     assert "group chat" in english_readme
     assert "pytest" in english_readme
+    assert "425 passed" not in readme
+    assert "398 passed" not in readme
     assert "425 passed" not in english_readme
     assert "398 passed" not in english_readme
 
