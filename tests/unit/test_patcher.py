@@ -52,6 +52,27 @@ def test_apply_patch_accepts_013_plus_strategy_and_marks_strategy():
     assert patcher.COMPLETE_PATCH_BEGIN in patched
 
 
+def test_apply_patch_013_plus_inserts_cron_delivery_hook():
+    content = (
+        "def _deliver_result(job: dict, content: str, adapters=None, loop=None):\n"
+        "    delivery_content = content\n"
+        "    return adapter.send('chat', delivery_content)\n"
+        "\n"
+        "async def _handle_message_with_agent(self, event, source, _quick_key, run_generation):\n"
+        "    response = 'ok'\n"
+        "    _response_time = 1\n"
+        "    agent_result = {}\n"
+        "    return response\n"
+    )
+
+    patched = patcher.apply_patch(content, strategy="gateway_run_013_plus")
+
+    assert patcher.CRON_PATCH_BEGIN in patched
+    assert 'event_name="message.completed"' in patched
+    assert '"delivery_kind": "cron"' in patched
+    assert patcher.remove_patch(patched) == content
+
+
 def test_apply_patch_inserts_real_runtime_hook_call():
     content = (
         "async def _handle_message_with_agent(message):\n"

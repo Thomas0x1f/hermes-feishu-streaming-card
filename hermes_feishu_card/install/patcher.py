@@ -11,8 +11,11 @@ ANSWER_DELTA_PATCH_BEGIN = "# HERMES_FEISHU_CARD_ANSWER_DELTA_PATCH_BEGIN"
 ANSWER_DELTA_PATCH_END = "# HERMES_FEISHU_CARD_ANSWER_DELTA_PATCH_END"
 THINKING_DELTA_PATCH_BEGIN = "# HERMES_FEISHU_CARD_THINKING_DELTA_PATCH_BEGIN"
 THINKING_DELTA_PATCH_END = "# HERMES_FEISHU_CARD_THINKING_DELTA_PATCH_END"
+CRON_PATCH_BEGIN = "# HERMES_FEISHU_CARD_CRON_PATCH_BEGIN"
+CRON_PATCH_END = "# HERMES_FEISHU_CARD_CRON_PATCH_END"
 
 _HANDLER_NAME = "_handle_message_with_agent"
+_CRON_DELIVER_NAME = "_deliver_result"
 _NO_FINAL_NEWLINE = "# HERMES_FEISHU_CARD_NO_FINAL_NEWLINE"
 _SUPPORTED_STRATEGIES = {"legacy_gateway_run", "gateway_run_013_plus"}
 
@@ -23,6 +26,8 @@ def apply_patch(content: str, strategy: str = "legacy_gateway_run") -> str:
         raise ValueError(f"unsupported patch strategy: {strategy}")
     content = _apply_start_patch(content, strategy=strategy)
     content = _apply_complete_patch(content)
+    if strategy == "gateway_run_013_plus":
+        content = _apply_cron_patch(content)
     content = _apply_callback_patch(
         content,
         callback_name="progress_callback",
@@ -122,6 +127,13 @@ def remove_patch(content: str) -> str:
     """Remove the owned Feishu card hook block from patched Hermes content."""
     content = _remove_simple_owned_patch(
         content,
+        CRON_PATCH_BEGIN,
+        CRON_PATCH_END,
+        _render_cron_hook_block,
+        "cron patch markers",
+    )
+    content = _remove_simple_owned_patch(
+        content,
         TOOL_PATCH_BEGIN,
         TOOL_PATCH_END,
         _render_tool_hook_block,
@@ -171,6 +183,7 @@ def remove_patch_lenient(content: str) -> str:
         content = "".join(lines[:begin_index] + lines[end_index + 1 :])
 
     for begin_marker, end_marker in (
+        (CRON_PATCH_BEGIN, CRON_PATCH_END),
         (TOOL_PATCH_BEGIN, TOOL_PATCH_END),
         (ANSWER_DELTA_PATCH_BEGIN, ANSWER_DELTA_PATCH_END),
         (THINKING_DELTA_PATCH_BEGIN, THINKING_DELTA_PATCH_END),
@@ -241,6 +254,35 @@ def _apply_callback_patch(
     return "".join(lines[:insert_at] + hook + lines[insert_at:])
 
 
+def _apply_cron_patch(content: str) -> str:
+    owned_block = _find_simple_marker_block(
+        content,
+        CRON_PATCH_BEGIN,
+        CRON_PATCH_END,
+        "cron patch markers",
+    )
+    if owned_block is not None:
+        lines = content.splitlines(keepends=True)
+        begin_index, end_index = owned_block
+        indent = _leading_whitespace(_strip_line_ending(lines[begin_index]))
+        newline = _line_ending(lines[begin_index]) or _detect_newline(content)
+        expected = _render_cron_hook_block(indent, newline)
+        if lines[begin_index : end_index + 1] == expected:
+            return content
+        return "".join(lines[:begin_index] + expected + lines[end_index + 1 :])
+
+    tree = _parse_content(content)
+    lines = content.splitlines(keepends=True)
+    deliver_body = _find_cron_deliver_body_location(tree, lines)
+    if deliver_body is None:
+        return content
+
+    newline = _detect_newline(content)
+    insert_at, body_indent = deliver_body
+    hook = _render_cron_hook_block(body_indent, newline)
+    return "".join(lines[:insert_at] + hook + lines[insert_at:])
+
+
 def _remove_simple_owned_patch(
     content: str,
     begin_marker: str,
@@ -298,6 +340,20 @@ def _find_completion_return_location(tree, lines):
     target = max(returns, key=lambda node: node.lineno)
     insert_at = target.lineno - 1
     return insert_at, _line_indent(lines, insert_at)
+
+
+def _find_cron_deliver_body_location(tree, lines):
+    for node in tree.body:
+        if _is_cron_deliver(node):
+            return _body_location(node, lines)
+
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            for child in node.body:
+                if _is_cron_deliver(child):
+                    return _body_location(child, lines)
+
+    return None
 
 
 def _find_callback_body_location(
@@ -409,6 +465,10 @@ def _is_docstring_expr(node) -> bool:
 
 def _is_handler(node) -> bool:
     return isinstance(node, ast.AsyncFunctionDef) and node.name == _HANDLER_NAME
+
+
+def _is_cron_deliver(node) -> bool:
+    return isinstance(node, ast.FunctionDef) and node.name == _CRON_DELIVER_NAME
 
 
 def _find_owned_block(content: str):
@@ -797,6 +857,25 @@ def _render_thinking_delta_hook_block(indent: str, newline: str):
         f"{indent}except Exception:{newline}",
         f"{inner_indent}pass{newline}",
         f"{indent}{THINKING_DELTA_PATCH_END}{newline}",
+    ]
+
+
+def _render_cron_hook_block(indent: str, newline: str):
+    inner_indent = _child_indent(indent)
+    return [
+        f"{indent}{CRON_PATCH_BEGIN}{newline}",
+        f"{indent}try:{newline}",
+        (
+            f"{inner_indent}from hermes_feishu_card.hook_runtime "
+            f"import emit_cron_delivery as _hfc_emit_cron{newline}"
+        ),
+        f"{inner_indent}_hfc_cron_metadata = {{\"delivery_kind\": \"cron\"}}{newline}",
+        f"{inner_indent}# event_name=\"message.completed\"{newline}",
+        f"{inner_indent}if _hfc_emit_cron(locals()):{newline}",
+        f"{_child_indent(inner_indent)}return None{newline}",
+        f"{indent}except Exception:{newline}",
+        f"{inner_indent}pass{newline}",
+        f"{indent}{CRON_PATCH_END}{newline}",
     ]
 
 

@@ -226,6 +226,58 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
         return web.json_response({"ok": True, "applied": applied}), None
 
     if session is None:
+        if event.event == "message.completed" and _delivery_kind(event) == "cron":
+            session = CardSession(
+                conversation_id=event.conversation_id,
+                message_id=event.message_id,
+                chat_id=event.chat_id,
+            )
+            sessions[_session_key(event)] = session
+            applied = session.apply(event)
+            if applied:
+                route = _resolve_route(request, event)
+                if route is None:
+                    sessions.pop(_session_key(event), None)
+                    metrics.cron_fallbacks += 1
+                    metrics.events_rejected += 1
+                    return web.json_response(
+                        {"ok": False, "error": "bot route failed"},
+                        status=502,
+                    ), None
+                request.app[SESSION_CARD_CONFIGS_KEY][_session_key(event)] = (
+                    _resolve_session_card_config(request.app, route.bot_id, event)
+                )
+                message_id = await _send_card(
+                    request,
+                    event.chat_id,
+                    _render_session_card(request, session),
+                    route.bot_id,
+                )
+                if message_id is None:
+                    sessions.pop(_session_key(event), None)
+                    request.app[SESSION_CARD_CONFIGS_KEY].pop(_session_key(event), None)
+                    metrics.cron_fallbacks += 1
+                    metrics.events_rejected += 1
+                    return web.json_response(
+                        {"ok": False, "error": "feishu send failed"},
+                        status=502,
+                    ), None
+                feishu_message_ids[_session_key(event)] = message_id
+                message_bot_ids[_session_key(event)] = route.bot_id
+                _store_card_summary(request.app, event, session, message_id)
+                request.app[DIAGNOSTICS_KEY]["last_terminal_event"] = {
+                    "message_id": event.message_id,
+                    "event": event.event,
+                    "sequence": event.sequence,
+                    "applied": applied,
+                    "session_status": session.status,
+                    "answer_chars": len(session.answer_text),
+                }
+                metrics.events_applied += 1
+                metrics.cron_cards_sent += 1
+            else:
+                metrics.events_ignored += 1
+            return web.json_response({"ok": True, "applied": applied}), None
         metrics.events_ignored += 1
         return web.json_response({"ok": True, "applied": False}), None
 
@@ -306,6 +358,11 @@ def _record_profile_diagnostics(app: web.Application, event: SidecarEvent) -> No
     diagnostics["events"] += 1
     diagnostics["last_profile_source"] = source
     diagnostics["last_message_id"] = event.message_id
+
+
+def _delivery_kind(event: SidecarEvent) -> str:
+    data = event.data if isinstance(event.data, dict) else {}
+    return str(data.get("delivery_kind") or "").strip().lower()
 
 
 def _safe_profile_id(value: Any) -> str:

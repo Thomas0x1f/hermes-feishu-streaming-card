@@ -326,6 +326,90 @@ def test_completed_event_strips_trailing_attachment_punctuation_and_deduplicates
     ]
 
 
+def test_build_cron_event_from_feishu_job_origin():
+    payload = hook_runtime.build_cron_event(
+        {
+            "job": {
+                "id": "job-1",
+                "origin": {"platform": "feishu", "chat_id": "oc_cron"},
+            },
+            "delivery_content": "定时结果 MEDIA:/tmp/report.pdf",
+        }
+    )
+
+    assert payload["event"] == "message.completed"
+    assert payload["conversation_id"] == "job-1"
+    assert payload["message_id"].startswith("cron_")
+    assert payload["chat_id"] == "oc_cron"
+    assert payload["platform"] == "feishu"
+    assert payload["sequence"] == 0
+    assert payload["data"]["answer"] == "定时结果 MEDIA:/tmp/report.pdf"
+    assert payload["data"]["delivery_kind"] == "cron"
+    assert payload["data"]["profile_id"] == "default"
+    assert payload["data"]["profile_source"] == "fallback_default"
+    assert {"kind": "file", "name": "report.pdf", "summary": "report.pdf"} in payload[
+        "data"
+    ]["attachments"]
+
+
+def test_build_cron_event_prefers_cleaned_delivery_content():
+    payload = hook_runtime.build_cron_event(
+        {
+            "job": {
+                "id": "job-1",
+                "origin": {"platform": "feishu", "chat_id": "oc_cron"},
+            },
+            "content": "raw",
+            "delivery_content": "delivery",
+            "cleaned_delivery_content": "cleaned",
+        }
+    )
+
+    assert payload["data"]["answer"] == "cleaned"
+
+
+def test_build_cron_event_uses_auto_deliver_chat_id(monkeypatch):
+    monkeypatch.setenv("HERMES_CRON_AUTO_DELIVER_CHAT_ID", "oc_env")
+
+    payload = hook_runtime.build_cron_event(
+        {
+            "job": {
+                "id": "job-env",
+                "origin": {"platform": "feishu"},
+            },
+            "content": "定时结果",
+        }
+    )
+
+    assert payload["chat_id"] == "oc_env"
+
+
+def test_build_cron_event_returns_none_for_non_feishu_or_missing_chat(monkeypatch):
+    assert (
+        hook_runtime.build_cron_event(
+            {
+                "job": {
+                    "id": "job-slack",
+                    "origin": {"platform": "slack", "chat_id": "oc_cron"},
+                },
+                "content": "result",
+            }
+        )
+        is None
+    )
+
+    monkeypatch.delenv("HERMES_CRON_AUTO_DELIVER_CHAT_ID", raising=False)
+    assert (
+        hook_runtime.build_cron_event(
+            {
+                "job": {"id": "job-no-chat", "origin": {"platform": "feishu"}},
+                "content": "result",
+            }
+        )
+        is None
+    )
+
+
 def test_build_completed_event_uses_agent_result_token_fallbacks():
     payload = hook_runtime.build_event(
         "message.completed",

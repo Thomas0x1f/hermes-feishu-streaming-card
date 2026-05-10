@@ -118,6 +118,8 @@ async def test_health_reports_healthy_status_and_active_sessions(client):
         "feishu_update_successes": 0,
         "feishu_update_failures": 0,
         "feishu_update_retries": 0,
+        "cron_cards_sent": 0,
+        "cron_fallbacks": 0,
     }
 
 
@@ -382,6 +384,32 @@ async def test_event_before_started_is_not_applied(client):
     assert metrics["events_received"] == 1
     assert metrics["events_applied"] == 0
     assert metrics["events_ignored"] == 1
+
+
+async def test_cron_completed_event_sends_completed_card_without_started(client):
+    test_client, feishu_client = client
+
+    response = await test_client.post(
+        "/events",
+        json=event_payload(
+            "message.completed",
+            0,
+            {"answer": "定时结果", "delivery_kind": "cron"},
+            message_id="cron_1",
+        ),
+    )
+
+    assert response.status == 200
+    assert await response.json() == {"ok": True, "applied": True}
+    assert len(feishu_client.sent) == 1
+    assert "定时结果" in str(feishu_client.sent[0][1])
+    assert feishu_client.updated == []
+    health = await test_client.get("/health")
+    metrics = (await health.json())["metrics"]
+    assert metrics["events_received"] == 1
+    assert metrics["events_applied"] == 1
+    assert metrics["events_ignored"] == 0
+    assert metrics["cron_cards_sent"] == 1
 
 
 async def test_duplicate_started_does_not_send_again(client):

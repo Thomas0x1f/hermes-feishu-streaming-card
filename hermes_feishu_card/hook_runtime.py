@@ -145,6 +145,20 @@ async def emit_from_hermes_locals_async(
         return False
 
 
+def emit_cron_delivery(local_vars: dict[str, Any]) -> bool:
+    try:
+        config = load_runtime_config()
+        if not config.enabled:
+            return False
+        payload = build_cron_event(local_vars)
+        if payload is None:
+            return False
+        asyncio.run(_post_json(config.event_url, payload, TERMINAL_TIMEOUT_SECONDS))
+        return True
+    except Exception:
+        return False
+
+
 def _timeout_for_event(config: RuntimeConfig, event_name: str) -> float:
     if event_name in {"message.completed", "message.failed"}:
         return max(config.timeout_seconds, TERMINAL_TIMEOUT_SECONDS)
@@ -318,6 +332,54 @@ def build_event(event_name: str, local_vars: dict[str, Any]) -> dict[str, Any] |
             if _CURRENT_FALLBACK_KEYS.get(fallback_key) == active_fallback_cache_key:
                 _CURRENT_FALLBACK_KEYS.pop(fallback_key, None)
     return payload
+
+
+def build_cron_event(local_vars: dict[str, Any]) -> dict[str, Any] | None:
+    job = local_vars.get("job")
+    content = _first_string(
+        local_vars,
+        ("cleaned_delivery_content", "delivery_content", "content"),
+    )
+    if not isinstance(job, dict) or content is None:
+        return None
+
+    origin = job.get("origin")
+    if not isinstance(origin, dict):
+        origin = {}
+    chat_id = str(
+        origin.get("chat_id") or os.environ.get("HERMES_CRON_AUTO_DELIVER_CHAT_ID") or ""
+    ).strip()
+    platform = str(
+        origin.get("platform")
+        or os.environ.get("HERMES_CRON_AUTO_DELIVER_PLATFORM")
+        or "feishu"
+    ).strip().lower()
+    if platform != "feishu" or not chat_id:
+        return None
+
+    profile_id, profile_source = _profile_identity(local_vars, None, None)
+    created_at = time.time()
+    job_id = str(job.get("id") or "").strip()
+    message_id = "cron_" + sha256(f"{job_id}:{created_at}".encode("utf-8")).hexdigest()[
+        :16
+    ]
+    return {
+        "schema_version": "1",
+        "event": "message.completed",
+        "conversation_id": str(job.get("id") or chat_id),
+        "message_id": message_id,
+        "chat_id": chat_id,
+        "platform": "feishu",
+        "sequence": 0,
+        "created_at": created_at,
+        "data": {
+            "answer": content,
+            "delivery_kind": "cron",
+            "profile_id": profile_id,
+            "profile_source": profile_source,
+            "attachments": _extract_attachments(content),
+        },
+    }
 
 
 def _event_data(

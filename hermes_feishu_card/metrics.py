@@ -16,6 +16,8 @@ class SidecarMetrics:
     feishu_update_successes: int = 0
     feishu_update_failures: int = 0
     feishu_update_retries: int = 0
+    cron_cards_sent: int = 0
+    cron_fallbacks: int = 0
 
     def snapshot(self) -> dict[str, int]:
         return asdict(self)
