@@ -439,6 +439,62 @@ def test_install_and_restore_013_plus_fixture(tmp_path):
     assert "HERMES_FEISHU_CARD_PATCH_BEGIN" not in restored
 
 
+def test_install_and_restore_latest_layout_patches_scheduler_cron(tmp_path):
+    hermes_dir = tmp_path / "hermes"
+    gateway_dir = hermes_dir / "gateway"
+    cron_dir = hermes_dir / "cron"
+    gateway_dir.mkdir(parents=True)
+    cron_dir.mkdir()
+    (hermes_dir / "VERSION").write_text("v0.13.0\n", encoding="utf-8")
+    run_original = '''
+class GatewayRunner:
+    async def _handle_message_with_agent(self, event, source, _quick_key, run_generation):
+        response = "ok"
+        agent_result = {"model": "m"}
+        _response_time = 1.0
+        await self.hooks.emit("agent:end", {"response": response})
+        return response
+
+    async def _run_agent(self, source, event_message_id=None):
+        _loop_for_step = None
+        def _run_still_current():
+            return True
+        def progress_callback(event_type: str, tool_name: str = None, preview: str = None, args: dict = None, **kwargs):
+            return None
+        def _stream_delta_cb(text: str) -> None:
+            return None
+        def _interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
+            return None
+        return {}
+
+def _reply_anchor_for_event(event):
+    return getattr(event, "reply_to_message_id", None)
+
+def _deliver_media_from_response(response):
+    extract_media(response)
+'''
+    cron_original = '''
+def _deliver_result(job: dict, content: str, adapters=None, loop=None):
+    return None
+'''
+    (gateway_dir / "run.py").write_text(run_original, encoding="utf-8")
+    (cron_dir / "scheduler.py").write_text(cron_original, encoding="utf-8")
+
+    assert cli.main(["install", "--hermes-dir", str(hermes_dir), "--yes"]) == 0
+    patched_run = (gateway_dir / "run.py").read_text(encoding="utf-8")
+    patched_cron = (cron_dir / "scheduler.py").read_text(encoding="utf-8")
+    manifest = json.loads((hermes_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert "HERMES_FEISHU_CARD_PATCH_BEGIN" in patched_run
+    assert "HERMES_FEISHU_CARD_CRON_PATCH_BEGIN" in patched_cron
+    assert manifest["cron_py"] == "cron/scheduler.py"
+    assert (cron_dir / "scheduler.py.hermes_feishu_card.bak").exists()
+
+    assert cli.main(["restore", "--hermes-dir", str(hermes_dir), "--yes"]) == 0
+    assert (gateway_dir / "run.py").read_text(encoding="utf-8") == run_original
+    assert (cron_dir / "scheduler.py").read_text(encoding="utf-8") == cron_original
+    assert not (cron_dir / "scheduler.py.hermes_feishu_card.bak").exists()
+
+
 def test_restore_accepts_phase_one_placeholder_install(tmp_path):
     hermes_dir = copy_hermes(tmp_path)
     original = write_phase_one_install_state(hermes_dir)

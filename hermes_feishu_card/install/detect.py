@@ -33,6 +33,9 @@ class HermesDetection:
     supported: bool
     reason: str
     hook_strategy: str = ""
+    cron_py: Path | None = None
+    cron_py_exists: bool = False
+    cron_hook_strategy: str = ""
     compatibility: str = "unsupported"
     capabilities: dict[str, bool] = field(default_factory=dict)
 
@@ -40,6 +43,7 @@ class HermesDetection:
 def detect_hermes(root: str | Path) -> HermesDetection:
     hermes_root = Path(root)
     run_py = hermes_root / "gateway" / "run.py"
+    cron_py = hermes_root / "cron" / "scheduler.py"
     version, version_error, version_source = _read_version(hermes_root / "VERSION")
     if version == "unknown" and version_error is None:
         git_version = _read_git_version(hermes_root)
@@ -65,6 +69,9 @@ def detect_hermes(root: str | Path) -> HermesDetection:
             supported=supported,
             reason=reason,
             hook_strategy=hook_strategy,
+            cron_py=cron_py,
+            cron_py_exists=cron_py.exists(),
+            cron_hook_strategy="cron_scheduler" if cron_py.exists() else "",
             compatibility=compatibility,
             capabilities=capabilities or {},
         )
@@ -90,7 +97,18 @@ def detect_hermes(root: str | Path) -> HermesDetection:
     if run_py_error is not None:
         return result(False, run_py_error)
 
-    capabilities, capability_error = _detect_capabilities(contents)
+    cron_contents = ""
+    cron_error = None
+    if cron_py.exists():
+        if cron_py.is_symlink():
+            cron_error = "cron/scheduler.py must not be a symlink"
+        else:
+            cron_contents, cron_error = _read_text(cron_py, "cron/scheduler.py")
+
+    if cron_error is not None:
+        return result(False, cron_error)
+
+    capabilities, capability_error = _detect_capabilities(contents, cron_contents)
     core_ok = all(capabilities.get(name, False) for name in CORE_CAPABILITIES)
     optional_ok = all(capabilities.get(name, False) for name in OPTIONAL_CAPABILITIES)
     if core_ok and optional_ok:
@@ -187,7 +205,9 @@ def _select_hook_strategy(version: str) -> str:
     return "legacy_gateway_run"
 
 
-def _detect_capabilities(contents: str) -> tuple[dict[str, bool], str]:
+def _detect_capabilities(
+    contents: str, cron_contents: str = ""
+) -> tuple[dict[str, bool], str]:
     try:
         module = ast.parse(contents)
     except SyntaxError as exc:
@@ -206,7 +226,7 @@ def _detect_capabilities(contents: str) -> tuple[dict[str, bool], str]:
         "tool_callback": _find_callback(module, "progress_callback") is not None,
         "answer_delta_callback": _find_callback(module, "_stream_delta_cb") is not None,
         "thinking_delta_callback": _find_callback(module, "_interim_assistant_cb") is not None,
-        "cron_delivery": _find_function(module, "_deliver_result") is not None,
+        "cron_delivery": _has_cron_delivery(contents, cron_contents),
         "reply_context": "reply_to_message_id" in contents
         or "_reply_anchor_for_event" in contents,
         "attachment_delivery": "extract_media" in contents
@@ -219,6 +239,22 @@ def _detect_capabilities(contents: str) -> tuple[dict[str, bool], str]:
         return capabilities, 'gateway/run.py missing handler anchor: hooks.emit("agent:end", ...)'
 
     return capabilities, "supported"
+
+
+def _has_cron_delivery(contents: str, cron_contents: str) -> bool:
+    if _find_deliver_result_in_contents(contents):
+        return True
+    if cron_contents and _find_deliver_result_in_contents(cron_contents):
+        return True
+    return False
+
+
+def _find_deliver_result_in_contents(contents: str) -> bool:
+    try:
+        module = ast.parse(contents)
+    except SyntaxError:
+        return False
+    return _find_function(module, "_deliver_result") is not None
 
 
 def _find_supported_handler(module: ast.Module) -> ast.AsyncFunctionDef | None:

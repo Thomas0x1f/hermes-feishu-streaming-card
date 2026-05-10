@@ -84,6 +84,61 @@ def _deliver_media_from_response(response):
     assert detection.capabilities["cron_delivery"] is True
 
 
+def test_detect_cron_delivery_in_scheduler_py_for_latest_layout(tmp_path):
+    root = tmp_path / "hermes"
+    run_py = root / "gateway" / "run.py"
+    cron_py = root / "cron" / "scheduler.py"
+    run_py.parent.mkdir(parents=True)
+    cron_py.parent.mkdir(parents=True)
+    (root / "VERSION").write_text("v0.13.0\n", encoding="utf-8")
+    run_py.write_text(
+        '''
+class GatewayRunner:
+    async def _handle_message_with_agent(self, event, source, _quick_key, run_generation):
+        response = "ok"
+        agent_result = {"model": "m"}
+        _response_time = 1.0
+        await self.hooks.emit("agent:end", {"response": response})
+        return response
+
+    async def _run_agent(self, source, event_message_id=None):
+        _loop_for_step = None
+        def _run_still_current():
+            return True
+        def progress_callback(event_type: str, tool_name: str = None, preview: str = None, args: dict = None, **kwargs):
+            return None
+        def _stream_delta_cb(text: str) -> None:
+            return None
+        def _interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
+            return None
+        return {}
+
+def _reply_anchor_for_event(event):
+    return getattr(event, "reply_to_message_id", None)
+
+def _deliver_media_from_response(response):
+    extract_media(response)
+''',
+        encoding="utf-8",
+    )
+    cron_py.write_text(
+        '''
+def _deliver_result(job: dict, content: str, adapters=None, loop=None):
+    return None
+''',
+        encoding="utf-8",
+    )
+
+    detection = detect_hermes(root)
+
+    assert detection.supported is True
+    assert detection.compatibility == "full"
+    assert detection.capabilities["cron_delivery"] is True
+    assert detection.cron_py == cron_py
+    assert detection.cron_py_exists is True
+    assert detection.cron_hook_strategy == "cron_scheduler"
+
+
 def test_detect_013_plus_strategy_reports_partial_when_optional_missing(tmp_path):
     root = tmp_path / "hermes"
     run_py = root / "gateway" / "run.py"

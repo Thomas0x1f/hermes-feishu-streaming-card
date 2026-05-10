@@ -72,6 +72,11 @@ def apply_patch(content: str, strategy: str = "legacy_gateway_run") -> str:
     )
 
 
+def apply_cron_patch(content: str) -> str:
+    """Insert the Feishu card cron hook into a safe Hermes cron delivery function."""
+    return _apply_cron_patch(content)
+
+
 def _apply_start_patch(content: str, *, strategy: str) -> str:
     owned_block = _find_owned_block(content)
     if owned_block is not None:
@@ -161,6 +166,11 @@ def remove_patch(content: str) -> str:
             + lines[end_index + 1 :]
         )
     return "".join(lines[:begin_index] + lines[end_index + 1 :])
+
+
+def remove_cron_patch(content: str) -> str:
+    """Remove the owned Feishu card cron hook block from patched Hermes content."""
+    return _remove_cron_patch(content)
 
 
 def remove_patch_lenient(content: str) -> str:
