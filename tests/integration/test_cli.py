@@ -105,6 +105,10 @@ def test_module_doctor_reports_supported_hermes_detection(tmp_path):
     assert "version_source: VERSION" in result.stdout
     assert "version: v2026.4.23" in result.stdout
     assert "minimum_supported_version: v2026.4.23" in result.stdout
+    assert "hook_strategy: legacy_gateway_run" in result.stdout
+    assert "compatibility: full" in result.stdout
+    assert "anchors:" in result.stdout
+    assert "  message_handler: found" in result.stdout
     assert "reason: supported" in result.stdout
 
 

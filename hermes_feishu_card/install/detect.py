@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import re
 import subprocess
@@ -9,6 +9,16 @@ import subprocess
 
 MIN_SUPPORTED_VERSION = "v2026.4.23"
 HANDLER_NAME = "_handle_message_with_agent"
+CORE_CAPABILITIES = ("message_handler", "completion_return")
+OPTIONAL_CAPABILITIES = (
+    "run_agent",
+    "tool_callback",
+    "answer_delta_callback",
+    "thinking_delta_callback",
+    "cron_delivery",
+    "reply_context",
+    "attachment_delivery",
+)
 _VERSION_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 
 
@@ -22,6 +32,9 @@ class HermesDetection:
     run_py_exists: bool
     supported: bool
     reason: str
+    hook_strategy: str = ""
+    compatibility: str = "unsupported"
+    capabilities: dict[str, bool] = field(default_factory=dict)
 
 
 def detect_hermes(root: str | Path) -> HermesDetection:
@@ -34,7 +47,14 @@ def detect_hermes(root: str | Path) -> HermesDetection:
             version = git_version
             version_source = "git tag"
 
-    def result(supported: bool, reason: str) -> HermesDetection:
+    def result(
+        supported: bool,
+        reason: str,
+        *,
+        hook_strategy: str = "",
+        compatibility: str = "unsupported",
+        capabilities: dict[str, bool] | None = None,
+    ) -> HermesDetection:
         return HermesDetection(
             root=hermes_root,
             version=version,
@@ -44,6 +64,9 @@ def detect_hermes(root: str | Path) -> HermesDetection:
             run_py_exists=run_py.exists(),
             supported=supported,
             reason=reason,
+            hook_strategy=hook_strategy,
+            compatibility=compatibility,
+            capabilities=capabilities or {},
         )
 
     if not run_py.exists():
@@ -56,21 +79,37 @@ def detect_hermes(root: str | Path) -> HermesDetection:
         return result(False, version_error)
 
     parsed_version = _parse_version(version)
-    minimum_version = _parse_version(MIN_SUPPORTED_VERSION)
     if parsed_version is None:
         return result(False, "Hermes VERSION missing, unknown, or invalid")
-    if minimum_version is not None and parsed_version < minimum_version:
+    hook_strategy = _select_hook_strategy(version)
+    minimum_version = _parse_version(MIN_SUPPORTED_VERSION)
+    if hook_strategy == "legacy_gateway_run" and minimum_version is not None and parsed_version < minimum_version:
         return result(False, f"Hermes version must be at least {MIN_SUPPORTED_VERSION}")
 
     contents, run_py_error = _read_text(run_py, "gateway/run.py")
     if run_py_error is not None:
         return result(False, run_py_error)
 
-    has_anchor, anchor_error = _has_supported_handler_anchor(contents)
-    if not has_anchor:
-        return result(False, anchor_error)
+    capabilities, capability_error = _detect_capabilities(contents)
+    core_ok = all(capabilities.get(name, False) for name in CORE_CAPABILITIES)
+    optional_ok = all(capabilities.get(name, False) for name in OPTIONAL_CAPABILITIES)
+    compatibility = "full" if core_ok else "unsupported"
+    if not core_ok:
+        return result(
+            False,
+            capability_error,
+            hook_strategy=hook_strategy,
+            compatibility=compatibility,
+            capabilities=capabilities,
+        )
 
-    return result(True, "supported")
+    return result(
+        True,
+        "supported",
+        hook_strategy=hook_strategy,
+        compatibility=compatibility,
+        capabilities=capabilities,
+    )
 
 
 def _read_version(path: Path) -> tuple[str, str | None, str]:
@@ -134,20 +173,47 @@ def _parse_version(version: str) -> tuple[int, int, int] | None:
     return tuple(int(part) for part in match.groups())
 
 
-def _has_supported_handler_anchor(contents: str) -> tuple[bool, str]:
+def _select_hook_strategy(version: str) -> str:
+    parsed = _parse_version(version)
+    if parsed is None:
+        return ""
+    if parsed[0] == 0 and parsed >= (0, 13, 0):
+        return "gateway_run_013_plus"
+    return "legacy_gateway_run"
+
+
+def _detect_capabilities(contents: str) -> tuple[dict[str, bool], str]:
     try:
         module = ast.parse(contents)
     except SyntaxError as exc:
-        return False, f"gateway/run.py could not be parsed: {exc.__class__.__name__}"
+        return {}, f"gateway/run.py could not be parsed: {exc.__class__.__name__}"
 
     handler = _find_supported_handler(module)
     if handler is None:
-        return False, f"gateway/run.py missing async anchor function: {HANDLER_NAME}"
+        completion_return = None
+    else:
+        completion_return = _find_completion_return(handler)
 
-    if not _function_emits_agent_end(handler):
-        return False, 'gateway/run.py missing handler anchor: hooks.emit("agent:end", ...)'
+    capabilities = {
+        "message_handler": handler is not None,
+        "completion_return": completion_return is not None,
+        "run_agent": _find_run_agent(module) is not None,
+        "tool_callback": _find_callback(module, "progress_callback") is not None,
+        "answer_delta_callback": _find_callback(module, "_stream_delta_cb") is not None,
+        "thinking_delta_callback": _find_callback(module, "_interim_assistant_cb") is not None,
+        "cron_delivery": _find_function(module, "_deliver_result") is not None,
+        "reply_context": "reply_to_message_id" in contents
+        or "_reply_anchor_for_event" in contents,
+        "attachment_delivery": "extract_media" in contents
+        or "_deliver_media_from_response" in contents,
+    }
 
-    return True, "supported"
+    if not capabilities["message_handler"]:
+        return capabilities, f"gateway/run.py missing async anchor function: {HANDLER_NAME}"
+    if not capabilities["completion_return"]:
+        return capabilities, 'gateway/run.py missing handler anchor: hooks.emit("agent:end", ...)'
+
+    return capabilities, "supported"
 
 
 def _find_supported_handler(module: ast.Module) -> ast.AsyncFunctionDef | None:
@@ -172,19 +238,59 @@ def _find_direct_class_handler(class_node: ast.ClassDef) -> ast.AsyncFunctionDef
     )
 
 
-def _function_emits_agent_end(handler: ast.AsyncFunctionDef) -> bool:
-    visitor = _HandlerBodyHookVisitor()
+def _find_completion_return(handler: ast.AsyncFunctionDef) -> ast.Call | None:
+    visitor = _HandlerCompletionVisitor()
     visitor.visit_statements(handler.body)
-    return visitor.found
+    return visitor.agent_end_node
 
 
-class _HandlerBodyHookVisitor(ast.NodeVisitor):
+def _find_run_agent(module: ast.Module) -> ast.AsyncFunctionDef | ast.FunctionDef | None:
+    return _find_function(module, "_run_agent")
+
+
+def _find_function(
+    module: ast.Module, name: str
+) -> ast.AsyncFunctionDef | ast.FunctionDef | None:
+    for node in module.body:
+        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) and node.name == name:
+            return node
+        if isinstance(node, ast.ClassDef):
+            method = _find_direct_class_function(node, name)
+            if method is not None:
+                return method
+    return None
+
+
+def _find_direct_class_function(
+    class_node: ast.ClassDef, name: str
+) -> ast.AsyncFunctionDef | ast.FunctionDef | None:
+    return next(
+        (
+            node
+            for node in class_node.body
+            if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+            and node.name == name
+        ),
+        None,
+    )
+
+
+def _find_callback(
+    module: ast.Module, name: str
+) -> ast.AsyncFunctionDef | ast.FunctionDef | None:
+    for node in ast.walk(module):
+        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) and node.name == name:
+            return node
+    return None
+
+
+class _HandlerCompletionVisitor(ast.NodeVisitor):
     def __init__(self) -> None:
-        self.found = False
+        self.agent_end_node: ast.Call | None = None
 
     def visit_statements(self, statements: list[ast.stmt]) -> None:
         for statement in statements:
-            if self.found:
+            if self.agent_end_node is not None:
                 return
             self.visit(statement)
             if isinstance(statement, (ast.Return, ast.Raise)):
@@ -192,7 +298,7 @@ class _HandlerBodyHookVisitor(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> None:
         if _is_agent_end_emit_call(node):
-            self.found = True
+            self.agent_end_node = node
             return
         self.generic_visit(node)
 

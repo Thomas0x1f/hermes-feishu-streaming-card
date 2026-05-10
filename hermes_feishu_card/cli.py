@@ -277,18 +277,23 @@ def _run_doctor(args: argparse.Namespace) -> int:
 def _format_hermes_detection(detection: HermesDetection) -> str:
     status = "supported" if detection.supported else "unsupported"
     run_py_exists = "yes" if detection.run_py_exists else "no"
-    return "\n".join(
-        [
-            f"hermes: {status}",
-            f"hermes_root: {detection.root}",
-            f"run_py: {detection.run_py}",
-            f"run_py_exists: {run_py_exists}",
-            f"version_source: {detection.version_source}",
-            f"version: {detection.version}",
-            f"minimum_supported_version: {detection.minimum_version}",
-            f"reason: {detection.reason}",
-        ]
-    )
+    lines = [
+        f"hermes: {status}",
+        f"hermes_root: {detection.root}",
+        f"run_py: {detection.run_py}",
+        f"run_py_exists: {run_py_exists}",
+        f"version_source: {detection.version_source}",
+        f"version: {detection.version}",
+        f"minimum_supported_version: {detection.minimum_version}",
+        f"hook_strategy: {detection.hook_strategy}",
+        f"compatibility: {detection.compatibility}",
+        "anchors:",
+    ]
+    for capability, found in detection.capabilities.items():
+        anchor_status = "found" if found else "missing"
+        lines.append(f"  {capability}: {anchor_status}")
+    lines.append(f"reason: {detection.reason}")
+    return "\n".join(lines)
 
 
 def _print_hermes_streaming_guidance(hermes_root: Path) -> None:
