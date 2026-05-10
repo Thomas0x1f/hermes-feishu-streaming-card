@@ -6,6 +6,7 @@ from hashlib import sha256
 import json
 import math
 import os
+from pathlib import Path
 import time
 from typing import Any
 from urllib import request
@@ -245,7 +246,7 @@ def build_event(event_name: str, local_vars: dict[str, Any]) -> dict[str, Any] |
         "platform": _platform_name(local_vars, source_obj),
         "sequence": sequence,
         "created_at": created_at,
-        "data": _event_data(event_name, local_vars, message_obj),
+        "data": _event_data(event_name, local_vars, source_obj, message_obj),
     }
     if is_terminal_event:
         if (
@@ -262,7 +263,7 @@ def build_event(event_name: str, local_vars: dict[str, Any]) -> dict[str, Any] |
 
 
 def _event_data(
-    event_name: str, local_vars: dict[str, Any], message_obj: Any
+    event_name: str, local_vars: dict[str, Any], source_obj: Any, message_obj: Any
 ) -> dict[str, Any]:
     if event_name in {"thinking.delta", "answer.delta"}:
         text = _first_string(local_vars, ("text", "delta", "delta_text", "content"))
@@ -293,13 +294,46 @@ def _event_data(
             ("chat_type", "chat_type"),
             ("tenant_key", "tenant_key"),
             ("agent_id", "agent_id"),
-            ("profile_id", "profile_id"),
         ):
             value = _first_string(local_vars, (source_key,)) or _first_attr_string(message_obj, (source_key,))
             if value:
                 data[data_key] = value
-        return data if data else {}
+        profile_id, profile_source = _profile_identity(local_vars, source_obj, message_obj)
+        data["profile_id"] = profile_id
+        data["profile_source"] = profile_source
+        return data
     return {}
+
+
+def _profile_identity(local_vars: dict[str, Any], source_obj: Any, message_obj: Any) -> tuple[str, str]:
+    env_profile = os.environ.get("HERMES_FEISHU_CARD_PROFILE_ID", "").strip()
+    if env_profile:
+        return env_profile, "env"
+    direct = (
+        _first_string(local_vars, ("profile_id", "hermes_profile", "profile"))
+        or _first_attr_string(source_obj, ("profile_id", "hermes_profile", "profile"))
+        or _first_attr_string(message_obj, ("profile_id", "hermes_profile", "profile"))
+    )
+    if direct:
+        return direct, "locals"
+    hermes_home = os.environ.get("HERMES_HOME", "").strip()
+    profile = _profile_from_path(hermes_home)
+    if profile:
+        return profile, "hermes_home"
+    return "default", "fallback_default"
+
+
+def _profile_from_path(path: str) -> str | None:
+    if not path:
+        return None
+    parts = Path(path).expanduser().parts
+    if "profiles" in parts:
+        index = parts.index("profiles")
+        if index + 1 < len(parts):
+            candidate = parts[index + 1].strip()
+            if candidate:
+                return candidate
+    return None
 
 
 def _first_string(source: dict[str, Any], names: tuple[str, ...]) -> str | None:

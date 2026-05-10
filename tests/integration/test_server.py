@@ -113,6 +113,31 @@ async def test_health_reports_healthy_status_and_active_sessions(client):
     }
 
 
+async def test_health_reports_profile_diagnostics_for_profile_events():
+    feishu_client = FakeFeishuClient()
+    app = create_app(feishu_client)
+    server = TestServer(app)
+    test_client = TestClient(server)
+    await test_client.start_server()
+    try:
+        response = await test_client.post(
+            "/events",
+            json=event_payload(
+                "message.started",
+                0,
+                {"profile_id": "work", "profile_source": "env"},
+            ),
+        )
+        assert response.status == 200
+        health = await test_client.get("/health")
+        body = await health.json()
+    finally:
+        await test_client.close()
+
+    assert body["profile_diagnostics"]["work"]["events"] == 1
+    assert body["profile_diagnostics"]["work"]["last_profile_source"] == "env"
+
+
 async def test_event_lifecycle_sends_then_updates_final_card(client):
     test_client, feishu_client = client
 

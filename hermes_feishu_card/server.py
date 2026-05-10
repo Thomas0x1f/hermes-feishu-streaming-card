@@ -20,6 +20,7 @@ FEISHU_MESSAGE_IDS_KEY = web.AppKey("feishu_message_ids", dict)
 MESSAGE_BOT_IDS_KEY = web.AppKey("message_bot_ids", dict)
 BOT_ROUTER_KEY = web.AppKey("bot_router", Any)
 ROUTING_DIAGNOSTICS_KEY = web.AppKey("routing_diagnostics", dict)
+PROFILE_DIAGNOSTICS_KEY = web.AppKey("profile_diagnostics", dict)
 PROCESS_TOKEN_KEY = web.AppKey("process_token", str)
 METRICS_KEY = web.AppKey("metrics", SidecarMetrics)
 LAST_UPDATE_AT_KEY = web.AppKey("last_update_at", dict)
@@ -56,6 +57,7 @@ def create_app(
         "last_terminal_event": {},
     }
     app[ROUTING_DIAGNOSTICS_KEY] = _initial_routing_diagnostics(feishu_client)
+    app[PROFILE_DIAGNOSTICS_KEY] = {}
     footer_fields = card_config.get("footer_fields")
     app[FOOTER_FIELDS_KEY] = list(footer_fields) if isinstance(footer_fields, list) else None
     title = card_config.get("title")
@@ -85,6 +87,7 @@ async def _health(request: web.Request) -> web.Response:
         },
         "diagnostics": request.app[DIAGNOSTICS_KEY],
         "routing": request.app[ROUTING_DIAGNOSTICS_KEY],
+        "profile_diagnostics": request.app[PROFILE_DIAGNOSTICS_KEY],
     }
     process_token = request.app[PROCESS_TOKEN_KEY]
     if process_token:
@@ -155,6 +158,7 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
     feishu_message_ids: Dict[str, str] = request.app[FEISHU_MESSAGE_IDS_KEY]
     message_bot_ids: Dict[str, str] = request.app[MESSAGE_BOT_IDS_KEY]
     last_update_at: Dict[str, float] = request.app[LAST_UPDATE_AT_KEY]
+    _record_profile_diagnostics(request.app, event)
     session = sessions.get(_session_key(event))
 
     if event.event == "message.started":
@@ -245,6 +249,19 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
     else:
         metrics.events_ignored += 1
     return web.json_response({"ok": True, "applied": applied}), post_lock_task
+
+
+def _record_profile_diagnostics(app: web.Application, event: SidecarEvent) -> None:
+    data = event.data if isinstance(event.data, dict) else {}
+    profile_id = str(data.get("profile_id") or "default")
+    source = str(data.get("profile_source") or "")
+    diagnostics = app[PROFILE_DIAGNOSTICS_KEY].setdefault(
+        profile_id,
+        {"events": 0, "last_profile_source": "", "last_message_id": ""},
+    )
+    diagnostics["events"] += 1
+    diagnostics["last_profile_source"] = source
+    diagnostics["last_message_id"] = event.message_id
 
 
 def _render_session_card(request: web.Request, session: CardSession) -> dict[str, Any]:

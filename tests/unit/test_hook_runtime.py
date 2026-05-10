@@ -86,7 +86,10 @@ def test_build_event_extracts_direct_fields():
     assert payload["conversation_id"] == "conv_direct"
     assert payload["sequence"] == 0
     assert payload["platform"] == "feishu"
-    assert payload["data"] == {}
+    assert payload["data"] == {
+        "profile_id": "default",
+        "profile_source": "fallback_default",
+    }
 
 
 def test_build_event_extracts_gateway_source_object():
@@ -859,3 +862,27 @@ def test_build_event_includes_routing_context_from_local_vars():
     assert payload["data"]["tenant_key"] == "tenant_a"
     assert payload["data"]["agent_id"] == "reserved-agent"
     assert payload["data"]["profile_id"] == "reserved-profile"
+
+
+def test_build_event_profile_id_prefers_env(monkeypatch):
+    monkeypatch.setenv("HERMES_FEISHU_CARD_PROFILE_ID", "work")
+
+    payload = hook_runtime.build_event(
+        "message.started",
+        {"chat_id": "oc_1", "message_id": "m_1", "profile_id": "default"},
+    )
+
+    assert payload["data"]["profile_id"] == "work"
+    assert payload["data"]["profile_source"] == "env"
+
+
+def test_build_event_profile_id_uses_hermes_home(monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", "/home/user/.hermes/profiles/sales")
+
+    payload = hook_runtime.build_event(
+        "message.started",
+        {"chat_id": "oc_1", "message_id": "m_1"},
+    )
+
+    assert payload["data"]["profile_id"] == "sales"
+    assert payload["data"]["profile_source"] == "hermes_home"
