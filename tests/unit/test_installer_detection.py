@@ -33,7 +33,7 @@ def test_detect_legacy_strategy_for_v2026_4_23_fixture():
 
     assert detection.supported is True
     assert detection.hook_strategy == "legacy_gateway_run"
-    assert detection.compatibility == "full"
+    assert detection.compatibility == "partial"
     assert detection.capabilities["message_handler"] is True
 
 
@@ -66,6 +66,12 @@ class GatewayRunner:
 
 def _deliver_result(job: dict, content: str, adapters=None, loop=None):
     return None
+
+def _reply_anchor_for_event(event):
+    return getattr(event, "reply_to_message_id", None)
+
+def _deliver_media_from_response(response):
+    extract_media(response)
 ''',
         encoding="utf-8",
     )
@@ -76,6 +82,32 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None):
     assert detection.hook_strategy == "gateway_run_013_plus"
     assert detection.compatibility == "full"
     assert detection.capabilities["cron_delivery"] is True
+
+
+def test_detect_013_plus_strategy_reports_partial_when_optional_missing(tmp_path):
+    root = tmp_path / "hermes"
+    run_py = root / "gateway" / "run.py"
+    run_py.parent.mkdir(parents=True)
+    (root / "VERSION").write_text("v0.13.0\n", encoding="utf-8")
+    run_py.write_text(
+        '''
+class GatewayRunner:
+    async def _handle_message_with_agent(self, event, source, _quick_key, run_generation):
+        response = "ok"
+        await self.hooks.emit("agent:end", {"response": response})
+        return response
+''',
+        encoding="utf-8",
+    )
+
+    detection = detect_hermes(root)
+
+    assert detection.supported is True
+    assert detection.hook_strategy == "gateway_run_013_plus"
+    assert detection.compatibility == "partial"
+    assert detection.capabilities["run_agent"] is False
+    assert detection.capabilities["tool_callback"] is False
+    assert detection.capabilities["cron_delivery"] is False
 
 
 def test_detect_hermes_supports_git_tag_when_version_file_missing(tmp_path):

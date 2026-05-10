@@ -93,7 +93,12 @@ def detect_hermes(root: str | Path) -> HermesDetection:
     capabilities, capability_error = _detect_capabilities(contents)
     core_ok = all(capabilities.get(name, False) for name in CORE_CAPABILITIES)
     optional_ok = all(capabilities.get(name, False) for name in OPTIONAL_CAPABILITIES)
-    compatibility = "full" if core_ok else "unsupported"
+    if core_ok and optional_ok:
+        compatibility = "full"
+    elif core_ok:
+        compatibility = "partial"
+    else:
+        compatibility = "unsupported"
     if not core_ok:
         return result(
             False,
