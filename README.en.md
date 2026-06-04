@@ -36,7 +36,46 @@ Streaming card messages for the Feishu/Lark platform in Hermes Agent Gateway. V3
 - **issue #23 fixed**: multi Hermes profile + multi Feishu bot deployments explicitly identify profile ids and route to the matching bot.
 - **Multi-profile / multi-bot polish**: per-bot/profile title, cron final cards, attachment summaries + native media delivery, and reply card context.
 
-## Quick Install
+## One-Line Install
+
+macOS / Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/baileyh8/hermes-feishu-streaming-card/main/install.sh | bash
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/baileyh8/hermes-feishu-streaming-card/main/install.ps1 | iex
+```
+
+The installer installs or upgrades the package, reads or prompts for Feishu credentials, writes `~/.hermes/.env`, and runs the integrated setup command:
+
+```bash
+python3 -m hermes_feishu_card.cli setup --hermes-dir ~/.hermes/hermes-agent --config ~/.hermes/config.yaml --yes
+```
+
+After installation:
+
+```bash
+python3 -m hermes_feishu_card.cli status --config ~/.hermes/config.yaml
+```
+
+Common environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `HFC_VERSION` | `latest` | Version to install, such as `v3.5.1` or `main` |
+| `HERMES_DIR` | `~/.hermes/hermes-agent` | Hermes Agent Gateway directory |
+| `HFC_CONFIG` | `~/.hermes/config.yaml` | sidecar config path |
+| `HFC_ENV_FILE` | `.env` next to `HFC_CONFIG` | Feishu credential file |
+| `HFC_SKIP_START` | `0` | Set to `1` to install the hook without starting sidecar |
+| `HFC_NO_PROMPT` | `0` | Set to `1` for non-interactive automation |
+
+GitHub Releases also include `hermes-feishu-card-<version>-macos.tar.gz`, `hermes-feishu-card-<version>-linux.tar.gz`, and `hermes-feishu-card-<version>-windows.zip`. Download one, extract it, and run `install.sh` or `install.ps1`. See [README-install.md](README-install.md) for package details.
+
+## Manual Install
 
 ```bash
 git clone https://github.com/baileyh8/hermes-feishu-streaming-card.git

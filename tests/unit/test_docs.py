@@ -91,6 +91,36 @@ def test_english_readme_documents_v340_hermes_compatibility():
     assert "reply card context" in readme
 
 
+def test_readme_documents_one_line_install_and_release_packages():
+    readme = read_doc("README.md")
+    english_readme = read_doc("README.en.md")
+    install_doc = read_doc("README-install.md")
+    workflow = read_doc(".github/workflows/release-assets.yml")
+
+    assert "curl -fsSL https://raw.githubusercontent.com/baileyh8/hermes-feishu-streaming-card/main/install.sh | bash" in readme
+    assert "irm https://raw.githubusercontent.com/baileyh8/hermes-feishu-streaming-card/main/install.ps1 | iex" in readme
+    assert "README-install.md" in readme
+    assert "hermes-feishu-card-<version>-macos.tar.gz" in readme
+    assert "hermes-feishu-card-<version>-linux.tar.gz" in readme
+    assert "hermes-feishu-card-<version>-windows.zip" in readme
+
+    assert "One-Line Install" in english_readme
+    assert "README-install.md" in english_readme
+    assert "bash install.sh" in install_doc
+    assert "install.ps1" in install_doc
+    assert "HFC_VERSION" in install_doc
+
+    assert (ROOT / "install.sh").exists()
+    assert (ROOT / "install.ps1").exists()
+    assert (ROOT / "README-install.md").exists()
+    assert (ROOT / ".github/workflows/release-assets.yml").exists()
+    assert "gh release upload" in workflow
+    assert 'NAME="hermes-feishu-card-${TAG}"' in workflow
+    assert "${NAME}-macos.tar.gz" in workflow
+    assert "${NAME}-linux.tar.gz" in workflow
+    assert "${NAME}-windows.zip" in workflow
+
+
 def test_english_readme_and_docs_are_linked():
     readme = read_doc("README.md")
     english_readme = read_doc("README.en.md")
