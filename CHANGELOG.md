@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.2.0.html).
 
+## V3.5.2 — 2026-06-04
+
+### Added
+- Cross-platform installers: `install.sh` for macOS/Linux and `install.ps1` for Windows PowerShell.
+- One-line install entry points in the Chinese and English README homepages.
+- GitHub Release asset packaging workflow for macOS/Linux tarballs, Windows zip packages, and SHA-256 checksums.
+- `README-install.md` and `docs/release-notes-v3.5.2.md` for packaged installer usage and release publishing.
+- V3.6.0 roadmap documentation focused on repair diagnostics, media/file delivery, multi-profile operations, and release/E2E matrices.
+
+### Fixed
+- `install.sh` no longer sources the whole `.env` file. It now reads only Feishu/sidecar-related variables, so unrelated values with spaces such as browser paths do not break macOS installs.
+- `install.sh` detects uv/PEP 668 `externally-managed-environment` Python errors and retries pip installation with `--break-system-packages`, keeping the failure mode explicit while allowing one-line installs on uv-managed macOS Python.
+
+### CI
+- Added a Windows GitHub Actions job that parses `install.ps1` with PowerShell AST validation.
+- Added installer regression tests for safe `.env` parsing and externally managed Python retry behavior.
+- Added documentation tests for one-line install commands and Release asset workflow coverage.
+
 ## V3.5.1 — 2026-06-01
 
 ### Fixed

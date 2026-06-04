@@ -2,7 +2,7 @@
 
 [中文](release-readiness.md) | [English](release-readiness.en.md)
 
-Current package version: `3.5.1`. This release keeps the sidecar-only mainline and builds on the V3.5.0 Feishu card button interaction loop with fixes for streaming update ordering/backlog, queued follow-up native text spillover, Feishu JSON 2.0 button rendering, and `.env` credential loading during manual sidecar restarts.
+Current package version: `3.5.2`. This release keeps the sidecar-only mainline and builds on V3.5.1 streaming stability with cross-platform one-line installers, Release packages, safer macOS `.env` parsing, uv/PEP 668 Python install handling, and Windows installer CI parser validation.
 
 ## Ready
 
@@ -20,7 +20,10 @@ Current package version: `3.5.1`. This release keeps the sidecar-only mainline a
 - Thinking/interim assistant messages use complete `append_block` chunks to avoid delta accumulation truncation or missing text.
 - Runtime event sends, sidecar updates, and terminal PATCH calls are ordered/coalesced for the same message id.
 - `load_config()` reads a `.env` file next to the selected config file while preserving real process environment variables as the highest-precedence source.
-- GitHub Actions Python 3.9 / 3.12 test matrix for PRs and pushes.
+- `install.sh` imports only Feishu/sidecar variables from `.env`, avoiding execution of unrelated values such as paths with spaces.
+- `install.sh` retries pip with `--break-system-packages` when uv/PEP 668 reports an externally managed Python environment.
+- GitHub Actions Python 3.9 / 3.12 test matrix for PRs and pushes, plus Windows parser validation for `install.ps1`.
+- Release assets workflow packages macOS/Linux/Windows installers and checksums for tags.
 
 ## Required Pre-release Checks
 

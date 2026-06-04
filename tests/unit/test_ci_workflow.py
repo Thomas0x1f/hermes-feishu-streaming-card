@@ -16,3 +16,7 @@ def test_github_actions_runs_full_pytest_matrix():
     assert 'python-version: ["3.9", "3.12"]' in text
     assert 'python -m pip install -e ".[test]"' in text
     assert "python -m pytest -q" in text
+    assert "powershell-installer:" in text
+    assert "runs-on: windows-latest" in text
+    assert "ParseFile" in text
+    assert "install.ps1" in text

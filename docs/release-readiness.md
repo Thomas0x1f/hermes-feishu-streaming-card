@@ -2,7 +2,7 @@
 
 [中文](release-readiness.md) | [English](release-readiness.en.md)
 
-当前包版本为 `3.5.1`。这一版继续保持 sidecar-only 主线，在 V3.5.0 飞书卡片按钮交互闭环基础上，重点修复流式更新乱序/积压、queued follow-up 原生消息溢出、飞书 JSON 2.0 按钮渲染和手动重启 sidecar 时 `.env` 凭据未加载的问题。
+当前包版本为 `3.5.2`。这一版继续保持 sidecar-only 主线，在 V3.5.1 流式稳定性基础上，重点补齐跨平台一行安装、Release 安装包、macOS `.env` 安全解析、uv/PEP 668 Python 安装适配和 Windows installer CI 解析验证。
 
 ## 已具备
 
@@ -20,7 +20,10 @@
 - thinking/interim assistant 使用 `append_block` 完整块追加，避免 delta 累积导致漏字或截断。
 - 同一 message id 的 runtime event 发送、sidecar 更新和终态 PATCH 均有排序/合并保护。
 - `load_config()` 会读取 config 同目录 `.env`，真实环境变量仍保持最高优先级。
-- GitHub Actions 会在 PR/push 上运行 Python 3.9/3.12 的测试矩阵。
+- `install.sh` 白名单读取 `.env` 中的飞书/sidecar 变量，不会执行带空格路径等无关配置。
+- `install.sh` 会在 uv/PEP 668 externally managed Python 场景下重试 `--break-system-packages`。
+- GitHub Actions 会在 PR/push 上运行 Python 3.9/3.12 的测试矩阵，并在 Windows 上解析验证 `install.ps1`。
+- Release assets workflow 会为 tag 生成 macOS/Linux/Windows 安装包和 checksum。
 
 ## 发布前必须验证
 

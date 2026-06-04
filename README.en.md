@@ -1,21 +1,62 @@
-# Hermes Feishu Streaming Card Plugin V3.5.1
+# Hermes Feishu Streaming Card Plugin
 
 [中文](README.md) | [English](README.en.md)
 
+<p align="center">
+  <a href="https://github.com/baileyh8/hermes-feishu-streaming-card/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/baileyh8/hermes-feishu-streaming-card?style=for-the-badge&logo=github&label=Stars&color=2f80ed"></a>
+  <a href="https://github.com/baileyh8/hermes-feishu-streaming-card/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/baileyh8/hermes-feishu-streaming-card?style=for-the-badge&logo=githubactions&label=Release&color=22c55e"></a>
+  <a href="https://github.com/baileyh8/hermes-feishu-streaming-card/actions/workflows/tests.yml"><img alt="Tests" src="https://img.shields.io/github/actions/workflow/status/baileyh8/hermes-feishu-streaming-card/tests.yml?branch=main&style=for-the-badge&label=Tests&logo=githubactions"></a>
+  <img alt="Python 3.9+" src="https://img.shields.io/badge/Python-3.9%2B-3776AB?style=for-the-badge&logo=python&logoColor=white">
+  <img alt="Feishu/Lark" src="https://img.shields.io/badge/Feishu%20%2F%20Lark-Streaming%20Cards-00D6B4?style=for-the-badge">
+  <img alt="Sidecar only" src="https://img.shields.io/badge/Runtime-Sidecar--only-7C3AED?style=for-the-badge">
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/baileyh8/hermes-feishu-streaming-card?style=for-the-badge&color=64748b"></a>
+</p>
+
 ![Hermes Feishu Streaming Card cover](docs/assets/readme-cover.png)
 
-Streaming card messages for the Feishu/Lark platform in Hermes Agent Gateway. V3.5.1 keeps the **sidecar-only** architecture and focuses on making real Feishu cards interactive, ordered, and reliably completed across Hermes 0.13.0+/0.14.0 and `v2026.5.16+`, while preserving older Hermes compatibility.
+Hermes Feishu Streaming Card turns Hermes Agent Gateway replies in Feishu/Lark into one continuously updated interactive card. Reasoning, tool calls, final answers, approvals, choices, and runtime stats stay in one readable card instead of spilling into scattered native text messages.
+
+It targets the real pain points of using Hermes inside Feishu: missing or out-of-order streaming text, long tables/code blocks rendered as raw Markdown, invisible tool progress, manual approval replies, sidecar troubleshooting, multi-bot/profile routing, and uncertain hook compatibility after Hermes upgrades.
 
 ![Real Feishu streaming card screenshot](docs/assets/feishu-weather-card.png)
 
-## V3.5.1 Patch Highlights
+## Project Highlights
+
+- **Streaming card UX**: `thinking.delta`, `answer.delta`, `tool.updated`, and terminal events update one Feishu card.
+- **In-card interactions**: Hermes approval and clarify choices become Feishu buttons; clicks continue the original task.
+- **Long content protection**: Markdown tables and fenced code blocks split on structure boundaries instead of raw character cuts.
+- **Multi-bot / multi-profile**: bot registry, chat bindings, profile-aware session keys, titles, and routing diagnostics.
+- **sidecar-only runtime**: Hermes hook stays fail-open while Feishu delivery, session state, retries, and health checks live in the sidecar.
+- **Install and release friendly**: one-line installers, Release packages, `doctor`, `start/status/stop`, and safe restore/uninstall flows.
+
+## Pain Points Solved
+
+| Pain point | Project capability |
+|---|---|
+| Feishu only shows a final wall of text | Reasoning, answer, tool status, and runtime footer stream into one card |
+| Tool-heavy runs lose text, reorder chunks, or spill native gray messages | per-message ordering, PATCH coalescing, terminal priority, and native resend suppression |
+| Approval or choice prompts require manual text replies | Feishu buttons record the choice and continue the Hermes task |
+| Long tables/code blocks render as raw Markdown | Markdown-aware table/code splitting with repeated headers and complete fences |
+| Multi-bot, group, and profile routing is hard to inspect | `bindings.chats`, profile-aware sessions, and `/health.routing` diagnostics |
+| Hook or sidecar failures are hard to debug | `doctor`, `/health` metrics, fail-closed installer, restore/uninstall |
+
+## V3.5.2 Install Patch
+
+- **One-line install**: README now exposes macOS/Linux and Windows PowerShell install commands directly on the homepage.
+- **Release packages**: GitHub Actions can package macOS/Linux tarballs, Windows zip assets, and SHA-256 checksums for tagged releases.
+- **Safer macOS installs**: `install.sh` imports only Feishu/sidecar variables from `.env`, so unrelated values with spaces such as browser paths do not break installation.
+- **uv/PEP 668 support**: externally managed Python errors are detected and retried with `--break-system-packages`.
+- **Windows installer validation**: CI parses `install.ps1` on `windows-latest`.
+- **Roadmap documented**: V3.6.0 planning is captured in [docs/roadmap-v3.6.0.md](docs/roadmap-v3.6.0.md).
+
+## V3.5.x Runtime Baseline
 
 - **End-to-end ordering for one card**: runtime sends, sidecar updates, and terminal Feishu PATCH calls are ordered/coalesced by message id, reducing thinking/answer truncation under backlog.
 - **Faster streaming updates**: non-terminal events ACK quickly and card updates are coalesced; terminal events remain awaited so completed cards land before the task finishes.
 - **Feishu JSON 2.0 buttons fixed**: interaction buttons now use direct `button` elements with `behaviors.callback`, avoiding PATCH failures in active cards.
 - **Queued follow-up native text suppression**: queued completions emit `message.completed` into the card path and suppress native resend once the Feishu card is delivered.
 - **`.env` credential fallback**: `load_config()` reads `.env` next to the selected config file, so manual sidecar restarts do not silently enter no-op mode when credentials live beside Hermes config.
-- **Chinese README homepage reorganized**: the homepage now leads with user scenarios, V3.5.x value, installation, troubleshooting, and release history.
+- **Chinese README homepage reorganized**: the homepage leads with user scenarios, V3.5.x value, installation, troubleshooting, and release history.
 
 ## V3.5.0 Feature Highlights
 
@@ -66,7 +107,7 @@ Common environment variables:
 
 | Variable | Default | Description |
 |---|---|---|
-| `HFC_VERSION` | `latest` | Version to install, such as `v3.5.1` or `main` |
+| `HFC_VERSION` | `latest` | Version to install, such as `v3.5.2` or `main` |
 | `HERMES_DIR` | `~/.hermes/hermes-agent` | Hermes Agent Gateway directory |
 | `HFC_CONFIG` | `~/.hermes/config.yaml` | sidecar config path |
 | `HFC_ENV_FILE` | `.env` next to `HFC_CONFIG` | Feishu credential file |
@@ -105,7 +146,7 @@ python3 -m hermes_feishu_card.cli setup --hermes-dir ~/.hermes/hermes-agent --ye
 
 ## Upgrading
 
-Upgrading from V3.2.x/V3.3.0/V3.4.x/V3.5.0 to V3.5.1 is backward-compatible. **Single-profile configs need no changes.** For Hermes 0.13.0+/0.14.0 or `v2026.5.16+`, you must run `install --hermes-dir ... --yes` again so the installer writes the `gateway_run_013_plus` hook strategy; Hermes `v2026.4.x` continues to use `legacy_gateway_run`.
+Upgrading from V3.2.x/V3.3.0/V3.4.x/V3.5.x to V3.5.2 is backward-compatible. **Single-profile configs need no changes.** For Hermes 0.13.0+/0.14.0 or `v2026.5.16+`, you must run `install --hermes-dir ... --yes` again so the installer writes the `gateway_run_013_plus` hook strategy; Hermes `v2026.4.x` continues to use `legacy_gateway_run`.
 
 ```bash
 # 1. Stop sidecar
@@ -113,12 +154,12 @@ python3 -m hermes_feishu_card.cli stop --config ~/.hermes_feishu_card/config.yam
 
 # 2. Update code
 cd /path/to/hermes-feishu-streaming-card
-git checkout v3.5.1 && pip install -e ".[test]" --upgrade
+git checkout v3.5.2 && pip install -e ".[test]" --upgrade
 
 # 3. Diagnose Hermes hook strategy and anchors
 python3 -m hermes_feishu_card.cli doctor --config ~/.hermes_feishu_card/config.yaml --hermes-dir ~/.hermes/hermes-agent
 
-# 4. Reinstall hook (V3.5.1 selects hook_strategy by Hermes version)
+# 4. Reinstall hook (V3.5.2 selects hook_strategy by Hermes version)
 python3 -m hermes_feishu_card.cli install --hermes-dir ~/.hermes/hermes-agent --yes
 
 # 5. Start sidecar
@@ -277,6 +318,7 @@ The Hermes hook converts `message.started` / `thinking.delta` / `answer.delta` /
 
 | Version | Date | Highlights |
 |---------|------|-----------|
+| [v3.5.2](https://github.com/baileyh8/hermes-feishu-streaming-card/releases/tag/v3.5.2) | 2026-06 | Cross-platform one-line installers, Release packages, safer macOS `.env` parsing, uv/PEP 668 Python install handling, Windows installer CI parser validation |
 | [v3.5.1](https://github.com/baileyh8/hermes-feishu-streaming-card/releases/tag/v3.5.1) | 2026-06 | Streaming update ordering/coalescing, Feishu JSON 2.0 button fix, queued follow-up suppression, `.env` credential fallback, Chinese README refresh |
 | [v3.5.0](https://github.com/baileyh8/hermes-feishu-streaming-card/releases/tag/v3.5.0) | 2026-06 | Feishu button interaction loop, issue #41, PR #42, long table/code splitting, thinking truncation fix |
 | [v3.4.3](https://github.com/baileyh8/hermes-feishu-streaming-card/releases/tag/v3.4.3) | 2026-05 | Fixes issue #39, adds structure-aware Markdown splitting, and verifies Hermes v0.14.0/v2026.5.16+ support |
