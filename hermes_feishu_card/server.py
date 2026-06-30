@@ -862,7 +862,7 @@ def _safe_non_negative_int(value: Any, default: int) -> int:
 def _safe_bool(value: Any, default: bool) -> bool:
     if isinstance(value, bool):
         return value
-    if isinstance(value, int | float):
+    if isinstance(value, (int, float)):
         if value == 1:
             return True
         if value == 0:
