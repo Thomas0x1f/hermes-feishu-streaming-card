@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.2.0.html).
 
+## V3.8.1 — 2026-07-01
+
+See also: [docs/release-notes-v3.8.1.md](docs/release-notes-v3.8.1.md)
+
+### Added
+- Added read-only Feishu-side diagnostics commands: `/hfc help`, `/hfc status`, `/hfc doctor`, and `/hfc monitor`.
+- Added Gateway runtime knobs for high-frequency delta coalescing: `HERMES_FEISHU_CARD_DELTA_COALESCE_MS`, `HERMES_FEISHU_CARD_DELTA_COALESCE_CHARS`, and `HERMES_FEISHU_CARD_DELTA_COALESCE_MAX_PENDING`.
+
+### Fixed
+- issue #74: high-frequency `thinking.delta` / `answer.delta` bursts are now coalesced inside the Hermes Gateway process before reaching the sidecar, reducing stream-reader thread pressure that could trigger `Stream stale for 180s`.
+- Terminal events now flush pending coalesced deltas before rendering `message.completed` / `message.failed`, preventing missing tail content at finalization.
+- Existing installed hook blocks from V3.8.0 and earlier are still recognized during upgrade/remove even though V3.8.1 adds command handling to the hook.
+- `/messages/{message_id}/summary` now returns hashed diagnostic ids instead of raw `chat_id` or Feishu message ids.
+
+### Tests
+- Added regression coverage for DeepSeek/Qwen-style high-frequency delta coalescing, terminal pre-flush, `/hfc` command interception, patcher upgrades, sidecar command cards, and summary redaction.
+
 ## V3.8.0 — 2026-07-01
 
 See also: [docs/release-notes-v3.8.0.md](docs/release-notes-v3.8.0.md)

@@ -44,6 +44,17 @@ Since V3.8.0, the final answer stays in the primary content area while reasoning
 | Multi-bot, group, and profile routing is hard to inspect | `bindings.chats`, profile-aware sessions, and `/health.routing` diagnostics |
 | Hook or sidecar failures are hard to debug | `doctor`, runtime import checks, `/health` metrics, fail-closed installer, restore/uninstall |
 
+## V3.8.1 High-Frequency Streaming and In-Feishu Diagnostics Patch
+
+V3.8.1 fixes issue #74. With Hermes Agent 0.17.0+, thinking models, long context, and token-by-token high-frequency deltas, the hook now coalesces `thinking.delta` / `answer.delta` inside the Hermes Gateway process before sending fewer events to the sidecar. This reduces object allocation, lock contention, and HTTP scheduling pressure on the stream-reader thread, avoiding `Stream stale for 180s` failures caused by the plugin path.
+
+- **Gateway-side delta coalescing**: adds `HERMES_FEISHU_CARD_DELTA_COALESCE_MS`, `HERMES_FEISHU_CARD_DELTA_COALESCE_CHARS`, and `HERMES_FEISHU_CARD_DELTA_COALESCE_MAX_PENDING`; defaults work without extra config.
+- **Flush before terminal state**: `message.completed` / `message.failed` flush pending deltas for the same message before rendering the terminal card.
+- **Read-only commands inside Feishu**: `/hfc help`, `/hfc status`, `/hfc doctor`, and `/hfc monitor` reply with diagnostic cards and do not perform write actions.
+- **Safer diagnostics**: `/messages/{message_id}/summary` and `/hfc` cards expose hashed chat/message/thread context instead of raw ids.
+
+Full release notes: [docs/release-notes-v3.8.1.md](docs/release-notes-v3.8.1.md).
+
 ## V3.8.0 Card UX and Streaming Stability Upgrade
 
 V3.8.0 focuses on the real Feishu reading experience. The final answer remains in the main content area, reasoning / tool timeline data moves into the auxiliary area, and terminal rendering drains pending updates before writing the final card.
@@ -52,7 +63,7 @@ V3.8.0 focuses on the real Feishu reading experience. The final answer remains i
 - **Less duplication**: when the auxiliary timeline is visible, the footer does not render another "N tool calls" summary.
 - **More stable terminal state**: pending card updates are drained before the terminal card render so stale intermediate snapshots do not win the last PATCH.
 - **More accurate diagnostics**: `doctor` runs the Hermes runtime import check from the Hermes project root, avoiding false positives from the current repository path.
-- **Docker examples updated**: `docker-compose.example.yml` now pins the example install to `v3.8.0` while still using `install-docker.sh` inside existing Hermes containers.
+- **Docker examples updated**: V3.8.0 refreshed the Docker install examples while still using `install-docker.sh` inside existing Hermes containers.
 
 Full release notes: [docs/release-notes-v3.8.0.md](docs/release-notes-v3.8.0.md).
 
@@ -175,12 +186,20 @@ Common environment variables:
 
 | Variable | Default | Description |
 |---|---|---|
-| `HFC_VERSION` | `latest` | Version to install, such as `v3.8.0`, `v3.6.6`, or `main` |
+| `HFC_VERSION` | `latest` | Version to install, such as `v3.8.1`, `v3.6.6`, or `main` |
 | `HERMES_DIR` | `~/.hermes/hermes-agent` | Hermes Agent Gateway directory |
 | `HFC_CONFIG` | `~/.hermes/config.yaml` | sidecar config path |
 | `HFC_ENV_FILE` | `.env` next to `HFC_CONFIG` | Feishu credential file |
 | `HFC_SKIP_START` | `0` | Set to `1` to install the hook without starting sidecar |
 | `HFC_NO_PROMPT` | `0` | Set to `1` for non-interactive automation |
+
+High-frequency streaming knobs usually do not need manual tuning:
+
+| Variable | Default | Description |
+|---|---|---|
+| `HERMES_FEISHU_CARD_DELTA_COALESCE_MS` | `250` | Maximum Gateway-runtime wait before flushing coalesced deltas; set `0` to disable |
+| `HERMES_FEISHU_CARD_DELTA_COALESCE_CHARS` | `600` | Flush immediately once pending deltas reach this character count |
+| `HERMES_FEISHU_CARD_DELTA_COALESCE_MAX_PENDING` | `128` | Maximum pending delta sessions kept in Gateway runtime |
 
 ## Docker Containers
 
@@ -194,7 +213,7 @@ Example:
 ```bash
 export FEISHU_APP_ID=cli_xxx
 export FEISHU_APP_SECRET=xxx
-export HFC_VERSION=v3.8.0
+export HFC_VERSION=v3.8.1
 bash install-docker.sh
 ```
 
@@ -230,7 +249,7 @@ python3 -m hermes_feishu_card.cli setup --hermes-dir ~/.hermes/hermes-agent --ye
 
 ## Upgrading
 
-Upgrading from V3.2.x/V3.3.0/V3.4.x/V3.5.x/V3.6.x/V3.7.x to V3.8.0 is backward-compatible. **Single-profile configs need no changes.** If Hermes uses its own venv, rerun `setup` or `install` after upgrading so the package also lands in the Hermes runtime Python and the hook is refreshed. V3.8.0 also changes card rendering and runtime import diagnostics, so run `doctor --explain` once after upgrading.
+Upgrading from V3.2.x/V3.3.0/V3.4.x/V3.5.x/V3.6.x/V3.7.x/V3.8.0 to V3.8.1 is backward-compatible. **Single-profile configs need no changes.** If Hermes uses its own venv, rerun `setup` or `install` after upgrading so the package also lands in the Hermes runtime Python and the hook is refreshed. V3.8.1 adds Gateway-side delta coalescing and read-only `/hfc` diagnostics, so run `doctor --explain` once after upgrading and send `/hfc status` in Feishu to verify sidecar state.
 
 ```bash
 # 1. Stop sidecar
@@ -238,7 +257,7 @@ python3 -m hermes_feishu_card.cli stop --config ~/.hermes_feishu_card/config.yam
 
 # 2. Update code
 cd /path/to/hermes-feishu-streaming-card
-git checkout v3.8.0 && pip install -e ".[test]" --upgrade
+git checkout v3.8.1 && pip install -e ".[test]" --upgrade
 
 # 3. Diagnose Hermes hook strategy and anchors
 python3 -m hermes_feishu_card.cli doctor --config ~/.hermes_feishu_card/config.yaml --hermes-dir ~/.hermes/hermes-agent
@@ -407,6 +426,7 @@ The Hermes hook converts `message.started` / `thinking.delta` / `answer.delta` /
 
 | Version | Date | Highlights |
 |---------|------|-----------|
+| [v3.8.1](https://github.com/baileyh8/hermes-feishu-streaming-card/releases/tag/v3.8.1) | 2026-07 | Fixes issue #74 with Gateway-side high-frequency delta coalescing, terminal pre-flush, read-only `/hfc` diagnostics, and hashed diagnostic context |
 | [v3.8.0](https://github.com/baileyh8/hermes-feishu-streaming-card/releases/tag/v3.8.0) | 2026-07 | Separates the primary answer from the auxiliary timeline, removes duplicate tool summaries, drains terminal updates, fixes runtime import diagnostics, and updates Docker examples |
 | [v3.7.0](https://github.com/baileyh8/hermes-feishu-streaming-card/releases/tag/v3.7.0) | 2026-06 | Adds issue #70 Docker container install/update support with `/opt/hermes` and `/opt/data` defaults |
 | [v3.6.6](https://github.com/baileyh8/hermes-feishu-streaming-card/releases/tag/v3.6.6) | 2026-06 | Fixes issues #67/#68 by preventing interrupt/slow-PATCH card + native double replies and by suggesting the real Hermes `Project:` path from `hermes -V` |

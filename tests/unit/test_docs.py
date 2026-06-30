@@ -29,6 +29,8 @@ def test_readme_documents_sidecar_only_and_supported_hermes_version():
     assert "项目亮点" in readme
     assert "解决的真实痛点" in readme
     assert "Hermes Agent Gateway 的飞书/Lark 回复变成一张持续更新的交互式卡片" in readme
+    assert "/hfc status" in readme
+    assert "HERMES_FEISHU_CARD_DELTA_COALESCE_MS" in readme
     assert "sidecar-only" in readme.lower()
     assert "setup --hermes-dir" in readme
     assert "整合安装器" in readme
@@ -129,7 +131,8 @@ def test_readme_documents_one_line_install_and_release_packages():
     assert "install-docker.sh" in readme
     assert "docker-compose.example.yml" in readme
     assert "Docker" in install_doc
-    assert "v3.8.0" in install_doc
+    assert "v3.8.1" in install_doc
+    assert "docs/release-notes-v3.8.1.md" in readme
     assert "docs/release-notes-v3.8.0.md" in readme
     assert "docs/release-notes-v3.6.6.md" in readme
     assert "docs/release-notes-v3.6.5.md" in readme
@@ -149,7 +152,7 @@ def test_readme_documents_one_line_install_and_release_packages():
     assert "bash install.sh" in install_doc
     assert "install.ps1" in install_doc
     assert "HFC_VERSION" in install_doc
-    assert "v3.8.0" in install_doc
+    assert "v3.8.1" in install_doc
     assert "v3.6.6" in install_doc
 
     assert (ROOT / "install.sh").exists()
@@ -166,6 +169,7 @@ def test_readme_documents_one_line_install_and_release_packages():
     assert (ROOT / "docs/roadmap-v3.6.0.md").exists()
     assert (ROOT / "install-docker.sh").exists()
     assert (ROOT / "docker-compose.example.yml").exists()
+    assert (ROOT / "docs/release-notes-v3.8.1.md").exists()
     assert (ROOT / "docs/release-notes-v3.8.0.md").exists()
     assert (ROOT / "docs/release-notes-v3.7.0.md").exists()
     assert (ROOT / ".github/workflows/release-assets.yml").exists()
@@ -178,16 +182,22 @@ def test_readme_documents_one_line_install_and_release_packages():
 
 def test_v38_release_notes_are_linked():
     changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
-    release_notes = Path("docs/release-notes-v3.8.0.md")
+    release_notes = Path("docs/release-notes-v3.8.1.md")
+    compose = Path("docker-compose.example.yml").read_text(encoding="utf-8")
 
     assert release_notes.exists()
+    assert "## V3.8.1 — 2026-07-01" in changelog
+    assert "V3.8.1" in changelog
+    assert "[docs/release-notes-v3.8.1.md](docs/release-notes-v3.8.1.md)" in changelog
     assert "## V3.8.0 — 2026-07-01" in changelog
     assert "V3.8.0" in changelog
     assert "[docs/release-notes-v3.8.0.md](docs/release-notes-v3.8.0.md)" in changelog
     release_text = release_notes.read_text(encoding="utf-8")
-    assert "feishu-v38-card-timeline.png" in release_text
-    assert "HFC_VERSION=${HFC_VERSION:-v3.8.0}" in release_text
-    assert "hermes-feishu-card-v3.8.0-macos.tar.gz" in release_text
+    assert "issue #74" in release_text
+    assert "/hfc monitor" in release_text
+    assert "HERMES_FEISHU_CARD_DELTA_COALESCE_MS" in release_text
+    assert "hermes-feishu-card-v3.8.1-macos.tar.gz" in release_text
+    assert 'HFC_VERSION: "${HFC_VERSION:-v3.8.1}"' in compose
 
 
 def test_todo_points_to_v38_public_plan_docs():
@@ -215,6 +225,8 @@ def test_english_readme_and_docs_are_linked():
     assert "[中文](README.md)" in english_readme
     assert english_readme.startswith("# Hermes Feishu Streaming Card Plugin\n")
     assert "Hermes Feishu Streaming Card turns Hermes Agent Gateway replies" in english_readme
+    assert "/hfc status" in english_readme
+    assert "HERMES_FEISHU_CARD_DELTA_COALESCE_MS" in english_readme
     assert "Project Highlights" in english_readme
     assert "Pain Points Solved" in english_readme
     assert "img.shields.io/github/stars/baileyh8/hermes-feishu-streaming-card" in english_readme
@@ -673,8 +685,9 @@ def test_docs_describe_release_readiness_boundaries():
     )
 
     assert "docs/release-readiness.md" in docs
-    assert "3.6.6" in release_readiness
-    assert "3.7.0" in release_readiness
+    assert "3.8.1" in release_readiness
+    assert "issue #74" in release_readiness
+    assert "/hfc" in release_readiness
     assert "Release assets workflow" in release_readiness
     assert "install.ps1" in release_readiness
     assert "install-docker.sh" in release_readiness
@@ -697,9 +710,9 @@ def test_docs_describe_release_readiness_boundaries():
     assert "GitHub Actions" in docs
 
     assert "[English](release-readiness.en.md)" in english_readiness
-    assert "3.7.0" in english_readiness
-    assert "V3.6.6" in english_readiness
-    assert "issue #70" in english_readiness
+    assert "3.8.1" in english_readiness
+    assert "issue #74" in english_readiness
+    assert "/hfc" in english_readiness
     assert "install-docker.sh" in english_readiness
     assert "docker-compose.example.yml" in english_readiness
     assert "/opt/hermes" in english_readiness

@@ -2,7 +2,7 @@
 
 [中文](release-readiness.md) | [English](release-readiness.en.md)
 
-Current package version: `3.7.0`. This release keeps the sidecar-only mainline and builds on V3.6.6 streaming terminal stability by fixing issues #67/#68; it also adds Docker container install/update support for issue #70 with `install-docker.sh`, `docker-compose.example.yml`, and defaults for `/opt/hermes`, `/opt/data`.
+Current package version: `3.8.1`. This release keeps the sidecar-only mainline, builds on the V3.8.0 card UX upgrade, fixes issue #74 high-frequency delta stalls, and adds read-only `/hfc` diagnostics inside Feishu.
 
 ## Ready
 
@@ -21,6 +21,9 @@ Current package version: `3.7.0`. This release keeps the sidecar-only mainline a
 - Long Markdown tables and fenced code blocks over `MAIN_CONTENT_CHUNK_CHARS` are split as complete repeated structures to avoid raw Markdown rendering.
 - Thinking/interim assistant messages use complete `append_block` chunks to avoid delta accumulation truncation or missing text.
 - Runtime event sends, sidecar updates, and terminal PATCH calls are ordered/coalesced for the same message id.
+- Gateway runtime coalesces high-frequency `thinking.delta` / `answer.delta` events inside the Hermes process to reduce stream-reader thread pressure.
+- Terminal events flush pending deltas for the same message before final card rendering.
+- Feishu-side `/hfc help/status/doctor/monitor` commands return read-only diagnostic cards with hashed context ids.
 - Terminal events ACK Hermes quickly while slow Feishu PATCH calls complete in the background, preventing duplicate native replies after interrupts or update backlogs.
 - `load_config()` reads a `.env` file next to the selected config file while preserving real process environment variables as the highest-precedence source.
 - `install.sh` imports only Feishu/sidecar variables from `.env`, avoiding execution of unrelated values such as paths with spaces.

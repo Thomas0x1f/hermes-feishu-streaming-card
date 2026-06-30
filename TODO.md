@@ -14,16 +14,19 @@
 - [x] 长 Markdown 表格和 fenced code block 跨卡片分块时保持结构安全。
 - [x] 可观测性补充 update queue length、coalesce count、terminal drain latency、Feishu API latency。
 
-### V3.8.1：卡片内命令与诊断（待办）
+### V3.8.1：高频流式修复与只读诊断（已完成）
 
-- [ ] 卡片内提供“继续”“重试”“取消”等操作入口。
-- [ ] 工具调用详情支持查看参数摘要、耗时、失败原因。
-- [ ] 卡片内运维命令支持安全诊断与可控执行。
-- [ ] 安全清理：`/messages/{message_id}/summary` 返回中的 `chat_id` / Feishu `message_id` 改为 hash 或移除。
-- [ ] 群聊规则支持 @机器人触发、白名单、chat binding 自动提示。
+- [x] issue #74：Gateway runtime 内合并高频 `thinking.delta` / `answer.delta`，降低 Hermes stream-reader 热路径压力。
+- [x] terminal event 前 flush 同一消息 pending delta，避免最终卡片缺少尾部内容。
+- [x] 飞书内提供 `/hfc help`、`/hfc status`、`/hfc doctor`、`/hfc monitor` 只读诊断命令。
+- [x] 安全清理：`/messages/{message_id}/summary` 返回中的 `chat_id` / Feishu `message_id` 改为 hash。
+- [x] patcher 兼容 V3.8.0 及更早无命令 hook block 的升级和卸载。
 
 ### V3.8.2：维护体系与扩展面（待办）
 
+- [ ] 卡片内提供“继续”“重试”“取消”等写操作入口，需要单独做权限、幂等和误触发设计。
+- [ ] 工具调用详情支持查看参数摘要、耗时、失败原因。
+- [ ] 群聊规则支持 @机器人触发、白名单、chat binding 自动提示。
 - [ ] 补齐 E2E / fixture 覆盖，验证 V3.8.x 卡片体验和终态 drain 主链路。
 - [ ] 完成 agent guide、维护手册和开放扩展面的文档整理。
 - [ ] 评估卡片 timeline/metrics 的长期兼容边界，并补发布回归清单。

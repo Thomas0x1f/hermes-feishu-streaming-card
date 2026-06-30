@@ -176,6 +176,68 @@ async def test_health_reports_healthy_status_and_active_sessions(client):
     assert body["profile_diagnostics"] == {}
 
 
+async def test_hfc_help_command_sends_read_only_diagnostic_card(client):
+    test_client, feishu_client = client
+
+    response = await test_client.post(
+        "/commands",
+        json={
+            "command": "help",
+            "chat_id": "oc_secret_chat",
+            "message_id": "om_secret_message",
+            "thread_id": "omt_secret_thread",
+        },
+    )
+
+    assert response.status == 200
+    body = await response.json()
+    assert body == {"ok": True, "handled": True, "command": "help"}
+    assert len(feishu_client.sent) == 1
+    chat_id, card, thread_id, reply_to_message_id = feishu_client.sent[0]
+    assert chat_id == "oc_secret_chat"
+    assert thread_id == "omt_secret_thread"
+    assert reply_to_message_id == "om_secret_message"
+    content = str(card)
+    assert "/hfc status" in content
+    assert "/hfc doctor" in content
+    assert "/hfc monitor" in content
+    assert "oc_secret_chat" not in content
+    assert "om_secret_message" not in content
+    assert "omt_secret_thread" not in content
+
+
+async def test_hfc_monitor_command_reports_safe_metrics(client):
+    test_client, feishu_client = client
+    metrics = test_client.app[sidecar_server.METRICS_KEY]
+    metrics.events_received = 3
+    metrics.update_coalesced = 2
+    metrics.update_queue_peak = 4
+
+    response = await test_client.post(
+        "/commands",
+        json={
+            "command": "monitor",
+            "chat_id": "oc_monitor_secret",
+            "message_id": "om_monitor_secret",
+        },
+    )
+
+    assert response.status == 200
+    assert (await response.json()) == {
+        "ok": True,
+        "handled": True,
+        "command": "monitor",
+    }
+    assert len(feishu_client.sent) == 1
+    content = str(feishu_client.sent[0][1])
+    assert "events_received: 3" in content
+    assert "update_coalesced: 2" in content
+    assert "update_queue_peak: 4" in content
+    assert "active_sessions: 0" in content
+    assert "oc_monitor_secret" not in content
+    assert "om_monitor_secret" not in content
+
+
 async def test_health_reports_profile_diagnostics_for_profile_events():
     feishu_client = FakeFeishuClient()
     app = create_app(feishu_client)
@@ -596,8 +658,16 @@ async def test_completed_card_summary_can_be_looked_up_by_feishu_message_id(clie
     body = await found.json()
     assert body["ok"] is True
     assert body["profile_id"] == "work"
-    assert body["chat_id"] == "oc_abc"
-    assert body["message_id"] == "feishu-message-1"
+    assert body["chat_id_hash"] == sidecar_server._diagnostic_id_hash("oc_abc")
+    assert body["message_id_hash"] == sidecar_server._diagnostic_id_hash(
+        "feishu-message-1"
+    )
+    assert body["source_message_id_hash"] == sidecar_server._diagnostic_id_hash(
+        "hermes-message-1"
+    )
+    assert "chat_id" not in body
+    assert "message_id" not in body
+    assert "source_message_id" not in body
     assert body["summary"] == long_answer[:4000]
     assert len(body["summary"]) == 4000
 

@@ -207,6 +207,54 @@ def test_build_event_ignores_non_feishu_platforms():
     )
 
 
+def test_handle_hfc_command_posts_command_without_building_normal_event(monkeypatch):
+    posted = []
+    monkeypatch.setenv("HERMES_FEISHU_CARD_EVENT_URL", "http://sidecar.test/events")
+
+    def fake_post(url, payload, timeout):
+        posted.append((url, payload, timeout))
+        return True
+
+    monkeypatch.setattr(hook_runtime, "_post_json_sync", fake_post)
+
+    handled = hook_runtime.handle_hfc_command_from_hermes_locals(
+        {
+            "source": SourceObject(),
+            "message_id": "om_command",
+            "text": "/hfc monitor",
+        }
+    )
+
+    assert handled is True
+    url, payload, timeout = posted[0]
+    assert url == "http://sidecar.test/commands"
+    assert timeout == 0.8
+    assert payload["command"] == "monitor"
+    assert payload["chat_id"] == "oc_source"
+    assert payload["message_id"] == "om_command"
+    assert payload["thread_id"] == ""
+
+
+def test_handle_hfc_command_ignores_regular_messages(monkeypatch):
+    posted = []
+    monkeypatch.setattr(
+        hook_runtime,
+        "_post_json_sync",
+        lambda *args: posted.append(args),
+    )
+
+    handled = hook_runtime.handle_hfc_command_from_hermes_locals(
+        {
+            "source": SourceObject(),
+            "message_id": "om_normal",
+            "text": "hello /hfc status",
+        }
+    )
+
+    assert handled is False
+    assert posted == []
+
+
 @pytest.mark.asyncio
 async def test_async_emit_does_not_post_non_feishu_events(monkeypatch):
     posted = []
@@ -1376,6 +1424,128 @@ async def drain_tasks():
 
 
 @pytest.mark.asyncio
+async def test_threadsafe_answer_delta_coalesces_many_tokens(monkeypatch):
+    sender = SenderProbe()
+    monkeypatch.setattr(hook_runtime, "_post_json", sender)
+    monkeypatch.setenv("HERMES_FEISHU_CARD_EVENT_URL", "http://sidecar.test/events")
+    monkeypatch.setenv("HERMES_FEISHU_CARD_DELTA_COALESCE_MS", "1000")
+    monkeypatch.setenv("HERMES_FEISHU_CARD_DELTA_COALESCE_CHARS", "2000")
+
+    loop = asyncio.get_running_loop()
+    local_vars = {
+        "_hfc_loop": loop,
+        "source": SourceObject(),
+        "message_id": "msg_burst",
+    }
+
+    for _ in range(1000):
+        assert hook_runtime.emit_from_hermes_locals_threadsafe(
+            {**local_vars, "text": "x"},
+            event_name="answer.delta",
+        )
+
+    await drain_tasks()
+    assert sender.payloads == []
+
+    await hook_runtime.flush_pending_deltas_for_message("msg_burst")
+
+    assert len(sender.payloads) == 1
+    _url, payload, _timeout = sender.payloads[0]
+    assert payload["event"] == "answer.delta"
+    assert payload["message_id"] == "msg_burst"
+    assert payload["data"]["text"] == "x" * 1000
+
+
+@pytest.mark.asyncio
+async def test_async_terminal_flushes_pending_delta_before_completed(monkeypatch):
+    posted = []
+    monkeypatch.setenv("HERMES_FEISHU_CARD_EVENT_URL", "http://sidecar.test/events")
+    monkeypatch.setenv("HERMES_FEISHU_CARD_DELTA_COALESCE_MS", "1000")
+    monkeypatch.setenv("HERMES_FEISHU_CARD_DELTA_COALESCE_CHARS", "2000")
+
+    async def fake_post(url, payload, timeout):
+        posted.append(payload)
+
+    async def fake_post_response(url, payload, timeout):
+        posted.append(payload)
+        return {"ok": True, "applied": True}
+
+    monkeypatch.setattr(hook_runtime, "_post_json", fake_post)
+    monkeypatch.setattr(hook_runtime, "_post_json_response", fake_post_response)
+
+    loop = asyncio.get_running_loop()
+    local_vars = {
+        "_hfc_loop": loop,
+        "source": SourceObject(),
+        "message_id": "msg_terminal",
+    }
+
+    assert hook_runtime.emit_from_hermes_locals_threadsafe(
+        {**local_vars, "text": "thinking"},
+        event_name="thinking.delta",
+    )
+    await drain_tasks()
+    assert posted == []
+
+    delivered = await hook_runtime.emit_from_hermes_locals_async(
+        {**local_vars, "answer": "done"},
+        event_name="message.completed",
+    )
+
+    assert delivered is True
+    assert [payload["event"] for payload in posted] == [
+        "thinking.delta",
+        "message.completed",
+    ]
+    assert posted[0]["data"]["text"] == "thinking"
+
+
+@pytest.mark.asyncio
+async def test_threadsafe_non_delta_flushes_pending_delta_before_tool(monkeypatch):
+    posted = []
+    monkeypatch.setenv("HERMES_FEISHU_CARD_EVENT_URL", "http://sidecar.test/events")
+    monkeypatch.setenv("HERMES_FEISHU_CARD_DELTA_COALESCE_MS", "1000")
+    monkeypatch.setenv("HERMES_FEISHU_CARD_DELTA_COALESCE_CHARS", "2000")
+
+    async def fake_post(url, payload, timeout):
+        posted.append(payload)
+
+    monkeypatch.setattr(hook_runtime, "_post_json", fake_post)
+
+    loop = asyncio.get_running_loop()
+    local_vars = {
+        "_hfc_loop": loop,
+        "source": SourceObject(),
+        "message_id": "msg_tool_order",
+    }
+
+    assert hook_runtime.emit_from_hermes_locals_threadsafe(
+        {**local_vars, "text": "thinking"},
+        event_name="thinking.delta",
+    )
+    await drain_tasks()
+    assert posted == []
+
+    assert hook_runtime.emit_from_hermes_locals_threadsafe(
+        {
+            **local_vars,
+            "tool_id": "tool_1",
+            "name": "search",
+            "status": "completed",
+        },
+        event_name="tool.updated",
+    )
+    await drain_tasks()
+
+    assert [payload["event"] for payload in posted] == [
+        "thinking.delta",
+        "tool.updated",
+    ]
+    assert [payload["sequence"] for payload in posted] == [0, 1]
+    assert posted[0]["data"]["text"] == "thinking"
+
+
+@pytest.mark.asyncio
 async def test_emit_from_hermes_locals_schedules_sender(monkeypatch):
     sender = SenderProbe()
     monkeypatch.setattr(hook_runtime, "_post_json", sender)
@@ -1401,6 +1571,7 @@ async def test_emit_from_hermes_locals_threadsafe_schedules_on_running_loop(monk
     sender = SenderProbe()
     monkeypatch.setattr(hook_runtime, "_post_json", sender)
     monkeypatch.setenv("HERMES_FEISHU_CARD_EVENT_URL", "http://sidecar.test/events")
+    monkeypatch.setenv("HERMES_FEISHU_CARD_DELTA_COALESCE_MS", "0")
 
     result = hook_runtime.emit_from_hermes_locals_threadsafe(
         {"chat_id": "oc_abc", "message_id": "msg_1", "text": "hello"},

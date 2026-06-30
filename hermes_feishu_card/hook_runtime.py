@@ -43,6 +43,21 @@ class RuntimeConfig:
     enabled: bool
     event_url: str
     timeout_seconds: float
+    delta_coalesce_ms: int
+    delta_coalesce_chars: int
+    delta_coalesce_max_pending: int
+
+
+@dataclass
+class _PendingDelta:
+    event_name: str
+    event_url: str
+    timeout_seconds: float
+    loop: Any
+    base_locals: dict[str, Any]
+    text_parts: list[str]
+    char_count: int = 0
+    scheduled: bool = False
 
 
 _SEQUENCES: dict[str, int] = {}
@@ -54,6 +69,8 @@ _AMBIGUOUS_TERMINAL = object()
 _SEND_LOCKS: dict[tuple[int, str, str], asyncio.Lock] = {}
 _SEND_LOCKS_GUARD = threading.Lock()
 _POST_FAILED = object()
+_PENDING_DELTAS: dict[tuple[int, str, str, str, str], _PendingDelta] = {}
+_PENDING_DELTAS_LOCK = threading.Lock()
 
 
 def reset_runtime_state() -> None:
@@ -64,6 +81,8 @@ def reset_runtime_state() -> None:
     _FALLBACK_LIFECYCLE_COUNTS.clear()
     with _SEND_LOCKS_GUARD:
         _SEND_LOCKS.clear()
+    with _PENDING_DELTAS_LOCK:
+        _PENDING_DELTAS.clear()
 
 
 def load_runtime_config() -> RuntimeConfig:
@@ -73,10 +92,31 @@ def load_runtime_config() -> RuntimeConfig:
     if not event_url:
         event_url = DEFAULT_EVENT_URL
     timeout_seconds = _timeout_from_env(os.environ.get("HERMES_FEISHU_CARD_TIMEOUT_MS"))
+    delta_coalesce_ms = _int_from_env(
+        os.environ.get("HERMES_FEISHU_CARD_DELTA_COALESCE_MS"),
+        default=250,
+        minimum=0,
+        maximum=5000,
+    )
+    delta_coalesce_chars = _int_from_env(
+        os.environ.get("HERMES_FEISHU_CARD_DELTA_COALESCE_CHARS"),
+        default=600,
+        minimum=1,
+        maximum=20000,
+    )
+    delta_coalesce_max_pending = _int_from_env(
+        os.environ.get("HERMES_FEISHU_CARD_DELTA_COALESCE_MAX_PENDING"),
+        default=128,
+        minimum=1,
+        maximum=5000,
+    )
     return RuntimeConfig(
         enabled=enabled,
         event_url=event_url,
         timeout_seconds=timeout_seconds,
+        delta_coalesce_ms=delta_coalesce_ms,
+        delta_coalesce_chars=delta_coalesce_chars,
+        delta_coalesce_max_pending=delta_coalesce_max_pending,
     )
 
 
@@ -90,6 +130,226 @@ def _timeout_from_env(value: str | None) -> float:
     if not 50 <= timeout_ms <= 5000:
         return DEFAULT_TIMEOUT_SECONDS
     return timeout_ms / 1000.0
+
+
+def _int_from_env(
+    value: str | None,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    if not minimum <= parsed <= maximum:
+        return default
+    return parsed
+
+
+def _queue_coalesced_delta(
+    config: RuntimeConfig,
+    local_vars: dict[str, Any],
+    event_name: str,
+) -> bool:
+    if event_name not in {"thinking.delta", "answer.delta"}:
+        return False
+    if config.delta_coalesce_ms <= 0:
+        return False
+    identity = _delta_coalesce_identity(config, local_vars, event_name)
+    if identity is None:
+        return False
+    key, loop, base_locals, text = identity
+    should_flush_now = False
+    should_schedule = False
+    with _PENDING_DELTAS_LOCK:
+        pending = _PENDING_DELTAS.get(key)
+        if pending is None:
+            if len(_PENDING_DELTAS) >= config.delta_coalesce_max_pending:
+                _PENDING_DELTAS.pop(next(iter(_PENDING_DELTAS)), None)
+            pending = _PendingDelta(
+                event_name=event_name,
+                event_url=config.event_url,
+                timeout_seconds=_timeout_for_event(config, event_name),
+                loop=loop,
+                base_locals=base_locals,
+                text_parts=[],
+            )
+            _PENDING_DELTAS[key] = pending
+        pending.text_parts.append(text)
+        pending.char_count += len(text)
+        if pending.char_count >= config.delta_coalesce_chars:
+            should_flush_now = True
+        elif not pending.scheduled:
+            pending.scheduled = True
+            should_schedule = True
+    if should_flush_now:
+        _schedule_delta_flush(loop, key, 0.0)
+    elif should_schedule:
+        _schedule_delta_flush(loop, key, config.delta_coalesce_ms / 1000.0)
+    return True
+
+
+def _delta_coalesce_identity(
+    config: RuntimeConfig,
+    local_vars: dict[str, Any],
+    event_name: str,
+) -> tuple[tuple[int, str, str, str, str], Any, dict[str, Any], str] | None:
+    source_obj = local_vars.get("source")
+    if _platform_name(local_vars, source_obj) != "feishu":
+        return None
+    message_obj = local_vars.get("message")
+    gateway_event_obj = local_vars.get("event")
+    message_id = _first_string(
+        local_vars, ("message_id", "msg_id", "event_message_id")
+    ) or _first_attr_string(
+        message_obj, ("message_id", "msg_id")
+    ) or _first_attr_string(
+        gateway_event_obj, ("message_id", "msg_id")
+    )
+    if not message_id:
+        return None
+    text = _first_raw_string(local_vars, ("text", "delta", "delta_text", "content"))
+    if text is None:
+        text = _first_attr_raw_string(message_obj, ("text", "content"))
+    if not text:
+        return None
+    loop = local_vars.get("_hfc_loop")
+    if loop is None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+    profile_id, _profile_source = _profile_identity(local_vars, source_obj, message_obj)
+    key = (id(loop), config.event_url, message_id, event_name, profile_id)
+    return key, loop, _delta_base_locals(local_vars), str(text)
+
+
+def _delta_base_locals(local_vars: dict[str, Any]) -> dict[str, Any]:
+    keep_keys = {
+        "source",
+        "event",
+        "message",
+        "chat_id",
+        "open_chat_id",
+        "receive_id",
+        "conversation_id",
+        "thread_id",
+        "session_id",
+        "message_id",
+        "msg_id",
+        "event_message_id",
+        "created_at",
+        "profile_id",
+        "hermes_profile",
+        "profile",
+        "mode",
+        "_hfc_text_mode",
+    }
+    return {key: value for key, value in local_vars.items() if key in keep_keys}
+
+
+def _schedule_delta_flush(loop: Any, key: tuple[int, str, str, str, str], delay: float) -> None:
+    async def flush_later() -> None:
+        if delay > 0:
+            await asyncio.sleep(delay)
+        await _flush_pending_delta_key(key)
+
+    def create_task() -> None:
+        asyncio.create_task(flush_later())
+
+    try:
+        if loop.is_running():
+            loop.call_soon_threadsafe(create_task)
+    except Exception:
+        return
+
+
+async def flush_pending_deltas_for_message(message_id: str) -> None:
+    message_id = str(message_id or "").strip()
+    if not message_id:
+        return
+    with _PENDING_DELTAS_LOCK:
+        keys = [
+            key
+            for key, pending in _PENDING_DELTAS.items()
+            if _pending_message_id(key, pending) == message_id
+        ]
+    for key in keys:
+        await _flush_pending_delta_key(key)
+
+
+async def _flush_pending_deltas_for_local_vars(local_vars: dict[str, Any]) -> None:
+    message_id = _message_id_from_local_vars(local_vars)
+    if message_id:
+        await flush_pending_deltas_for_message(message_id)
+
+
+def _has_pending_deltas_for_local_vars(local_vars: dict[str, Any]) -> bool:
+    message_id = _message_id_from_local_vars(local_vars)
+    if not message_id:
+        return False
+    with _PENDING_DELTAS_LOCK:
+        return any(
+            _pending_message_id(key, pending) == message_id
+            for key, pending in _PENDING_DELTAS.items()
+        )
+
+
+def _message_id_from_local_vars(local_vars: dict[str, Any]) -> str | None:
+    message_obj = local_vars.get("message")
+    gateway_event_obj = local_vars.get("event")
+    message_id = _first_string(
+        local_vars, ("message_id", "msg_id", "event_message_id")
+    ) or _first_attr_string(
+        message_obj, ("message_id", "msg_id")
+    ) or _first_attr_string(
+        gateway_event_obj, ("message_id", "msg_id")
+    )
+    return message_id
+
+
+def _pending_message_id(
+    key: tuple[int, str, str, str, str], pending: _PendingDelta
+) -> str:
+    return key[2]
+
+
+async def _flush_pending_delta_key(key: tuple[int, str, str, str, str]) -> None:
+    with _PENDING_DELTAS_LOCK:
+        pending = _PENDING_DELTAS.pop(key, None)
+    if pending is None or not pending.text_parts:
+        return
+    payload = build_event(
+        pending.event_name,
+        {**pending.base_locals, "text": "".join(pending.text_parts)},
+    )
+    if payload is None:
+        return
+    await _send_fail_open_ordered(
+        pending.event_url,
+        payload,
+        pending.timeout_seconds,
+    )
+
+
+async def _flush_build_send_ordered(
+    config: RuntimeConfig,
+    local_vars: dict[str, Any],
+    event_name: str,
+) -> None:
+    await _flush_pending_deltas_for_local_vars(local_vars)
+    payload = build_event(event_name, local_vars)
+    if payload is None:
+        return
+    await _send_fail_open_ordered(
+        config.event_url,
+        payload,
+        _timeout_for_event(config, event_name),
+    )
 
 
 def emit_from_hermes_locals(
@@ -124,6 +384,22 @@ def emit_from_hermes_locals_threadsafe(
         config = load_runtime_config()
         if not config.enabled:
             return False
+        if _queue_coalesced_delta(config, local_vars, event_name):
+            return True
+        if _has_pending_deltas_for_local_vars(local_vars):
+            if "_hfc_loop" in local_vars:
+                coroutine = _flush_build_send_ordered(config, local_vars, event_name)
+                try:
+                    asyncio.run_coroutine_threadsafe(coroutine, local_vars["_hfc_loop"])
+                except Exception:
+                    coroutine.close()
+                    raise
+            else:
+                asyncio.get_running_loop()
+                asyncio.create_task(
+                    _flush_build_send_ordered(config, local_vars, event_name)
+                )
+            return True
         payload = build_event(event_name, local_vars)
         if payload is None:
             return False
@@ -160,6 +436,8 @@ async def emit_from_hermes_locals_async(
         config = load_runtime_config()
         if not config.enabled:
             return False
+        if event_name not in {"thinking.delta", "answer.delta"}:
+            await _flush_pending_deltas_for_local_vars(local_vars)
         payload = build_event(event_name, local_vars)
         if payload is None:
             return False
@@ -194,6 +472,97 @@ def emit_cron_delivery(local_vars: dict[str, Any]) -> bool:
         return _post_json_sync(config.event_url, payload, TERMINAL_TIMEOUT_SECONDS)
     except Exception:
         return False
+
+
+def handle_hfc_command_from_hermes_locals(local_vars: dict[str, Any]) -> bool:
+    try:
+        config = load_runtime_config()
+        if not config.enabled:
+            return False
+        source_obj = local_vars.get("source")
+        if _platform_name(local_vars, source_obj) != "feishu":
+            return False
+        command = _parse_hfc_command(_command_text(local_vars))
+        if command is None:
+            return False
+        message_obj = local_vars.get("message")
+        gateway_event_obj = local_vars.get("event")
+        chat_id = _first_string(local_vars, ("chat_id", "open_chat_id", "receive_id"))
+        if chat_id is None:
+            chat_id = _first_attr_string(
+                message_obj, ("chat_id", "open_chat_id", "receive_id")
+            )
+        if chat_id is None:
+            chat_id = _first_attr_string(
+                source_obj, ("chat_id", "open_chat_id", "receive_id")
+            )
+        if chat_id is None:
+            return False
+        message_id = _first_string(
+            local_vars, ("message_id", "msg_id", "event_message_id")
+        ) or _first_attr_string(
+            message_obj, ("message_id", "msg_id")
+        ) or _first_attr_string(
+            gateway_event_obj, ("message_id", "msg_id")
+        )
+        if not message_id:
+            return False
+        profile_id, profile_source = _profile_identity(local_vars, source_obj, message_obj)
+        payload = {
+            "command": command,
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "thread_id": _thread_id_for_runtime_event(local_vars, message_obj, source_obj),
+            "reply_to_message_id": _reply_to_message_id_from_runtime(
+                local_vars,
+                message_obj,
+                gateway_event_obj,
+            ),
+            "profile_id": profile_id,
+            "profile_source": profile_source,
+            "created_at": _created_at(local_vars.get("created_at")),
+            "platform": "feishu",
+        }
+        url = f"{_summary_base_url(config.event_url)}/commands"
+        return _post_json_sync(url, payload, config.timeout_seconds)
+    except Exception:
+        return False
+
+
+def _command_text(local_vars: dict[str, Any]) -> str:
+    text = _first_raw_string(local_vars, ("text", "content", "message_text", "query"))
+    if text is not None:
+        return text
+    message_obj = local_vars.get("message")
+    text = _first_attr_raw_string(message_obj, ("text", "content"))
+    return text or ""
+
+
+def _parse_hfc_command(text: str) -> str | None:
+    stripped = str(text or "").strip()
+    if not stripped:
+        return None
+    match = re.match(r"^/hfc(?:\s+([A-Za-z0-9_-]+))?\s*$", stripped, re.IGNORECASE)
+    if not match:
+        return None
+    command = (match.group(1) or "help").lower()
+    if command not in {"help", "status", "doctor", "monitor"}:
+        return "help"
+    return command
+
+
+def _reply_to_message_id_from_runtime(
+    local_vars: dict[str, Any],
+    message_obj: Any,
+    gateway_event_obj: Any,
+) -> str:
+    aliases = ("reply_to_message_id", "quote_message_id", "parent_message_id")
+    value = (
+        _first_string(local_vars, aliases)
+        or _first_attr_string(message_obj, aliases)
+        or _first_attr_string(gateway_event_obj, aliases)
+    )
+    return value or ""
 
 
 def build_interaction_event(

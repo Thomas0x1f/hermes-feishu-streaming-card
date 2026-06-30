@@ -22,6 +22,11 @@ reasoning/tool timeline, removes duplicate footer tool summaries, and runs the
 Hermes runtime import check from the Hermes project root. Re-run `setup` or
 `install` after upgrading so the refreshed hook and runtime package match.
 
+From V3.8.1, high-frequency `thinking.delta` / `answer.delta` events are
+coalesced inside the Hermes Gateway process before reaching the sidecar. The
+same release adds read-only `/hfc help`, `/hfc status`, `/hfc doctor`, and
+`/hfc monitor` cards for Feishu-side diagnostics.
+
 ## macOS / Linux
 
 ```bash
@@ -38,7 +43,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 | Variable | Default | Description |
 |---|---|---|
-| `HFC_VERSION` | `latest` | Git tag or branch to install, such as `v3.8.0`, `v3.6.6`, or `main`. |
+| `HFC_VERSION` | `latest` | Git tag or branch to install, such as `v3.8.1`, `v3.6.6`, or `main`. |
 | `HFC_REPO` | `baileyh8/hermes-feishu-streaming-card` | GitHub repository to install from. |
 | `HERMES_DIR` | `~/.hermes/hermes-agent` | Hermes Agent root directory. |
 | `HFC_CONFIG` | `~/.hermes/config.yaml` | Sidecar config path. |
@@ -58,7 +63,7 @@ script selects Hermes venv Python and does not fall back to system Python unless
 ```
 export FEISHU_APP_ID=cli_xxx
 export FEISHU_APP_SECRET=xxx
-export HFC_VERSION=v3.8.0
+export HFC_VERSION=v3.8.1
 bash install-docker.sh
 ```
 

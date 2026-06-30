@@ -596,10 +596,22 @@ def _find_owned_block(content: str):
     gateway_013_plus = _render_hook_block(
         indent, newline, strategy="gateway_run_013_plus"
     )
+    legacy_without_commands = _render_hook_block_without_commands(
+        indent, newline, strategy="legacy_gateway_run"
+    )
+    gateway_013_plus_without_commands = _render_hook_block_without_commands(
+        indent, newline, strategy="gateway_run_013_plus"
+    )
     placeholder = _render_placeholder_hook_block(indent, newline)
     legacy_silent = _with_silent_exception_handler(legacy, indent, newline)
     gateway_013_plus_silent = _with_silent_exception_handler(
         gateway_013_plus, indent, newline
+    )
+    legacy_without_commands_silent = _with_silent_exception_handler(
+        legacy_without_commands, indent, newline
+    )
+    gateway_013_plus_without_commands_silent = _with_silent_exception_handler(
+        gateway_013_plus_without_commands, indent, newline
     )
     placeholder_silent = _with_silent_exception_handler(placeholder, indent, newline)
     actual = lines[begin_index : end_index + 1]
@@ -607,9 +619,13 @@ def _find_owned_block(content: str):
     if actual not in (
         legacy,
         gateway_013_plus,
+        legacy_without_commands,
+        gateway_013_plus_without_commands,
         placeholder,
         legacy_silent,
         gateway_013_plus_silent,
+        legacy_without_commands_silent,
+        gateway_013_plus_without_commands_silent,
         placeholder_silent,
     ):
         raise ValueError("corrupt patch markers")
@@ -625,7 +641,13 @@ def _find_owned_block(content: str):
     first_body_index, _body_indent = handler_body
     expected_begin_index = (
         first_body_index - 2
-        if actual in (gateway_013_plus, gateway_013_plus_silent)
+        if actual
+        in (
+            gateway_013_plus,
+            gateway_013_plus_silent,
+            gateway_013_plus_without_commands,
+            gateway_013_plus_without_commands_silent,
+        )
         else first_body_index - 1
     )
     if begin_index != expected_begin_index:
@@ -886,7 +908,9 @@ def _with_silent_exception_handler(block: list[str], indent: str, newline: str):
     return result
 
 
-def _render_hook_block(indent: str, newline: str, strategy: str = "legacy_gateway_run"):
+def _render_hook_block_without_commands(
+    indent: str, newline: str, strategy: str = "legacy_gateway_run"
+):
     inner_indent = _child_indent(indent)
     deeper_indent = _child_indent(inner_indent)
     block = [
@@ -917,6 +941,57 @@ def _render_hook_block(indent: str, newline: str, strategy: str = "legacy_gatewa
                     f"{inner_indent}from hermes_feishu_card.hook_runtime "
                     f"import emit_from_hermes_locals as _hfc_emit{newline}"
                 ),
+                f"{inner_indent}_hfc_emit(locals()){newline}",
+            ]
+        )
+    block.extend(_render_hook_exception_handler(indent, newline))
+    block.append(f"{indent}{PATCH_END}{newline}")
+    return block
+
+
+def _render_hook_block(indent: str, newline: str, strategy: str = "legacy_gateway_run"):
+    inner_indent = _child_indent(indent)
+    deeper_indent = _child_indent(inner_indent)
+    block = [
+        f"{indent}{PATCH_BEGIN}{newline}",
+    ]
+    if strategy == "gateway_run_013_plus":
+        block.extend(
+            [
+                f"{indent}# HERMES_FEISHU_CARD_STRATEGY gateway_run_013_plus{newline}",
+                f"{indent}try:{newline}",
+                (
+                    f"{inner_indent}from hermes_feishu_card.hook_runtime "
+                    f"import emit_from_hermes_locals as _hfc_emit{newline}"
+                ),
+                (
+                    f"{inner_indent}from hermes_feishu_card.hook_runtime "
+                    f"import handle_hfc_command_from_hermes_locals as _hfc_handle_command{newline}"
+                ),
+                f"{inner_indent}_hfc_started_message_id = None{newline}",
+                f"{inner_indent}try:{newline}",
+                f"{deeper_indent}_hfc_started_message_id = self._reply_anchor_for_event(event){newline}",
+                f"{inner_indent}except Exception:{newline}",
+                f"{deeper_indent}_hfc_started_message_id = getattr(event, \"message_id\", None){newline}",
+                f"{inner_indent}if _hfc_handle_command({{**locals(), \"message_id\": _hfc_started_message_id}}):{newline}",
+                f"{deeper_indent}return None{newline}",
+                f"{inner_indent}_hfc_emit({{**locals(), \"message_id\": _hfc_started_message_id}}){newline}",
+            ]
+        )
+    else:
+        block.extend(
+            [
+                f"{indent}try:{newline}",
+                (
+                    f"{inner_indent}from hermes_feishu_card.hook_runtime "
+                    f"import emit_from_hermes_locals as _hfc_emit{newline}"
+                ),
+                (
+                    f"{inner_indent}from hermes_feishu_card.hook_runtime "
+                    f"import handle_hfc_command_from_hermes_locals as _hfc_handle_command{newline}"
+                ),
+                f"{inner_indent}if _hfc_handle_command(locals()):{newline}",
+                f"{deeper_indent}return None{newline}",
                 f"{inner_indent}_hfc_emit(locals()){newline}",
             ]
         )

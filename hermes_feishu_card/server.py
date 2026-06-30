@@ -79,6 +79,7 @@ def create_app(
     app.router.add_get("/messages/{message_id}/summary", _message_summary)
     app.router.add_get("/interactions/{interaction_id}", _interaction_result)
     app.router.add_post("/card/actions", _card_actions)
+    app.router.add_post("/commands", _commands)
     app.router.add_post("/events", _events)
     return app
 
@@ -214,6 +215,59 @@ async def _card_actions(request: web.Request) -> web.Response:
     )
 
 
+async def _commands(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+    except ValueError:
+        return web.json_response({"ok": False, "error": "invalid json"}, status=400)
+    if not isinstance(payload, dict):
+        return web.json_response({"ok": False, "error": "payload must be an object"}, status=400)
+
+    command = _normalize_hfc_command(payload.get("command"))
+    chat_id = _safe_command_string(payload.get("chat_id"))
+    message_id = _safe_command_string(payload.get("message_id"))
+    reply_to_message_id = _safe_command_string(payload.get("reply_to_message_id"))
+    thread_id = _safe_command_string(payload.get("thread_id"))
+    if not chat_id or not message_id:
+        return web.json_response(
+            {"ok": False, "error": "chat_id and message_id are required"},
+            status=400,
+        )
+
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        data = {}
+    for key in ("profile_id", "profile_source"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            data[key] = value.strip()
+    event = SidecarEvent(
+        schema_version="1",
+        event="message.started",
+        conversation_id=thread_id or chat_id,
+        message_id=message_id,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        platform="feishu",
+        sequence=0,
+        created_at=time.time(),
+        data=data,
+    )
+    route = _resolve_route(request, event)
+    card = _render_hfc_command_card(request, command, event, route)
+    feishu_message_id = await _send_card(
+        request,
+        chat_id,
+        card,
+        route.bot_id if route is not None else None,
+        thread_id=thread_id or None,
+        reply_to_message_id=reply_to_message_id or message_id,
+    )
+    if feishu_message_id is None:
+        return web.json_response({"ok": False, "error": "send failed"}, status=502)
+    return web.json_response({"ok": True, "handled": True, "command": command})
+
+
 async def _events(request: web.Request) -> web.Response:
     metrics: SidecarMetrics = request.app[METRICS_KEY]
     try:
@@ -231,6 +285,160 @@ async def _events(request: web.Request) -> web.Response:
     if post_lock_task is not None and _should_await_card_update(event):
         await post_lock_task
     return response
+
+
+def _normalize_hfc_command(value: Any) -> str:
+    command = str(value or "").strip().lower()
+    if command in {"status", "doctor", "monitor"}:
+        return command
+    return "help"
+
+
+def _safe_command_string(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
+
+
+def _render_hfc_command_card(
+    request: web.Request,
+    command: str,
+    event: SidecarEvent,
+    route: RouteResult | None,
+) -> dict[str, Any]:
+    lines = _hfc_command_lines(request, command, event, route)
+    return {
+        "schema": "2.0",
+        "config": {
+            "update_multi": True,
+            "summary": {"content": f"/hfc {command}"},
+        },
+        "header": {
+            "template": "blue" if command != "doctor" else "green",
+            "title": {"tag": "plain_text", "content": request.app[CARD_TITLE_KEY]},
+            "subtitle": {"tag": "plain_text", "content": f"/hfc {command}"},
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "element_id": f"hfc_{command}",
+                    "content": "\n".join(lines),
+                }
+            ]
+        },
+    }
+
+
+def _hfc_command_lines(
+    request: web.Request,
+    command: str,
+    event: SidecarEvent,
+    route: RouteResult | None,
+) -> list[str]:
+    if command == "status":
+        return _hfc_status_lines(request, event, route)
+    if command == "doctor":
+        return _hfc_doctor_lines(request, event, route)
+    if command == "monitor":
+        return _hfc_monitor_lines(request, event)
+    return [
+        "**Hermes Feishu Card 诊断命令**",
+        "",
+        "- `/hfc help`: 查看只读命令列表",
+        "- `/hfc status`: 查看 sidecar、会话和路由摘要",
+        "- `/hfc doctor`: 查看安装/运行健康检查摘要",
+        "- `/hfc monitor`: 查看流式更新与飞书发送指标",
+        "",
+        *_hfc_context_lines(event, route),
+    ]
+
+
+def _hfc_status_lines(
+    request: web.Request,
+    event: SidecarEvent,
+    route: RouteResult | None,
+) -> list[str]:
+    sessions: Dict[str, CardSession] = request.app[SESSIONS_KEY]
+    metrics: SidecarMetrics = request.app[METRICS_KEY]
+    return [
+        "**/hfc status**",
+        "",
+        f"- sidecar: healthy",
+        f"- active_sessions: {len(sessions)}",
+        f"- events_received: {metrics.events_received}",
+        f"- events_applied: {metrics.events_applied}",
+        f"- feishu_send_successes: {metrics.feishu_send_successes}",
+        f"- update_queue_peak: {metrics.update_queue_peak}",
+        *_hfc_context_lines(event, route),
+    ]
+
+
+def _hfc_doctor_lines(
+    request: web.Request,
+    event: SidecarEvent,
+    route: RouteResult | None,
+) -> list[str]:
+    diagnostics = request.app[DIAGNOSTICS_KEY]
+    routing = request.app[ROUTING_DIAGNOSTICS_KEY]
+    last_update_error = str(diagnostics.get("last_update_error") or "")
+    last_route_error = str(diagnostics.get("last_route_error") or "")
+    return [
+        "**/hfc doctor**",
+        "",
+        f"- sidecar: healthy",
+        f"- routing: {'ok' if not last_route_error else 'warning'}",
+        f"- last_route_error: {last_route_error or 'none'}",
+        f"- last_update_error: {last_update_error or 'none'}",
+        f"- configured_bots: {routing.get('bot_count', 0)}",
+        f"- chat_bindings: {routing.get('chat_binding_count', 0)}",
+        *_hfc_context_lines(event, route),
+    ]
+
+
+def _hfc_monitor_lines(request: web.Request, event: SidecarEvent) -> list[str]:
+    metrics: SidecarMetrics = request.app[METRICS_KEY]
+    snapshot = metrics.snapshot()
+    keys = (
+        "events_received",
+        "events_applied",
+        "events_ignored",
+        "events_rejected",
+        "update_scheduled",
+        "update_coalesced",
+        "update_queue_peak",
+        "terminal_drains",
+        "terminal_drain_timeouts",
+        "feishu_send_attempts",
+        "feishu_send_successes",
+        "feishu_send_failures",
+        "feishu_update_attempts",
+        "feishu_update_successes",
+        "feishu_update_failures",
+        "feishu_update_retries",
+    )
+    lines = ["**/hfc monitor**", ""]
+    lines.extend([f"- {key}: {snapshot.get(key, 0)}" for key in keys])
+    lines.append(f"- active_sessions: {len(request.app[SESSIONS_KEY])}")
+    lines.extend(_hfc_context_lines(event, None))
+    return lines
+
+
+def _hfc_context_lines(event: SidecarEvent, route: RouteResult | None) -> list[str]:
+    lines = [
+        "",
+        "**上下文**",
+        f"- chat_id_hash: {_diagnostic_id_hash(event.chat_id)}",
+        f"- message_id_hash: {_diagnostic_id_hash(event.message_id)}",
+    ]
+    thread_hash = _diagnostic_id_hash(event.thread_id)
+    if thread_hash:
+        lines.append(f"- thread_id_hash: {thread_hash}")
+    if route is not None:
+        lines.append(f"- route: {route.reason}")
+        if route.bot_id:
+            lines.append(f"- bot_id: {route.bot_id}")
+    return lines
 
 
 def _session_key(event: SidecarEvent) -> str:
@@ -583,8 +791,9 @@ def _store_card_summary(
     app[CARD_SUMMARIES_KEY][feishu_message_id] = {
         "summary": summary[:4000],
         "profile_id": profile_id,
-        "chat_id": event.chat_id,
-        "message_id": feishu_message_id,
+        "chat_id_hash": _diagnostic_id_hash(event.chat_id),
+        "message_id_hash": _diagnostic_id_hash(feishu_message_id),
+        "source_message_id_hash": _diagnostic_id_hash(event.message_id),
     }
 
 

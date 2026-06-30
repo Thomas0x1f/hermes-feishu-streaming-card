@@ -73,6 +73,13 @@ def test_apply_patch_013_plus_started_hook_uses_reply_anchor_message_id():
 
     assert "_hfc_started_message_id = self._reply_anchor_for_event(event)" in started_block
     assert '"message_id": _hfc_started_message_id' in started_block
+    assert "handle_hfc_command_from_hermes_locals as _hfc_handle_command" in started_block
+    assert (
+        "if _hfc_handle_command({**locals(), \"message_id\": _hfc_started_message_id}):"
+        in started_block
+    )
+    assert "return None" in started_block
+    assert started_block.index("_hfc_handle_command") < started_block.index("_hfc_emit(")
     assert started_block.index("_hfc_started_message_id") < started_block.index(
         "_hfc_emit("
     )
@@ -140,6 +147,9 @@ def test_apply_patch_inserts_real_runtime_hook_call():
     patched = patcher.apply_patch(content)
 
     assert "from hermes_feishu_card.hook_runtime import emit_from_hermes_locals" in patched
+    assert "handle_hfc_command_from_hermes_locals as _hfc_handle_command" in patched
+    assert "if _hfc_handle_command(locals()):" in patched
+    assert patched.index("_hfc_handle_command") < patched.index("_hfc_emit(locals())")
     assert "_hfc_emit(locals())" in patched
     assert "        pass\n    except Exception:" not in patched
 
