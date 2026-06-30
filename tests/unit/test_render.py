@@ -20,7 +20,7 @@ def test_render_thinking_card_has_two_state_label_and_tools():
     assert card["header"]["subtitle"]["content"] == "思考中"
     content = str(card)
     assert "正在分析。" in content
-    assert "工具调用 1 次" in content
+    assert "思考与工具 · 1 次工具调用" in content
 
 
 def test_render_card_accepts_custom_header_title():
@@ -507,6 +507,45 @@ def test_render_answer_stays_primary_and_reasoning_moves_to_timeline():
     assert timeline["tag"] == "collapsible_panel"
     assert timeline["expanded"] is False
     assert "先分析约束。" in str(timeline)
+
+
+def test_render_omits_redundant_tool_summary_when_timeline_is_visible():
+    from hermes_feishu_card.events import SidecarEvent
+
+    session = CardSession(conversation_id="chat-1", message_id="msg-1", chat_id="oc_abc")
+    session.apply(
+        SidecarEvent(
+            schema_version="1",
+            event="thinking.delta",
+            conversation_id="chat-1",
+            message_id="msg-1",
+            chat_id="oc_abc",
+            platform="feishu",
+            sequence=1,
+            created_at=0.0,
+            data={"text": "先分析。"},
+        )
+    )
+    session.apply(
+        SidecarEvent(
+            schema_version="1",
+            event="tool.updated",
+            conversation_id="chat-1",
+            message_id="msg-1",
+            chat_id="oc_abc",
+            platform="feishu",
+            sequence=2,
+            created_at=0.0,
+            data={"tool_id": "tool-1", "name": "search", "status": "completed"},
+        )
+    )
+
+    card = render_card(session)
+    element_ids = [item.get("element_id") for item in card["body"]["elements"]]
+
+    assert "auxiliary_timeline" in element_ids
+    assert "tool_summary" not in element_ids
+    assert "思考与工具 · 1 次工具调用" in str(card)
 
 
 def test_render_timeline_folds_old_entries_before_answer():

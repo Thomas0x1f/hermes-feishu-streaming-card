@@ -74,21 +74,20 @@ def render_card(
             primary_text = "正在思考..."
         else:
             primary_text = normalize_stream_text(session.visible_main_text)
-    tool_summary = _render_tool_summary(session, timeline_visible=show_reasoning)
     attachment_summary = _render_attachment_summary(session)
     footer = _render_footer(session, footer_fields)
     header_title = title.strip() if isinstance(title, str) and title.strip() else DEFAULT_TITLE
     elements = _render_main_content_elements(primary_text)
+    timeline_elements: list[Dict[str, Any]] = []
     if show_reasoning:
-        elements.extend(
-            _render_timeline_elements(
-                session,
-                expanded=timeline_expanded,
-                max_items=max_timeline_items,
-                max_reasoning_chars=max_reasoning_chars,
-                max_tool_result_chars=max_tool_result_chars,
-            )
+        timeline_elements = _render_timeline_elements(
+            session,
+            expanded=timeline_expanded,
+            max_items=max_timeline_items,
+            max_reasoning_chars=max_reasoning_chars,
+            max_tool_result_chars=max_tool_result_chars,
         )
+        elements.extend(timeline_elements)
     elements.extend(_render_interaction_elements(session, interaction_mode=interaction_mode))
     if attachment_summary:
         elements.append(
@@ -98,13 +97,16 @@ def render_card(
                 "content": attachment_summary,
             }
         )
-    elements.extend(
-        [
-            {"tag": "hr", "element_id": "main_divider"},
-            {"tag": "markdown", "element_id": "tool_summary", "content": tool_summary},
-            {"tag": "markdown", "element_id": "footer", "content": footer, "text_size": "x-small"},
-        ]
-    )
+    elements.append({"tag": "hr", "element_id": "main_divider"})
+    if not timeline_elements:
+        elements.append(
+            {
+                "tag": "markdown",
+                "element_id": "tool_summary",
+                "content": _render_tool_summary(session),
+            }
+        )
+    elements.append({"tag": "markdown", "element_id": "footer", "content": footer, "text_size": "x-small"})
     return {
         "schema": "2.0",
         "config": {
@@ -256,11 +258,9 @@ def _button_type(style: str) -> str:
     return "default"
 
 
-def _render_tool_summary(session: CardSession, *, timeline_visible: bool) -> str:
+def _render_tool_summary(session: CardSession) -> str:
     if not session.tools:
         return "工具调用 0 次"
-    if timeline_visible and getattr(session, "timeline", None) and session.timeline.snapshot():
-        return f"工具调用 {session.tool_count} 次"
     lines = [f"工具调用 {session.tool_count} 次"]
     for tool in session.tools.values():
         lines.append(f"- `{tool.name}`: {tool.status}")
