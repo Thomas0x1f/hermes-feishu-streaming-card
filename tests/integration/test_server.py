@@ -376,6 +376,64 @@ async def test_card_config_controls_timeline_rendering():
     assert "内容已折叠" in str(timeline)
 
 
+async def test_card_config_string_booleans_control_timeline_rendering():
+    feishu_client = FakeFeishuClient()
+    app = create_app(
+        feishu_client,
+        card_config={
+            "show_reasoning": "false",
+            "timeline_expanded": "true",
+        },
+    )
+    server = TestServer(app)
+    test_client = TestClient(server)
+    await test_client.start_server()
+    try:
+        await test_client.post("/events", json=event_payload("message.started", 0))
+        await test_client.post(
+            "/events",
+            json=event_payload("thinking.delta", 1, {"text": "这段思考应该被隐藏"}),
+        )
+        await wait_for_card_update(feishu_client, "正在思考...")
+    finally:
+        await test_client.close()
+
+    card = feishu_client.updated[-1][1]
+    content = str(card)
+    assert "auxiliary_timeline" not in content
+    assert "这段思考应该被隐藏" not in content
+
+    feishu_client = FakeFeishuClient()
+    app = create_app(
+        feishu_client,
+        card_config={
+            "show_reasoning": "true",
+            "timeline_expanded": "true",
+        },
+    )
+    server = TestServer(app)
+    test_client = TestClient(server)
+    await test_client.start_server()
+    try:
+        await test_client.post("/events", json=event_payload("message.started", 0))
+        await test_client.post(
+            "/events",
+            json=event_payload("thinking.delta", 1, {"text": "这段思考应该展示"}),
+        )
+        await wait_for_card_update(feishu_client, "正在思考...")
+    finally:
+        await test_client.close()
+
+    card = feishu_client.updated[-1][1]
+    timeline = next(
+        item
+        for item in card["body"]["elements"]
+        if item.get("element_id") == "auxiliary_timeline"
+    )
+    assert timeline["expanded"] is True
+    assert "这段思考应该展示" in str(timeline)
+
+
 async def test_message_started_sends_card_as_thread_reply(client):
     test_client, feishu_client = client
 
