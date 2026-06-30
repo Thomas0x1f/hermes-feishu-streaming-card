@@ -294,7 +294,7 @@ def test_docs_describe_sidecar_process_management_scope():
     assert "stop --config" in docs
     assert "/health" in docs
     assert "PID/token" in docs
-    assert "process_pid/process_token" in docs
+    assert "process_pid/process_token_hash" in docs
     assert "POSIX" in docs
     assert "no-op client" in docs
     assert "- [x] 将 sidecar 进程管理从占位 `status` 扩展为可启动、可停止、可探活。" in docs

@@ -326,8 +326,11 @@ async def test_completed_without_deltas_updates_started_card(client):
 
     health = await test_client.get("/health")
     body = await health.json()
-    assert body["sessions"]["hermes-message-1"]["status"] == "completed"
-    assert body["sessions"]["hermes-message-1"]["answer_chars"] > 0
+    assert "hermes-message-1" not in body["sessions"]
+    assert len(body["sessions"]) == 1
+    session_snapshot = next(iter(body["sessions"].values()))
+    assert session_snapshot["status"] == "completed"
+    assert session_snapshot["answer_chars"] > 0
     assert body["metrics"]["feishu_update_attempts"] == 1
 
 
@@ -1213,12 +1216,11 @@ async def test_health_reports_last_attachment_event_for_native_delivery(client):
     assert completed.status == 200
     health = await test_client.get("/health")
     diagnostics = (await health.json())["diagnostics"]
-    assert diagnostics["last_attachment_event"] == {
-        "message_id": "hermes-message-1",
-        "event": "message.completed",
-        "attachment_count": 1,
-        "native_delivery": "allowed",
-    }
+    assert diagnostics["last_attachment_event"]["event"] == "message.completed"
+    assert diagnostics["last_attachment_event"]["attachment_count"] == 1
+    assert diagnostics["last_attachment_event"]["native_delivery"] == "allowed"
+    assert diagnostics["last_attachment_event"]["message_id_hash"]
+    assert "message_id" not in diagnostics["last_attachment_event"]
 
 
 async def test_terminal_update_failure_is_retried_in_background(client, monkeypatch):
@@ -1465,14 +1467,16 @@ async def test_health_reports_safe_routing_diagnostics_without_secrets():
     assert routing["default_bot"] == "default"
     assert routing["bot_count"] == 2
     assert routing["chat_binding_count"] == 1
-    assert routing["last_route"] == {
-        "message_id": "hermes-message-1",
-        "chat_id": "oc_sales",
-        "bot_id": "sales",
-        "reason": "bindings.chats",
-    }
+    assert routing["last_route"]["bot_id"] == "sales"
+    assert routing["last_route"]["reason"] == "bindings.chats"
+    assert routing["last_route"]["chat_id_hash"]
+    assert routing["last_route"]["message_id_hash"]
     assert routing["last_route_error"] == ""
+    assert "chat_id" not in routing["last_route"]
+    assert "message_id" not in routing["last_route"]
     assert "registry-secret" not in str(body)
+    assert "oc_sales" not in str(body)
+    assert "hermes-message-1" not in str(body)
     assert "secret" not in routing
 
 
@@ -1508,18 +1512,22 @@ async def test_health_routing_groups_multi_profile_diagnostics_without_secrets()
     assert routing["profile_count"] == 2
     assert routing["bot_count"] == 4
     assert routing["chat_binding_count"] == 2
-    assert routing["last_route"] == {
-        "message_id": "hermes-message-1",
-        "chat_id": "oc_sales",
-        "profile_id": "work",
-        "bot_id": "sales",
-        "reason": "bindings.chats",
-    }
+    assert routing["last_route"]["profile_id"] == "work"
+    assert routing["last_route"]["bot_id"] == "sales"
+    assert routing["last_route"]["reason"] == "bindings.chats"
+    assert routing["last_route"]["chat_id_hash"]
+    assert routing["last_route"]["message_id_hash"]
     assert routing["profiles"]["work"]["bot_count"] == 2
     assert routing["profiles"]["work"]["chat_binding_count"] == 1
     assert routing["profiles"]["work"]["last_route"]["bot_id"] == "sales"
+    assert routing["profiles"]["work"]["last_route"]["chat_id_hash"]
+    assert routing["profiles"]["work"]["last_route"]["message_id_hash"]
     assert routing["profiles"]["work"]["last_route_error"] == ""
+    assert "chat_id" not in routing["profiles"]["work"]["last_route"]
+    assert "message_id" not in routing["profiles"]["work"]["last_route"]
     assert "registry-secret" not in str(routing)
+    assert "oc_sales" not in str(body)
+    assert "hermes-message-1" not in str(body)
     assert "secret" not in routing["profiles"]["work"]
 
 

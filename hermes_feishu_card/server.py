@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import time
 import asyncio
@@ -93,14 +94,14 @@ async def _health(request: web.Request) -> web.Response:
         "metrics": metrics.snapshot(),
         "reply_index": {
             "entries": len(request.app[CARD_SUMMARIES_KEY]),
-            "last_lookup": diagnostics.get("last_reply_lookup", {}),
+            "last_lookup": _sanitize_health_diagnostics(diagnostics.get("last_reply_lookup", {})),
         },
         "cron": {
             "cards_sent": metrics.cron_cards_sent,
             "fallbacks": metrics.cron_fallbacks,
         },
         "sessions": {
-            message_id: {
+            _diagnostic_id_hash(message_id): {
                 "status": session.status,
                 "last_sequence": session.last_sequence,
                 "answer_chars": len(session.answer_text),
@@ -109,13 +110,13 @@ async def _health(request: web.Request) -> web.Response:
             }
             for message_id, session in sessions.items()
         },
-        "diagnostics": diagnostics,
-        "routing": request.app[ROUTING_DIAGNOSTICS_KEY],
-        "profile_diagnostics": request.app[PROFILE_DIAGNOSTICS_KEY],
+        "diagnostics": _sanitize_health_diagnostics(diagnostics),
+        "routing": _sanitize_health_diagnostics(request.app[ROUTING_DIAGNOSTICS_KEY]),
+        "profile_diagnostics": _sanitize_health_diagnostics(request.app[PROFILE_DIAGNOSTICS_KEY]),
     }
     process_token = request.app[PROCESS_TOKEN_KEY]
     if process_token:
-        response["process_token"] = process_token
+        response["process_token_hash"] = _full_diagnostic_hash(process_token)
 
     # Multi-profile stats
     boundary = request.app.get(FEISHU_CLIENT_KEY)
@@ -128,7 +129,7 @@ async def _health(request: web.Request) -> web.Response:
             profile_stats[profile_id] = {
                 "active_sessions": len(profile_sessions),
                 "sessions": {
-                    key.replace(f"{profile_id}:", ""): {
+                    _diagnostic_id_hash(key.replace(f"{profile_id}:", "")): {
                         "status": s.status,
                         "last_sequence": s.last_sequence,
                     }
@@ -420,7 +421,7 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                 message_bot_ids[_session_key(event)] = route.bot_id
                 _store_card_summary(request.app, event, session, message_id)
                 request.app[DIAGNOSTICS_KEY]["last_terminal_event"] = {
-                    "message_id": event.message_id,
+                    "message_id_hash": _diagnostic_id_hash(event.message_id),
                     "event": event.event,
                     "sequence": event.sequence,
                     "applied": applied,
@@ -448,7 +449,7 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
         _store_interaction_result(request.app, session)
     if event.event in TERMINAL_EVENTS:
         request.app[DIAGNOSTICS_KEY]["last_terminal_event"] = {
-            "message_id": event.message_id,
+            "message_id_hash": _diagnostic_id_hash(event.message_id),
             "event": event.event,
             "sequence": event.sequence,
             "applied": applied,
@@ -593,11 +594,11 @@ def _record_profile_diagnostics(app: web.Application, event: SidecarEvent) -> No
     source = str(data.get("profile_source") or "")
     diagnostics = app[PROFILE_DIAGNOSTICS_KEY].setdefault(
         profile_id,
-        {"events": 0, "last_profile_source": "", "last_message_id": ""},
+        {"events": 0, "last_profile_source": "", "last_message_id_hash": ""},
     )
     diagnostics["events"] += 1
     diagnostics["last_profile_source"] = source
-    diagnostics["last_message_id"] = event.message_id
+    diagnostics["last_message_id_hash"] = _diagnostic_id_hash(event.message_id)
 
 
 def _record_attachment_diagnostics(app: web.Application, event: SidecarEvent) -> None:
@@ -606,7 +607,7 @@ def _record_attachment_diagnostics(app: web.Application, event: SidecarEvent) ->
     if not isinstance(attachments, list) or not attachments:
         return
     app[DIAGNOSTICS_KEY]["last_attachment_event"] = {
-        "message_id": event.message_id,
+        "message_id_hash": _diagnostic_id_hash(event.message_id),
         "event": event.event,
         "attachment_count": len(
             [item for item in attachments if isinstance(item, dict)]
@@ -876,8 +877,8 @@ def _resolve_route(request: web.Request, event: SidecarEvent) -> RouteResult | N
 
     if not _is_client_factory(feishu_client):
         diagnostics["last_route"] = {
-            "message_id": event.message_id,
-            "chat_id": event.chat_id,
+            "message_id_hash": _diagnostic_id_hash(event.message_id),
+            "chat_id_hash": _diagnostic_id_hash(event.chat_id),
             "bot_id": "",
             "reason": "legacy",
         }
@@ -899,8 +900,8 @@ def _resolve_route(request: web.Request, event: SidecarEvent) -> RouteResult | N
         return None
 
     route_diagnostics = {
-        "message_id": event.message_id,
-        "chat_id": event.chat_id,
+        "message_id_hash": _diagnostic_id_hash(event.message_id),
+        "chat_id_hash": _diagnostic_id_hash(event.chat_id),
         "bot_id": route.bot_id,
         "reason": route.reason,
     }
@@ -1080,6 +1081,51 @@ def _sanitize_routing_diagnostics(value: Any) -> Any:
 def _is_sensitive_key(key: str) -> bool:
     lowered = key.lower()
     return any(part in lowered for part in ("secret", "token", "password", "key"))
+
+
+def _sanitize_health_diagnostics(value: Any) -> Any:
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            lowered = key_text.lower()
+            if lowered.endswith("_hash"):
+                sanitized[key_text] = item
+                continue
+            if _health_key_should_redact(lowered):
+                continue
+            if _health_key_should_hash(lowered):
+                sanitized[f"{key_text}_hash"] = _diagnostic_id_hash(item)
+                continue
+            sanitized[key_text] = _sanitize_health_diagnostics(item)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_health_diagnostics(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_health_diagnostics(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _health_key_should_redact(key: str) -> bool:
+    return any(part in key for part in ("secret", "token", "password"))
+
+
+def _health_key_should_hash(key: str) -> bool:
+    return any(part in key for part in ("chat_id", "open_id", "message_id"))
+
+
+def _diagnostic_id_hash(value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        return ""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
+def _full_diagnostic_hash(value: str) -> str:
+    if not value:
+        return ""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _would_apply(session: CardSession, event: SidecarEvent) -> bool:

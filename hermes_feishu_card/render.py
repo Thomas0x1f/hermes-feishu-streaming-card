@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import ast
+import json
 import re
+import time as _time
 from typing import Any, Dict
 
 from .session import CardSession
 from .text import normalize_stream_text, split_markdown_blocks
-import time as _time
 
 DEFAULT_FOOTER_FIELDS = (
     "duration",
@@ -24,15 +26,27 @@ _REDACTABLE_TOOL_DETAIL_KEYS = (
     "app_secret",
     "chat_id",
     "open_id",
+    "message_id",
     "password",
     "token",
     "secret",
 )
-_TOOL_DETAIL_REDACTION_RE = re.compile(
-    r"(?i)\b([A-Za-z0-9_]*(?:"
+_TOOL_DETAIL_KEY_PATTERN = (
+    r"[A-Za-z0-9_]*(?:"
     + "|".join(re.escape(key) for key in _REDACTABLE_TOOL_DETAIL_KEYS)
-    + r")[A-Za-z0-9_]*)\b(\s*[:=]\s*)([^\s,;&]+)"
+    + r")[A-Za-z0-9_]*"
 )
+_TOOL_DETAIL_REDACTION_RE = re.compile(
+    r"(?i)([\"']?"
+    + _TOOL_DETAIL_KEY_PATTERN
+    + r"[\"']?\s*[:=]\s*)([^\s,;&}\]]+)"
+)
+_TOOL_DETAIL_QUOTED_REDACTION_RE = re.compile(
+    r"(?is)([\"']?"
+    + _TOOL_DETAIL_KEY_PATTERN
+    + r"[\"']?\s*[:=]\s*)([\"'])(.*?)(\2)"
+)
+_TOOL_DETAIL_REDACTED = "[REDACTED]"
 
 def _spinner_text(label: str = "生成中") -> str:
     frame = _SPINNER_FRAMES[int(_time.time() * 8) % len(_SPINNER_FRAMES)]
@@ -407,4 +421,50 @@ def _limit_text(text: str, limit: int) -> str:
 def _redact_tool_detail(text: str) -> str:
     if not text:
         return text
-    return _TOOL_DETAIL_REDACTION_RE.sub(r"\1\2[REDACTED]", text)
+    structured = _parse_tool_detail(text)
+    if structured is not None:
+        return _dump_redacted_tool_detail(structured)
+    redacted = _TOOL_DETAIL_QUOTED_REDACTION_RE.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}{_TOOL_DETAIL_REDACTED}{match.group(4)}",
+        text,
+    )
+    return _TOOL_DETAIL_REDACTION_RE.sub(r"\1[REDACTED]", redacted)
+
+
+def _parse_tool_detail(text: str) -> tuple[str, Any] | None:
+    try:
+        return ("json", _redact_tool_detail_value(json.loads(text)))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
+    try:
+        return ("python", _redact_tool_detail_value(ast.literal_eval(text)))
+    except (SyntaxError, ValueError):
+        return None
+
+
+def _redact_tool_detail_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[Any, Any] = {}
+        for key, item in value.items():
+            if _is_sensitive_tool_detail_key(str(key)):
+                redacted[key] = _TOOL_DETAIL_REDACTED
+            else:
+                redacted[key] = _redact_tool_detail_value(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_tool_detail_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_tool_detail_value(item) for item in value)
+    return value
+
+
+def _dump_redacted_tool_detail(parsed: tuple[str, Any]) -> str:
+    format_name, value = parsed
+    if format_name == "json":
+        return json.dumps(value, ensure_ascii=False, separators=(", ", ": "))
+    return repr(value)
+
+
+def _is_sensitive_tool_detail_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(part in lowered for part in _REDACTABLE_TOOL_DETAIL_KEYS)

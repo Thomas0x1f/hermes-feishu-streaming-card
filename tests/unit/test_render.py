@@ -588,6 +588,58 @@ def test_render_timeline_redacts_sensitive_tool_detail():
     assert "lark_send" in content
 
 
+def test_render_timeline_redacts_sensitive_tool_detail_in_json_and_repr():
+    from hermes_feishu_card.events import SidecarEvent
+
+    session = CardSession(conversation_id="chat-1", message_id="msg-1", chat_id="oc_abc")
+    session.apply(
+        SidecarEvent(
+            schema_version="1",
+            event="tool.updated",
+            conversation_id="chat-1",
+            message_id="msg-1",
+            chat_id="oc_abc",
+            platform="feishu",
+            sequence=1,
+            created_at=0.0,
+            data={
+                "tool_id": "tool-1",
+                "name": "timeline-json",
+                "status": "completed",
+                "detail": '{"chat_id":"oc_secret","tenant_access_token":"token-123"}',
+            },
+        )
+    )
+    session.apply(
+        SidecarEvent(
+            schema_version="1",
+            event="tool.updated",
+            conversation_id="chat-1",
+            message_id="msg-1",
+            chat_id="oc_abc",
+            platform="feishu",
+            sequence=2,
+            created_at=0.0,
+            data={
+                "tool_id": "tool-2",
+                "name": "timeline-repr",
+                "status": "completed",
+                "detail": "{'app_secret': 'super-secret', 'open_id': 'ou_secret'}",
+            },
+        )
+    )
+
+    card = render_card(session)
+    timeline = next(item for item in card["body"]["elements"] if item.get("element_id") == "auxiliary_timeline")
+    content = str(timeline)
+
+    assert "oc_secret" not in content
+    assert "token-123" not in content
+    assert "super-secret" not in content
+    assert "ou_secret" not in content
+    assert "[REDACTED]" in content
+
+
 def test_render_thinking_without_answer_uses_placeholder_in_main_content():
     from hermes_feishu_card.events import SidecarEvent
 
