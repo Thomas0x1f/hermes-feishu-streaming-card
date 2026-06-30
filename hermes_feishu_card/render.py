@@ -15,6 +15,7 @@ DEFAULT_FOOTER_FIELDS = (
     "context",
 )
 MAIN_CONTENT_CHUNK_CHARS = 2400
+AUXILIARY_TIMELINE_MAX_CHARS = 280
 DEFAULT_TITLE = "Hermes Agent"
 
 _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
@@ -285,6 +286,7 @@ def _render_timeline_elements(
     panel_content = "\n".join(lines).strip()
     if not panel_content:
         return []
+    panel_content = _limit_text(panel_content, AUXILIARY_TIMELINE_MAX_CHARS)
     return [
         {
             "tag": "collapsible_panel",

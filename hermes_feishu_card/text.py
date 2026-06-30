@@ -11,6 +11,7 @@ TABLE_SEPARATOR_RE = re.compile(
     re.MULTILINE,
 )
 TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+LIST_BOUNDARY_RE = re.compile(r"\n(?:[-*]|\d+\.) ")
 
 
 def normalize_stream_text(text: str) -> str:
@@ -251,13 +252,45 @@ def _split_plain_block(block: str, max_block_size: int) -> list[str]:
     chunks: list[str] = []
     remaining = block
     while len(remaining) > max_block_size:
-        split_at = remaining.rfind(" ", 0, max_block_size + 1)
-        newline_at = remaining.rfind("\n", 0, max_block_size + 1)
-        split_at = max(split_at, newline_at)
-        if split_at <= 0:
-            split_at = max_block_size
+        split_at = _safe_plain_split_index(remaining, max_block_size)
         chunks.append(remaining[:split_at])
         remaining = remaining[split_at:]
     if remaining:
         chunks.append(remaining)
     return chunks
+
+
+def _safe_plain_split_index(text: str, max_block_size: int) -> int:
+    window = text[: max_block_size + 1]
+    candidate_groups = (
+        sorted({match.start() + 1 for match in LIST_BOUNDARY_RE.finditer(window)}, reverse=True),
+        [_separator_split_index(window, "\n")],
+        [_separator_split_index(window, " ")],
+    )
+    for candidates in candidate_groups:
+        for split_at in candidates:
+            if split_at <= 0:
+                continue
+            safe_split = _adjust_split_for_inline_code(window, split_at)
+            if safe_split > 0:
+                return safe_split
+    return max_block_size
+
+
+def _separator_split_index(text: str, separator: str) -> int:
+    index = text.rfind(separator)
+    if index <= 0:
+        return 0
+    return index + len(separator)
+
+
+def _adjust_split_for_inline_code(text: str, split_at: int) -> int:
+    prefix = text[:split_at]
+    if prefix.count("`") % 2 == 0:
+        return split_at
+    before_code = text.rfind("`", 0, split_at)
+    while before_code > 0:
+        if text[:before_code].count("`") % 2 == 0:
+            return before_code
+        before_code = text.rfind("`", 0, before_code)
+    return 0

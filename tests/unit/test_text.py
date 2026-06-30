@@ -138,3 +138,25 @@ def test_split_markdown_blocks_splits_oversized_plain_text():
     assert len(chunks) > 1
     assert "".join(chunks).replace("\n", "") == text.replace("\n", "")
     assert all(len(chunk) <= 1000 for chunk in chunks)
+
+
+def test_split_markdown_blocks_prefers_list_item_boundaries():
+    text = "\n".join(f"1. item {index} {'甲' * 40}" for index in range(80))
+
+    chunks = split_markdown_blocks(text, 120)
+
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 120 for chunk in chunks)
+    assert all(chunk.startswith("1. ") for chunk in chunks[1:])
+    assert "".join(chunks).replace("\n", "") == text.replace("\n", "")
+
+
+def test_split_markdown_blocks_avoids_inline_code_split_when_possible():
+    text = "前言\n\n" + " ".join("`alpha beta gamma delta epsilon`" for _ in range(80))
+
+    chunks = split_markdown_blocks(text, 120)
+
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 120 for chunk in chunks)
+    for chunk in chunks:
+        assert chunk.count("`") % 2 == 0

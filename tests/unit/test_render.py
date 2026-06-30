@@ -279,6 +279,66 @@ def test_render_long_code_block_chunks_remain_fenced():
     assert all(item["content"].rstrip().endswith("```") for item in main_elements)
 
 
+def test_render_timeline_limits_reasoning_without_truncating_answer():
+    from hermes_feishu_card.events import SidecarEvent
+
+    session = CardSession(conversation_id="chat-1", message_id="msg-1", chat_id="oc_abc")
+    sequence = 1
+    for index in range(6):
+        session.apply(
+            SidecarEvent(
+                schema_version="1",
+                event="thinking.delta",
+                conversation_id="chat-1",
+                message_id="msg-1",
+                chat_id="oc_abc",
+                platform="feishu",
+                sequence=sequence,
+                created_at=0.0,
+                data={"text": "思考" * 200, "mode": "append_block"},
+            )
+        )
+        sequence += 1
+        session.apply(
+            SidecarEvent(
+                schema_version="1",
+                event="tool.updated",
+                conversation_id="chat-1",
+                message_id="msg-1",
+                chat_id="oc_abc",
+                platform="feishu",
+                sequence=sequence,
+                created_at=0.0,
+                data={
+                    "tool_id": f"tool-{index}",
+                    "name": "search",
+                    "status": "completed",
+                    "detail": "结果" * 200,
+                },
+            )
+        )
+        sequence += 1
+    session.answer_text = "最终回答完整保留" * 20
+
+    card = render_card(
+        session,
+        max_reasoning_chars=80,
+        max_tool_result_chars=80,
+        max_timeline_items=3,
+    )
+
+    content = str(card)
+    assert "最终回答完整保留" in content
+    assert "内容已折叠" in content
+    assert len(
+        next(
+            item
+            for item in card["body"]["elements"]
+            if item.get("element_id") == "auxiliary_timeline"
+        )["elements"][0]["content"]
+    ) < 300
+
+
 def test_render_failed_card_shows_error_without_thinking():
     session = CardSession(conversation_id="chat-1", message_id="msg-1", chat_id="oc_abc")
     session.thinking_text = "不会展示"
