@@ -19,6 +19,7 @@
 - [ ] 卡片内提供“继续”“重试”“取消”等操作入口。
 - [ ] 工具调用详情支持查看参数摘要、耗时、失败原因。
 - [ ] 卡片内运维命令支持安全诊断与可控执行。
+- [ ] 安全清理：`/messages/{message_id}/summary` 返回中的 `chat_id` / Feishu `message_id` 改为 hash 或移除。
 - [ ] 群聊规则支持 @机器人触发、白名单、chat binding 自动提示。
 
 ### V3.8.2：维护体系与扩展面（待办）
@@ -26,6 +27,8 @@
 - [ ] 补齐 E2E / fixture 覆盖，验证 V3.8.x 卡片体验和终态 drain 主链路。
 - [ ] 完成 agent guide、维护手册和开放扩展面的文档整理。
 - [ ] 评估卡片 timeline/metrics 的长期兼容边界，并补发布回归清单。
+- [ ] 完全兜住极端 Markdown table 边界：当结构化拆分失败时输出安全折叠提示，避免回退 plain split。
+- [ ] 清理 terminal 后的 closed `FlushController`，并评估更有诊断价值的 queue depth / coalesced backlog 指标。
 
 ## V3.3.0 (已完成)
 
