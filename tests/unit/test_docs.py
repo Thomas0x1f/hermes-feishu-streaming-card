@@ -25,8 +25,7 @@ def test_readme_documents_sidecar_only_and_supported_hermes_version():
     assert "img.shields.io/badge/Feishu%20%2F%20Lark-Streaming%20Cards" in readme
     assert "img.shields.io/badge/Runtime-Sidecar--only" in readme
     assert "docs/assets/readme-cover.png" in readme
-    assert "docs/assets/feishu-v382-timeline-collapsed.png" in readme
-    assert "docs/assets/feishu-v382-timeline-expanded.png" in readme
+    assert "docs/assets/feishu-v382-readme-showcase.png" in readme
     assert "项目亮点" in readme
     assert "解决的真实痛点" in readme
     assert "Hermes Agent Gateway 的飞书/Lark 回复变成一张持续更新的交互式卡片" in readme
@@ -43,8 +42,7 @@ def test_readme_documents_sidecar_only_and_supported_hermes_version():
     assert "Git tag `v2026.4.23+`" in readme
     assert "docs/assets/feishu-weather-card.png" in readme
     assert (ROOT / "docs/assets/readme-cover.png").exists()
-    assert (ROOT / "docs/assets/feishu-v382-timeline-collapsed.png").exists()
-    assert (ROOT / "docs/assets/feishu-v382-timeline-expanded.png").exists()
+    assert (ROOT / "docs/assets/feishu-v382-readme-showcase.png").exists()
     assert (ROOT / "docs/assets/feishu-weather-card.png").exists()
     assert "V3.2" in readme
     assert "多 bot" in readme
@@ -202,8 +200,7 @@ def test_v382_release_notes_are_linked():
     release_text = release_notes.read_text(encoding="utf-8")
     assert "pre-tool answer" in release_text
     assert "thinking.delta" in release_text
-    assert "feishu-v382-timeline-collapsed.png" in release_text
-    assert "feishu-v382-timeline-expanded.png" in release_text
+    assert "feishu-v382-readme-showcase.png" in release_text
     assert "hermes-feishu-card-v3.8.2-macos.tar.gz" in release_text
     assert 'HFC_VERSION: "${HFC_VERSION:-v3.8.2}"' in compose
 
@@ -241,8 +238,7 @@ def test_english_readme_and_docs_are_linked():
     assert "Pain Points Solved" in english_readme
     assert "img.shields.io/github/stars/baileyh8/hermes-feishu-streaming-card" in english_readme
     assert "docs/assets/readme-cover.png" in english_readme
-    assert "docs/assets/feishu-v382-timeline-collapsed.png" in english_readme
-    assert "docs/assets/feishu-v382-timeline-expanded.png" in english_readme
+    assert "docs/assets/feishu-v382-readme-showcase.png" in english_readme
     assert "setup --hermes-dir" in english_readme
     assert "Hermes Gateway Streaming And Thinking" in english_readme
     assert "streaming.enabled" in english_readme

@@ -18,10 +18,7 @@ Hermes 飞书流式卡片插件把 Hermes Agent Gateway 的飞书/Lark 回复变
 
 它重点解决飞书接入 Hermes 时最常见的痛点：流式内容漏字/乱序、长表格和代码块渲染成 raw markdown、工具调用过程不可见、approval/clarify 需要手工回复、sidecar 故障难排查、多 bot / 多 profile 难运维，以及升级 Hermes 后 hook 兼容不确定。
 
-<p align="center">
-  <img src="docs/assets/feishu-v382-timeline-collapsed.png" alt="V3.8.2 飞书卡片折叠态：最终答案保留在正文，思考与工具收进 timeline" width="48%">
-  <img src="docs/assets/feishu-v382-timeline-expanded.png" alt="V3.8.2 飞书卡片展开态：思考与工具使用不同层级展示" width="48%">
-</p>
+![V3.8.2 飞书卡片主回答与思考工具 timeline 展示](docs/assets/feishu-v382-readme-showcase.png)
 
 V3.8.2 起，最终答案保留在主内容区，pre-tool answer 会按“正文展示 -> 下一段到来后归档进 timeline”的节奏收束，思考与工具在折叠区使用不同字号和灰度层级；卡片底部不再重复展示同一份工具调用摘要。
 

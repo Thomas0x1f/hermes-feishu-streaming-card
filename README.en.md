@@ -18,10 +18,7 @@ Hermes Feishu Streaming Card turns Hermes Agent Gateway replies in Feishu/Lark i
 
 It targets the real pain points of using Hermes inside Feishu: missing or out-of-order streaming text, long tables/code blocks rendered as raw Markdown, invisible tool progress, manual approval replies, sidecar troubleshooting, multi-bot/profile routing, and uncertain hook compatibility after Hermes upgrades.
 
-<p align="center">
-  <img src="docs/assets/feishu-v382-timeline-collapsed.png" alt="V3.8.2 Feishu card collapsed timeline: final answer stays in the main body" width="48%">
-  <img src="docs/assets/feishu-v382-timeline-expanded.png" alt="V3.8.2 Feishu card expanded timeline: reasoning and tools use separate visual hierarchy" width="48%">
-</p>
+![V3.8.2 Feishu card primary answer and reasoning/tool timeline showcase](docs/assets/feishu-v382-readme-showcase.png)
 
 Since V3.8.2, the final answer stays in the primary content area while pre-tool answer blocks follow a "show in main body -> archive when the next block arrives" rhythm. Reasoning and tools use different text sizes and visual weight inside the collapsible auxiliary timeline, and the footer no longer repeats the same tool-call summary.
 
