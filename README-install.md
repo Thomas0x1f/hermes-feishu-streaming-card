@@ -43,6 +43,10 @@ card action path; local/private sidecars no longer have to fall back to gray
 native text for `/new` or `/model`, and no public HTTP callback is required for
 these native slash/model command cards.
 
+From V3.8.5, always-allowed or no-confirm slash-command results also stay in
+Feishu/Lark interactive cards. Re-run `install` after upgrading so the Hermes
+Gateway hook passes the current event into the command-card adapter patch.
+
 ## macOS / Linux
 
 ```bash
@@ -59,7 +63,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 | Variable | Default | Description |
 |---|---|---|
-| `HFC_VERSION` | `latest` | Git tag or branch to install, such as `v3.8.4`, `v3.6.6`, or `main`. |
+| `HFC_VERSION` | `latest` | Git tag or branch to install, such as `v3.8.5`, `v3.6.6`, or `main`. |
 | `HFC_REPO` | `baileyh8/hermes-feishu-streaming-card` | GitHub repository to install from. |
 | `HERMES_DIR` | `~/.hermes/hermes-agent` | Hermes Agent root directory. |
 | `HFC_CONFIG` | `~/.hermes/config.yaml` | Sidecar config path. |
@@ -79,7 +83,7 @@ script selects Hermes venv Python and does not fall back to system Python unless
 ```
 export FEISHU_APP_ID=cli_xxx
 export FEISHU_APP_SECRET=xxx
-export HFC_VERSION=v3.8.4
+export HFC_VERSION=v3.8.5
 bash install-docker.sh
 ```
 

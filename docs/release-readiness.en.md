@@ -2,7 +2,7 @@
 
 [中文](release-readiness.md) | [English](release-readiness.en.md)
 
-Current package version: `3.8.4`. This release keeps the sidecar-only mainline, builds on V3.8.0 card UX, V3.8.1 high-frequency delta coalescing, V3.8.2 timeline readability, and V3.8.3 standalone command cards, then fixes the Feishu/Lark WebSocket long-connection path where `/new`, `/reset`, and `/model` could still fall back to gray native text. `/update` remains a non-interactive background upgrade command.
+Current package version: `3.8.5`. This release keeps the sidecar-only mainline, builds on V3.8.0 card UX, V3.8.1 high-frequency delta coalescing, V3.8.2 timeline readability, V3.8.3 standalone command cards, and V3.8.4 WebSocket-native command cards, then keeps always-allowed/no-confirm `/new`-style command results in Feishu/Lark cards. `/update` remains a non-interactive background upgrade command.
 
 ## Ready
 

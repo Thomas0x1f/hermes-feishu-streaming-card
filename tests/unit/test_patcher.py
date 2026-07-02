@@ -167,11 +167,17 @@ def test_apply_patch_installs_feishu_command_card_adapter_methods():
 
     assert "# HERMES_FEISHU_CARD_COMMAND_CARD_PATCH_BEGIN" in patched
     assert "install_feishu_command_card_adapter_methods" in patched
-    assert "_hfc_install_command_cards(self)" in patched
+    assert "_hfc_install_command_cards(self, event=event)" in patched
     assert patched.index("source = event.source") < patched.index(
         "# HERMES_FEISHU_CARD_COMMAND_CARD_PATCH_BEGIN"
     )
     assert patcher.apply_patch(patched, strategy="gateway_run_013_plus") == patched
+    legacy_patched = patched.replace(
+        "_hfc_install_command_cards(self, event=event)",
+        "_hfc_install_command_cards(self)",
+    )
+    assert patcher.apply_patch(legacy_patched, strategy="gateway_run_013_plus") == patched
+    assert patcher.remove_patch(legacy_patched) == content
     assert patcher.remove_patch(patched) == content
 
 

@@ -2,7 +2,7 @@
 
 [中文](release-readiness.md) | [English](release-readiness.en.md)
 
-当前包版本为 `3.8.4`。这一版延续 sidecar-only 主线，在 V3.8.0 卡片体验升级、V3.8.1 高频 delta 合并、V3.8.2 timeline 阅读体验和 V3.8.3 独立命令卡片基础上，修正 Feishu/Lark WebSocket 长连接部署下 `/new`、`/reset`、`/model` 仍退回灰色文本的问题，并保持 `/update` 后台升级命令不弹交互卡片。
+当前包版本为 `3.8.5`。这一版延续 sidecar-only 主线，在 V3.8.0 卡片体验升级、V3.8.1 高频 delta 合并、V3.8.2 timeline 阅读体验、V3.8.3 独立命令卡片和 V3.8.4 WebSocket 原生命令卡片基础上，补齐 `/new` 等始终允许/无需确认直通命令的结果卡片反馈，并保持 `/update` 后台升级命令不弹交互卡片。
 
 ## 已具备
 

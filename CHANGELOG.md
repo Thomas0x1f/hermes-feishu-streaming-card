@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.2.0.html).
 
+## V3.8.5 — 2026-07-02
+
+See also: [docs/release-notes-v3.8.5.md](docs/release-notes-v3.8.5.md)
+
+### Fixed
+- Fixed the always-allowed slash-command path: when Hermes executes `/new`, `/reset`, `/clear`, `/undo`, `/stop`, or direct `/model <model>` without asking for confirmation, Feishu/Lark now receives the command result as an interactive card instead of gray native text.
+- Removed the extra direct `message.update` attempt for interactive command-card callbacks. Feishu callback responses now own the in-place card update, avoiding invalid `msg_type=interactive` update warnings.
+- Updated the Gateway hook patch so Feishu command-card installation receives the current `event`, allowing command result cardification without touching unrelated normal replies.
+
+### Changed
+- `/update` remains intentionally outside command-result cardification, preserving Hermes' background upgrade behavior.
+- Patcher upgrade handling accepts the V3.8.4 command-card hook block and rewrites it to the V3.8.5 `event=event` form during install.
+
+### Tests
+- Added regression coverage for always-allowed `/new` command result cards, one-shot command-result context consumption, `/update` plain-text preservation, callback-only command-card updates, and legacy command-card hook upgrade compatibility.
+
 ## V3.8.4 — 2026-07-01
 
 See also: [docs/release-notes-v3.8.4.md](docs/release-notes-v3.8.4.md)

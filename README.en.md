@@ -25,7 +25,7 @@ Since V3.8.2, the final answer stays in the primary content area while pre-tool 
 ## Project Highlights
 
 - **Streaming card UX**: `thinking.delta`, `answer.delta`, `tool.updated`, and terminal events update one Feishu card.
-- **In-card interactions**: Hermes approval and clarify choices prefer Feishu buttons. Since V3.8.4, Feishu/Lark WebSocket long-connection deployments also render independent slash commands such as `/new`, `/reset`, and `/model` as native interactive cards, falling back to Hermes native text only when cards are unavailable.
+- **In-card interactions**: Hermes approval and clarify choices prefer Feishu buttons. Since V3.8.5, Feishu/Lark WebSocket long-connection deployments also render independent slash-command confirmations, pickers, and execution results such as `/new`, `/reset`, and `/model` as native interactive cards, falling back to Hermes native text only when cards are unavailable.
 - **Long content protection**: Markdown tables and fenced code blocks split on structure boundaries instead of raw character cuts.
 - **Multi-bot / multi-profile**: bot registry, chat bindings, profile-aware session keys, titles, and routing diagnostics.
 - **sidecar-only runtime**: Hermes hook stays fail-open while Feishu delivery, session state, retries, and health checks live in the sidecar.
@@ -41,6 +41,16 @@ Since V3.8.2, the final answer stays in the primary content area while pre-tool 
 | Long tables/code blocks render as raw Markdown | Markdown-aware table/code splitting with repeated headers and complete fences |
 | Multi-bot, group, and profile routing is hard to inspect | `bindings.chats`, profile-aware sessions, and `/health.routing` diagnostics |
 | Hook or sidecar failures are hard to debug | `doctor`, runtime import checks, `/health` metrics, fail-closed installer, restore/uninstall |
+
+## V3.8.5 Command Result Card Feedback Patch
+
+V3.8.5 completes the V3.8.4 always-allowed/no-confirm path. When Hermes directly executes `/new`, `/reset`, `/clear`, `/undo`, `/stop`, or direct `/model <model>`, the command result now replies as a Feishu/Lark interactive card instead of gray native text. `/model` switch feedback stays in a green card, while `/update` remains Hermes' background upgrade command and does not render an interaction card.
+
+- **Direct command results become cards**: the patcher passes the current `event` into hook runtime, so Feishu adapter `send()` can recognize standalone slash-command results.
+- **Cleaner interactive updates**: button and dropdown clicks rely on the Feishu callback response to update the original card, without an extra unsupported interactive `message.update` call.
+- **Upgrade compatible**: rerunning `install` rewrites the V3.8.4 command-card hook block into the V3.8.5 `event=event` form.
+
+Full release notes: [docs/release-notes-v3.8.5.md](docs/release-notes-v3.8.5.md). The previous WebSocket-native command-card hotfix is documented in [docs/release-notes-v3.8.4.md](docs/release-notes-v3.8.4.md).
 
 ## V3.8.4 Feishu WebSocket Command Cards Hotfix
 
@@ -116,7 +126,7 @@ Full release notes: [docs/release-notes-v3.6.4.md](docs/release-notes-v3.6.4.md)
 
 V3.6.3 fixes issues #56-#59. For Hermes v0.17.0+ / `v2026.6.19+`, where the real streaming implementation can move into `_run_agent_inner`, the patcher now injects `tool.updated`, `answer.delta`, `thinking.delta`, clarify, and approval hooks into `_run_agent_inner` before falling back to `_run_agent`.
 
-localhost/private sidecars keep numbered text fallback for sidecar-owned choices, while V3.8.4 uses the Feishu/Lark WebSocket long-connection card-action path for native slash/model command cards. Those standalone commands do not require a public HTTP callback.
+localhost/private sidecars keep numbered text fallback for sidecar-owned choices, while V3.8.5 uses the Feishu/Lark WebSocket long-connection card-action path for native slash/model command cards. Those standalone commands do not require a public HTTP callback, and direct command execution results also stay in cards.
 
 This release also ignores non-Feishu platforms such as Telegram at runtime event construction, and correctly resolves Windows profile paths like `C:\Users\...\AppData\Local\hermes\profiles\thinking`.
 
@@ -207,7 +217,7 @@ Common environment variables:
 
 | Variable | Default | Description |
 |---|---|---|
-| `HFC_VERSION` | `latest` | Version to install, such as `v3.8.4`, `v3.6.6`, or `main` |
+| `HFC_VERSION` | `latest` | Version to install, such as `v3.8.5`, `v3.6.6`, or `main` |
 | `HERMES_DIR` | `~/.hermes/hermes-agent` | Hermes Agent Gateway directory |
 | `HFC_CONFIG` | `~/.hermes/config.yaml` | sidecar config path |
 | `HFC_ENV_FILE` | `.env` next to `HFC_CONFIG` | Feishu credential file |
@@ -234,7 +244,7 @@ Example:
 ```bash
 export FEISHU_APP_ID=cli_xxx
 export FEISHU_APP_SECRET=xxx
-export HFC_VERSION=v3.8.4
+export HFC_VERSION=v3.8.5
 bash install-docker.sh
 ```
 
@@ -270,7 +280,7 @@ python3 -m hermes_feishu_card.cli setup --hermes-dir ~/.hermes/hermes-agent --ye
 
 ## Upgrading
 
-Upgrading from V3.2.x/V3.3.0/V3.4.x/V3.5.x/V3.6.x/V3.7.x/V3.8.0/V3.8.1/V3.8.2/V3.8.3 to V3.8.4 is backward-compatible. **Single-profile configs need no changes.** If Hermes uses its own venv, rerun `setup` or `install` after upgrading so the package also lands in the Hermes runtime Python and the hook is refreshed. V3.8.4 keeps V3.8.1 Gateway-side delta coalescing and V3.8.2 timeline readability, then fixes standalone slash-command cards for WebSocket long-connection Feishu/Lark deployments; run `doctor --explain` once after upgrading and send `/hfc status` in Feishu to verify sidecar state.
+Upgrading from V3.2.x/V3.3.0/V3.4.x/V3.5.x/V3.6.x/V3.7.x/V3.8.0/V3.8.1/V3.8.2/V3.8.3/V3.8.4 to V3.8.5 is backward-compatible. **Single-profile configs need no changes.** If Hermes uses its own venv, rerun `setup` or `install` after upgrading so the package also lands in the Hermes runtime Python and the hook is refreshed. V3.8.5 keeps V3.8.1 Gateway-side delta coalescing, V3.8.2 timeline readability, and V3.8.4 WebSocket-native command cards, then adds card feedback for always-allowed direct command results; run `doctor --explain` once after upgrading and send `/new`, `/model`, or `/hfc status` in Feishu to verify state.
 
 ```bash
 # 1. Stop sidecar
@@ -278,7 +288,7 @@ python3 -m hermes_feishu_card.cli stop --config ~/.hermes_feishu_card/config.yam
 
 # 2. Update code
 cd /path/to/hermes-feishu-streaming-card
-git checkout v3.8.4 && pip install -e ".[test]" --upgrade
+git checkout v3.8.5 && pip install -e ".[test]" --upgrade
 
 # 3. Diagnose Hermes hook strategy and anchors
 python3 -m hermes_feishu_card.cli doctor --config ~/.hermes_feishu_card/config.yaml --hermes-dir ~/.hermes/hermes-agent
@@ -447,6 +457,7 @@ The Hermes hook converts `message.started` / `thinking.delta` / `answer.delta` /
 
 | Version | Date | Highlights |
 |---------|------|-----------|
+| [v3.8.5](https://github.com/baileyh8/hermes-feishu-streaming-card/releases/tag/v3.8.5) | 2026-07 | Keeps always-allowed `/new` and similar direct command results in Feishu/Lark cards, and removes unsupported interactive direct updates |
 | [v3.8.4](https://github.com/baileyh8/hermes-feishu-streaming-card/releases/tag/v3.8.4) | 2026-07 | Feishu/Lark WebSocket-native slash/model command cards, fixing the V3.8.3 local sidecar gray text fallback gap |
 | [v3.8.3](https://github.com/baileyh8/hermes-feishu-streaming-card/releases/tag/v3.8.3) | 2026-07 | Standalone slash-command cards for `/new`/`/reset`/`/undo` confirmations, `/model` picker cards, `/update` non-interactive boundary, and text fallback |
 | [v3.8.2](https://github.com/baileyh8/hermes-feishu-streaming-card/releases/tag/v3.8.2) | 2026-07 | Card timeline readability patch with delayed pre-tool answer archival, terminal body de-duplication, separate reasoning/tool hierarchy, and fresh collapsed/expanded screenshots |

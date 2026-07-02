@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 from dataclasses import dataclass
 from hashlib import sha256
 from ipaddress import ip_address
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -16,6 +18,8 @@ import time
 from typing import Any
 from urllib import parse
 from urllib import request
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_EVENT_URL = "http://127.0.0.1:8765/events"
 DEFAULT_TIMEOUT_SECONDS = 0.8
@@ -73,6 +77,11 @@ _SEND_LOCKS_GUARD = threading.Lock()
 _POST_FAILED = object()
 _PENDING_DELTAS: dict[tuple[int, str, str, str, str], _PendingDelta] = {}
 _PENDING_DELTAS_LOCK = threading.Lock()
+_HFC_FEISHU_COMMAND_RESULT_CONTEXT: ContextVar[dict[str, str] | None] = ContextVar(
+    "hfc_feishu_command_result_context",
+    default=None,
+)
+_HFC_COMMAND_RESULT_CARD_COMMANDS = {"new", "reset", "clear", "undo", "stop", "model"}
 
 
 def reset_runtime_state() -> None:
@@ -85,6 +94,7 @@ def reset_runtime_state() -> None:
         _SEND_LOCKS.clear()
     with _PENDING_DELTAS_LOCK:
         _PENDING_DELTAS.clear()
+    _HFC_FEISHU_COMMAND_RESULT_CONTEXT.set(None)
 
 
 def load_runtime_config() -> RuntimeConfig:
@@ -1064,19 +1074,68 @@ def _hfc_raw_feishu_callback_response(adapter: Any, card_data: dict[str, Any]) -
     return response
 
 
-def _hfc_feishu_send_success(response: Any) -> tuple[bool, str]:
-    try:
-        success = bool(getattr(response, "success", lambda: False)())
-    except Exception:
-        success = False
+def _hfc_response_success(response: Any) -> bool:
+    success_value = getattr(response, "success", None)
+    if callable(success_value):
+        try:
+            return bool(success_value())
+        except Exception:
+            return False
+    if success_value is not None:
+        return bool(success_value)
+    return False
+
+
+def _hfc_response_message_id(response: Any) -> str:
+    direct = str(getattr(response, "message_id", "") or "")
+    if direct:
+        return direct
     data = getattr(response, "data", None)
-    message_id = str(getattr(data, "message_id", "") or "")
-    return success, message_id
+    data_message_id = str(getattr(data, "message_id", "") or "")
+    if data_message_id:
+        return data_message_id
+    raw_response = getattr(response, "raw_response", None)
+    if raw_response is not None and raw_response is not response:
+        return _hfc_response_message_id(raw_response)
+    return ""
+
+
+def _hfc_feishu_send_success(response: Any) -> tuple[bool, str]:
+    return _hfc_response_success(response), _hfc_response_message_id(response)
+
+
+def _hfc_update_response_success(response: Any) -> bool:
+    return _hfc_response_success(response)
+
+
+def _hfc_update_response_error(response: Any) -> str:
+    try:
+        code = getattr(response, "code", None)
+        msg = getattr(response, "msg", None)
+        if code or msg:
+            return f"code={code!r} msg={msg!r}"
+    except Exception:
+        pass
+    raw_response = getattr(response, "raw_response", None)
+    if raw_response is not None and raw_response is not response:
+        return _hfc_update_response_error(raw_response)
+    return repr(response)
 
 
 def _hfc_warn(message: str) -> None:
     try:
+        logger.warning("[hermes-feishu-card] %s", message)
+    except Exception:
+        pass
+    try:
         print(f"[hermes-feishu-card] {message}", file=sys.stderr)
+    except Exception:
+        pass
+
+
+def _hfc_info(message: str) -> None:
+    try:
+        logger.info("[hermes-feishu-card] %s", message)
     except Exception:
         pass
 
@@ -1098,6 +1157,31 @@ def _hfc_button(label: str, value: dict[str, Any], button_type: str = "default")
     }
 
 
+def _hfc_select_static(
+    *,
+    placeholder: str,
+    value: dict[str, Any],
+    options: list[dict[str, str]],
+    initial_option: str = "",
+) -> dict[str, Any]:
+    element: dict[str, Any] = {
+        "tag": "select_static",
+        "placeholder": {"tag": "plain_text", "content": placeholder},
+        "value": value,
+        "options": [
+            {
+                "text": {"tag": "plain_text", "content": str(option.get("label") or "")[:80]},
+                "value": str(option.get("value") or ""),
+            }
+            for option in options
+            if option.get("label") and option.get("value")
+        ],
+    }
+    if initial_option:
+        element["initial_option"] = initial_option
+    return element
+
+
 def _hfc_command_result_card(
     *,
     title: str,
@@ -1117,6 +1201,173 @@ def _hfc_command_result_card(
             }
         ],
     }
+
+
+def _hfc_command_from_event(event: Any) -> str:
+    command = ""
+    getter = getattr(event, "get_command", None)
+    if callable(getter):
+        try:
+            command = str(getter() or "")
+        except Exception:
+            command = ""
+    if not command:
+        text = str(getattr(event, "text", "") or "").strip()
+        if text.startswith("/"):
+            command = text
+    command = command.strip()
+    if command.startswith("/"):
+        command = command[1:]
+    return command.split(None, 1)[0].strip().lower()
+
+
+def _hfc_command_event_message_id(event: Any) -> str:
+    for obj in (event, getattr(event, "source", None)):
+        if obj is None:
+            continue
+        for name in ("message_id", "id", "event_message_id"):
+            try:
+                value = str(getattr(obj, name, "") or "").strip()
+            except Exception:
+                value = ""
+            if value:
+                return value
+    return ""
+
+
+def _hfc_command_result_context_from_event(event: Any) -> dict[str, str] | None:
+    if event is None:
+        return None
+    source = getattr(event, "source", None)
+    if _platform_name({}, source) != "feishu":
+        return None
+    command = _hfc_command_from_event(event)
+    if command not in _HFC_COMMAND_RESULT_CARD_COMMANDS:
+        return None
+    return {
+        "command": command,
+        "chat_id": str(getattr(source, "chat_id", "") or "").strip(),
+        "message_id": _hfc_command_event_message_id(event),
+    }
+
+
+def _hfc_command_result_title(command: str) -> str:
+    return {
+        "new": "会话已重置",
+        "reset": "会话已重置",
+        "clear": "上下文已清理",
+        "undo": "已撤销上一步",
+        "stop": "已停止",
+        "model": "模型已更新",
+    }.get(command, "命令已完成")
+
+
+def _hfc_command_result_template(content: str) -> str:
+    text = str(content or "").strip().lower()
+    if text.startswith(("❌", "error", "failed")) or "失败" in text or "error:" in text:
+        return "red"
+    if text.startswith(("⚠️", "warning")) or "cancel" in text or "取消" in text:
+        return "orange"
+    return "green"
+
+
+def _hfc_take_feishu_command_result_context(
+    *,
+    chat_id: str,
+    content: Any,
+) -> dict[str, str] | None:
+    context = _HFC_FEISHU_COMMAND_RESULT_CONTEXT.get()
+    if not isinstance(context, dict):
+        return None
+    command = str(context.get("command") or "").strip().lower()
+    if command not in _HFC_COMMAND_RESULT_CARD_COMMANDS:
+        _HFC_FEISHU_COMMAND_RESULT_CONTEXT.set(None)
+        return None
+    if not str(content or "").strip():
+        return None
+    expected_chat_id = str(context.get("chat_id") or "").strip()
+    actual_chat_id = str(chat_id or "").strip()
+    if expected_chat_id and actual_chat_id and expected_chat_id != actual_chat_id:
+        _HFC_FEISHU_COMMAND_RESULT_CONTEXT.set(None)
+        return None
+    _HFC_FEISHU_COMMAND_RESULT_CONTEXT.set(None)
+    return context
+
+
+async def _hfc_send_native_command_result_card(
+    adapter: Any,
+    *,
+    chat_id: str,
+    content: str,
+    reply_to: str | None,
+    metadata: dict[str, Any] | None,
+    context: dict[str, str],
+) -> Any:
+    if not getattr(adapter, "_client", None):
+        return _send_result(False, error="not connected")
+    if not hasattr(adapter, "_feishu_send_with_retry"):
+        return _send_result(False, error="feishu send unavailable")
+
+    command = str(context.get("command") or "").strip().lower()
+    card = _hfc_command_result_card(
+        title=_hfc_command_result_title(command),
+        content=content,
+        template=_hfc_command_result_template(content),
+    )
+    effective_reply_to = (
+        str(reply_to or "").strip()
+        or _metadata_reply_to(metadata)
+        or str(context.get("message_id") or "").strip()
+        or None
+    )
+    try:
+        response = await adapter._feishu_send_with_retry(
+            chat_id=chat_id,
+            msg_type="interactive",
+            payload=json.dumps(card, ensure_ascii=False),
+            reply_to=effective_reply_to,
+            metadata=metadata,
+        )
+    except Exception as exc:
+        _hfc_warn(f"send command result card failed: {exc.__class__.__name__}: {exc}")
+        return _send_result(False, error=str(exc))
+
+    finalizer = getattr(adapter, "_finalize_send_result", None)
+    if callable(finalizer):
+        try:
+            return finalizer(response, "send command result card failed")
+        except Exception:
+            pass
+    success, message_id = _hfc_feishu_send_success(response)
+    if not success:
+        _hfc_warn(f"send command result card failed: response={response!r}")
+        return _send_result(False, error="send command result card failed")
+    return _send_result(True, message_id=message_id)
+
+
+async def _hfc_send_with_native_command_result_card(
+    self: Any,
+    chat_id: str,
+    content: str,
+    reply_to: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> Any:
+    original = getattr(type(self), "_hfc_original_send", None)
+    context = _hfc_take_feishu_command_result_context(chat_id=chat_id, content=content)
+    if context is not None:
+        result = await _hfc_send_native_command_result_card(
+            self,
+            chat_id=chat_id,
+            content=str(content or ""),
+            reply_to=reply_to,
+            metadata=metadata,
+            context=context,
+        )
+        if getattr(result, "success", False):
+            return result
+    if callable(original):
+        return await original(self, chat_id, content, reply_to=reply_to, metadata=metadata)
+    return _send_result(False, error="original Feishu send unavailable")
 
 
 def _hfc_slash_choice_label(choice: str) -> tuple[str, str]:
@@ -1202,6 +1453,7 @@ async def _hfc_send_native_slash_confirm(
     if not success:
         _hfc_warn(f"send_slash_confirm failed: response={response!r}")
         return _send_result(False, error="send_slash_confirm failed")
+    _hfc_info(f"send_slash_confirm stored confirm_id={confirm_id!r} message_id={message_id!r}")
     state = getattr(self, "_hfc_slash_confirm_state", None)
     if not isinstance(state, dict):
         state = {}
@@ -1236,9 +1488,10 @@ async def _hfc_send_native_model_picker(
             metadata=metadata,
         )
 
-    options = _model_picker_options(providers, current_model=current_model, max_options=8)
+    options = _model_picker_options(providers, current_model=current_model, max_options=100)
     if not options:
         return _send_result(False, error="no model options")
+    all_options_count = len(_model_picker_options(providers, current_model=current_model, max_options=1000))
     picker_id = "model_" + sha256(
         f"{chat_id}:{session_key}:{time.time()}".encode("utf-8")
     ).hexdigest()[:16]
@@ -1247,20 +1500,13 @@ async def _hfc_send_native_model_picker(
         description_parts.append(f"当前模型：`{current_model}`")
     if current_provider:
         description_parts.append(f"当前 provider：`{current_provider}`")
-    if len(_model_picker_options(providers, current_model=current_model, max_options=9)) > 8:
-        description_parts.append("仅展示前 8 个可选模型，可继续用 `/model <模型名>` 精确切换。")
-
-    def _model_action(option: dict[str, Any]) -> dict[str, Any]:
-        label = str(option.get("label") or "model")
-        return _hfc_button(
-            label[:30],
-            {
-                "hfc_action": "model_picker",
-                "hfc_model_picker_id": picker_id,
-                "hfc_choice": str(option.get("value") or ""),
-            },
-            "primary" if option.get("style") == "primary" else "default",
-        )
+    if all_options_count > len(options):
+        description_parts.append(f"展示前 {len(options)} 个可选模型，可继续用 `/model <模型名>` 精确切换。")
+    initial_option = ""
+    for option in options:
+        if option.get("style") == "primary":
+            initial_option = str(option.get("value") or "")
+            break
 
     card = {
         "config": {"wide_screen_mode": True},
@@ -1270,7 +1516,20 @@ async def _hfc_send_native_model_picker(
         },
         "elements": [
             {"tag": "markdown", "content": "\n".join(description_parts) or "请选择模型。"},
-            {"tag": "action", "actions": [_model_action(option) for option in options]},
+            {
+                "tag": "action",
+                "actions": [
+                    _hfc_select_static(
+                        placeholder="选择模型",
+                        value={
+                            "hfc_action": "model_picker",
+                            "hfc_model_picker_id": picker_id,
+                        },
+                        options=options,
+                        initial_option=initial_option,
+                    )
+                ],
+            },
         ],
     }
     try:
@@ -1287,6 +1546,7 @@ async def _hfc_send_native_model_picker(
     success, message_id = _hfc_feishu_send_success(response)
     if not success:
         return _send_result(False, error="send_model_picker failed")
+    _hfc_info(f"send_model_picker stored picker_id={picker_id!r} message_id={message_id!r}")
     state = getattr(self, "_hfc_model_picker_state", None)
     if not isinstance(state, dict):
         state = {}
@@ -1304,7 +1564,32 @@ def _hfc_action_value_from_data(data: Any) -> dict[str, Any]:
     event = getattr(data, "event", None)
     action = getattr(event, "action", None)
     action_value = getattr(action, "value", {}) or {}
-    return action_value if isinstance(action_value, dict) else {}
+    if isinstance(action_value, dict):
+        value = dict(action_value)
+    elif isinstance(action_value, str):
+        try:
+            parsed = json.loads(action_value)
+        except Exception:
+            parsed = {}
+        value = dict(parsed) if isinstance(parsed, dict) else {}
+    else:
+        value = {}
+
+    form_value = getattr(action, "form_value", {}) or {}
+    if isinstance(form_value, dict):
+        for key in (
+            "hfc_action",
+            "hfc_confirm_id",
+            "hfc_choice",
+            "hfc_model_picker_id",
+        ):
+            if key not in value and form_value.get(key):
+                value[key] = form_value.get(key)
+
+    option = str(getattr(action, "option", "") or "").strip()
+    if option and "hfc_choice" not in value:
+        value["hfc_choice"] = option
+    return value
 
 
 def _hfc_action_chat_id(data: Any) -> str:
@@ -1335,6 +1620,98 @@ def _hfc_card_operator_allowed(adapter: Any, data: Any, chat_id: str) -> bool:
         return False
 
 
+def _hfc_prepare_native_slash_action(
+    adapter: Any,
+    data: Any,
+    action_value: dict[str, Any],
+) -> dict[str, Any] | None:
+    loop = getattr(adapter, "_loop", None)
+    loop_accepts = getattr(adapter, "_loop_accepts_callbacks", None)
+    if callable(loop_accepts) and not loop_accepts(loop):
+        return None
+    if loop is None:
+        return None
+
+    confirm_id = str(action_value.get("hfc_confirm_id") or "")
+    choice = str(action_value.get("hfc_choice") or "")
+    if choice not in {"once", "always", "cancel"}:
+        return None
+    state = getattr(adapter, "_hfc_slash_confirm_state", {})
+    if not isinstance(state, dict):
+        return None
+    item = state.get(confirm_id)
+    if not isinstance(item, dict):
+        return None
+    chat_id = _hfc_action_chat_id(data)
+    expected_chat_id = str(item.get("chat_id") or "")
+    if expected_chat_id and chat_id and expected_chat_id != chat_id:
+        return None
+    if not _hfc_card_operator_allowed(adapter, data, expected_chat_id or chat_id):
+        return None
+    return {
+        "loop": loop,
+        "state": state,
+        "confirm_id": confirm_id,
+        "choice": choice,
+        "session_key": str(item.get("session_key") or ""),
+        "message_id": str(item.get("message_id") or ""),
+    }
+
+
+def _hfc_native_slash_result_card(
+    adapter: Any,
+    data: Any,
+    choice: str,
+    result: Any,
+) -> dict[str, Any]:
+    label, template = _hfc_slash_choice_label(choice)
+    open_id = _hfc_action_open_id(data)
+    get_cached_name = getattr(adapter, "_get_cached_sender_name", None)
+    user_name = get_cached_name(open_id) if callable(get_cached_name) else ""
+    actor = f"\n\n操作人：{user_name or open_id}" if (user_name or open_id) else ""
+    return _hfc_command_result_card(
+        title=f"{label}",
+        content=f"{str(result or label).strip()}{actor}",
+        template=template,
+    )
+
+
+def _hfc_prepare_native_model_action(
+    adapter: Any,
+    data: Any,
+    action_value: dict[str, Any],
+) -> dict[str, Any] | None:
+    loop = getattr(adapter, "_loop", None)
+    loop_accepts = getattr(adapter, "_loop_accepts_callbacks", None)
+    if callable(loop_accepts) and not loop_accepts(loop):
+        return None
+    if loop is None:
+        return None
+
+    picker_id = str(action_value.get("hfc_model_picker_id") or "")
+    state = getattr(adapter, "_hfc_model_picker_state", {})
+    if not isinstance(state, dict):
+        return None
+    item = state.get(picker_id)
+    if not isinstance(item, dict):
+        return None
+    chat_id = _hfc_action_chat_id(data)
+    expected_chat_id = str(item.get("chat_id") or "")
+    if expected_chat_id and chat_id and expected_chat_id != chat_id:
+        return None
+    if not _hfc_card_operator_allowed(adapter, data, expected_chat_id or chat_id):
+        return None
+    return {
+        "loop": loop,
+        "state": state,
+        "picker_id": picker_id,
+        "item": item,
+        "chat_id": chat_id,
+        "expected_chat_id": expected_chat_id,
+        "choice": str(action_value.get("hfc_choice") or ""),
+    }
+
+
 def _hfc_on_feishu_card_action_trigger(self: Any, data: Any) -> Any:
     action_value = _hfc_action_value_from_data(data)
     action = str(action_value.get("hfc_action") or "").strip()
@@ -1349,92 +1726,136 @@ def _hfc_on_feishu_card_action_trigger(self: Any, data: Any) -> Any:
     return _hfc_empty_feishu_callback_response(self)
 
 
+def _hfc_resolve_native_slash_action(
+    adapter: Any,
+    data: Any,
+    action_value: dict[str, Any],
+) -> tuple[dict[str, Any], str] | None:
+    prepared = _hfc_prepare_native_slash_action(adapter, data, action_value)
+    if prepared is None:
+        return None
+
+    try:
+        from tools import slash_confirm
+
+        result = slash_confirm.resolve_sync_compat(
+            prepared["loop"],
+            prepared["session_key"],
+            prepared["confirm_id"],
+            prepared["choice"],
+        )
+    except Exception as exc:
+        result = f"处理失败：{exc}"
+    prepared["state"].pop(prepared["confirm_id"], None)
+    return (
+        _hfc_native_slash_result_card(adapter, data, prepared["choice"], result),
+        prepared["message_id"],
+    )
+
+
+async def _hfc_resolve_native_slash_action_async(
+    adapter: Any,
+    data: Any,
+    action_value: dict[str, Any],
+) -> tuple[dict[str, Any], str] | None:
+    prepared = _hfc_prepare_native_slash_action(adapter, data, action_value)
+    if prepared is None:
+        return None
+
+    try:
+        from tools import slash_confirm
+
+        resolve = getattr(slash_confirm, "resolve", None)
+        if callable(resolve):
+            result = await resolve(
+                prepared["session_key"],
+                prepared["confirm_id"],
+                prepared["choice"],
+            )
+        else:
+            result = slash_confirm.resolve_sync_compat(
+                prepared["loop"],
+                prepared["session_key"],
+                prepared["confirm_id"],
+                prepared["choice"],
+            )
+    except Exception as exc:
+        result = f"处理失败：{exc}"
+    prepared["state"].pop(prepared["confirm_id"], None)
+    return (
+        _hfc_native_slash_result_card(adapter, data, prepared["choice"], result),
+        prepared["message_id"],
+    )
+
+
+def _hfc_schedule_native_command_card_update(
+    adapter: Any,
+    message_id: str,
+    card: dict[str, Any],
+) -> None:
+    message_id = str(message_id or "").strip()
+    if not message_id:
+        _hfc_warn("native command card update skipped: missing message_id")
+        return
+    loop = getattr(adapter, "_loop", None)
+    loop_accepts = getattr(adapter, "_loop_accepts_callbacks", None)
+    if callable(loop_accepts) and not loop_accepts(loop):
+        _hfc_warn("native command card update skipped: adapter loop is not ready")
+        return
+    submit = getattr(adapter, "_submit_on_loop", None)
+    if not callable(submit):
+        _hfc_warn("native command card update skipped: submit helper unavailable")
+        return
+    coro = _hfc_update_native_command_card(adapter, message_id, card)
+    submitted = False
+    try:
+        submitted = bool(submit(loop, coro))
+    except Exception as exc:
+        _hfc_warn(f"native command card update schedule failed: {exc.__class__.__name__}: {exc}")
+    finally:
+        if not submitted:
+            try:
+                coro.close()
+            except Exception:
+                pass
+    if not submitted:
+        _hfc_warn("native command card update schedule failed")
+
+
 def _hfc_handle_native_slash_action(
     adapter: Any,
     data: Any,
     action_value: dict[str, Any],
 ) -> Any:
-    loop = getattr(adapter, "_loop", None)
-    loop_accepts = getattr(adapter, "_loop_accepts_callbacks", None)
-    if callable(loop_accepts) and not loop_accepts(loop):
+    _hfc_info("inline card action received: slash_confirm")
+    resolved = _hfc_resolve_native_slash_action(adapter, data, action_value)
+    if resolved is None:
+        _hfc_info("inline slash_confirm ignored: unresolved")
         return _hfc_empty_feishu_callback_response(adapter)
-    if loop is None:
-        return _hfc_empty_feishu_callback_response(adapter)
-
-    confirm_id = str(action_value.get("hfc_confirm_id") or "")
-    choice = str(action_value.get("hfc_choice") or "")
-    if choice not in {"once", "always", "cancel"}:
-        return _hfc_empty_feishu_callback_response(adapter)
-    state = getattr(adapter, "_hfc_slash_confirm_state", {})
-    if not isinstance(state, dict):
-        return _hfc_empty_feishu_callback_response(adapter)
-    item = state.get(confirm_id)
-    if not isinstance(item, dict):
-        return _hfc_empty_feishu_callback_response(adapter)
-    chat_id = _hfc_action_chat_id(data)
-    expected_chat_id = str(item.get("chat_id") or "")
-    if expected_chat_id and chat_id and expected_chat_id != chat_id:
-        return _hfc_empty_feishu_callback_response(adapter)
-    if not _hfc_card_operator_allowed(adapter, data, expected_chat_id or chat_id):
-        return _hfc_empty_feishu_callback_response(adapter)
-
-    session_key = str(item.get("session_key") or "")
-    try:
-        from tools import slash_confirm
-
-        result = slash_confirm.resolve_sync_compat(loop, session_key, confirm_id, choice)
-    except Exception as exc:
-        result = f"处理失败：{exc}"
-    state.pop(confirm_id, None)
-    label, template = _hfc_slash_choice_label(choice)
-    open_id = _hfc_action_open_id(data)
-    get_cached_name = getattr(adapter, "_get_cached_sender_name", None)
-    user_name = get_cached_name(open_id) if callable(get_cached_name) else ""
-    actor = f"\n\n操作人：{user_name or open_id}" if (user_name or open_id) else ""
-    card = _hfc_command_result_card(
-        title=f"{label}",
-        content=f"{str(result or label).strip()}{actor}",
-        template=template,
-    )
+    card, message_id = resolved
+    _hfc_info(f"inline slash_confirm resolved: message_id={message_id!r}")
     return _hfc_raw_feishu_callback_response(adapter, card)
 
 
-def _hfc_handle_native_model_action(
+def _hfc_resolve_native_model_action(
     adapter: Any,
     data: Any,
     action_value: dict[str, Any],
-) -> Any:
-    loop = getattr(adapter, "_loop", None)
-    loop_accepts = getattr(adapter, "_loop_accepts_callbacks", None)
-    if callable(loop_accepts) and not loop_accepts(loop):
-        return _hfc_empty_feishu_callback_response(adapter)
-    if loop is None:
-        return _hfc_empty_feishu_callback_response(adapter)
+) -> tuple[dict[str, Any], str] | None:
+    prepared = _hfc_prepare_native_model_action(adapter, data, action_value)
+    if prepared is None:
+        return None
 
-    picker_id = str(action_value.get("hfc_model_picker_id") or "")
-    state = getattr(adapter, "_hfc_model_picker_state", {})
-    if not isinstance(state, dict):
-        return _hfc_empty_feishu_callback_response(adapter)
-    item = state.get(picker_id)
-    if not isinstance(item, dict):
-        return _hfc_empty_feishu_callback_response(adapter)
-    chat_id = _hfc_action_chat_id(data)
-    expected_chat_id = str(item.get("chat_id") or "")
-    if expected_chat_id and chat_id and expected_chat_id != chat_id:
-        return _hfc_empty_feishu_callback_response(adapter)
-    if not _hfc_card_operator_allowed(adapter, data, expected_chat_id or chat_id):
-        return _hfc_empty_feishu_callback_response(adapter)
-
-    choice = str(action_value.get("hfc_choice") or "")
-    selected = _parse_model_picker_choice(choice)
+    item = prepared["item"]
+    selected = _parse_model_picker_choice(prepared["choice"])
     if selected is None:
-        return _hfc_raw_feishu_callback_response(
-            adapter,
+        return (
             _hfc_command_result_card(
                 title="模型选择无效",
                 content="请重新发送 `/model`。",
                 template="red",
             ),
+            str(item.get("message_id") or ""),
         )
     provider_slug, model_id = selected
     callback = item.get("on_model_selected")
@@ -1443,21 +1864,206 @@ def _hfc_handle_native_model_action(
             result = f"已选择 {provider_slug}/{model_id}"
         else:
             future = asyncio.run_coroutine_threadsafe(
-                callback(expected_chat_id or chat_id, model_id, provider_slug),
-                loop,
+                callback(
+                    prepared["expected_chat_id"] or prepared["chat_id"],
+                    model_id,
+                    provider_slug,
+                ),
+                prepared["loop"],
             )
             result = future.result(timeout=30)
     except Exception as exc:
         result = f"模型切换失败：{exc}"
-    state.pop(picker_id, None)
-    return _hfc_raw_feishu_callback_response(
-        adapter,
+    prepared["state"].pop(prepared["picker_id"], None)
+    return (
         _hfc_command_result_card(
             title="模型已更新",
             content=str(result or f"已选择 {provider_slug}/{model_id}"),
             template="green",
         ),
+        str(item.get("message_id") or ""),
     )
+
+
+async def _hfc_resolve_native_model_action_async(
+    adapter: Any,
+    data: Any,
+    action_value: dict[str, Any],
+) -> tuple[dict[str, Any], str] | None:
+    prepared = _hfc_prepare_native_model_action(adapter, data, action_value)
+    if prepared is None:
+        return None
+
+    item = prepared["item"]
+    selected = _parse_model_picker_choice(prepared["choice"])
+    if selected is None:
+        return (
+            _hfc_command_result_card(
+                title="模型选择无效",
+                content="请重新发送 `/model`。",
+                template="red",
+            ),
+            str(item.get("message_id") or ""),
+        )
+    provider_slug, model_id = selected
+    callback = item.get("on_model_selected")
+    try:
+        if callback is None:
+            result = f"已选择 {provider_slug}/{model_id}"
+        else:
+            result = await callback(
+                prepared["expected_chat_id"] or prepared["chat_id"],
+                model_id,
+                provider_slug,
+            )
+    except Exception as exc:
+        result = f"模型切换失败：{exc}"
+    prepared["state"].pop(prepared["picker_id"], None)
+    return (
+        _hfc_command_result_card(
+            title="模型已更新",
+            content=str(result or f"已选择 {provider_slug}/{model_id}"),
+            template="green",
+        ),
+        str(item.get("message_id") or ""),
+    )
+
+
+def _hfc_handle_native_model_action(
+    adapter: Any,
+    data: Any,
+    action_value: dict[str, Any],
+) -> Any:
+    _hfc_info("inline card action received: model_picker")
+    resolved = _hfc_resolve_native_model_action(adapter, data, action_value)
+    if resolved is None:
+        _hfc_info("inline model_picker ignored: unresolved")
+        return _hfc_empty_feishu_callback_response(adapter)
+    card, message_id = resolved
+    _hfc_info(f"inline model_picker resolved: message_id={message_id!r}")
+    return _hfc_raw_feishu_callback_response(
+        adapter,
+        card,
+    )
+
+
+async def _hfc_update_native_command_card(adapter: Any, message_id: str, card: dict[str, Any]) -> bool:
+    message_id = str(message_id or "").strip()
+    if not message_id:
+        _hfc_warn("native command card update skipped: missing message_id")
+        return False
+    client = getattr(adapter, "_client", None)
+    if client is None:
+        _hfc_warn("native command card update skipped: Feishu client unavailable")
+        return False
+    try:
+        body_builder = getattr(adapter, "_build_update_message_body", None)
+        request_builder = getattr(adapter, "_build_update_message_request", None)
+        run_blocking = getattr(adapter, "_run_blocking", None)
+        if not (callable(body_builder) and callable(request_builder) and callable(run_blocking)):
+            _hfc_warn("native command card update skipped: Feishu update helpers unavailable")
+            return False
+        request_body = body_builder(
+            msg_type="interactive",
+            content=json.dumps(card, ensure_ascii=False),
+        )
+        request = request_builder(message_id, request_body)
+        update_call = client.im.v1.message.update
+        _hfc_info(f"native command card update attempting: message_id={message_id!r}")
+        response = await run_blocking(update_call, request)
+        success = _hfc_update_response_success(response)
+        if not success:
+            _hfc_warn(f"native command card update failed: {_hfc_update_response_error(response)}")
+        else:
+            _hfc_info(f"native command card update succeeded: message_id={message_id!r}")
+        return success
+    except Exception as exc:
+        _hfc_warn(f"native command card update failed: {exc.__class__.__name__}: {exc}")
+        return False
+
+
+def _hfc_is_duplicate_card_action(adapter: Any, data: Any) -> bool:
+    event = getattr(data, "event", None)
+    token = str(getattr(event, "token", "") or "").strip()
+    is_duplicate = getattr(adapter, "_is_card_action_duplicate", None)
+    if token and callable(is_duplicate):
+        try:
+            return bool(is_duplicate(token))
+        except Exception:
+            return False
+    return False
+
+
+async def _hfc_handle_feishu_card_action_event(self: Any, data: Any) -> None:
+    action_value = _hfc_action_value_from_data(data)
+    action = str(action_value.get("hfc_action") or "").strip()
+    if action:
+        _hfc_info(f"background card action received: {action}")
+    if action == "slash_confirm":
+        if _hfc_is_duplicate_card_action(self, data):
+            return
+        resolved = await _hfc_resolve_native_slash_action_async(self, data, action_value)
+        if resolved is not None:
+            card, message_id = resolved
+            _hfc_info(
+                "background slash_confirm resolved without direct update: "
+                f"message_id={message_id!r}"
+            )
+        else:
+            _hfc_info("background slash_confirm ignored: unresolved")
+        return
+    if action == "model_picker":
+        if _hfc_is_duplicate_card_action(self, data):
+            return
+        resolved = await _hfc_resolve_native_model_action_async(self, data, action_value)
+        if resolved is not None:
+            card, message_id = resolved
+            _hfc_info(
+                "background model_picker resolved without direct update: "
+                f"message_id={message_id!r}"
+            )
+        else:
+            _hfc_info("background model_picker ignored: unresolved")
+        return
+
+    original = getattr(type(self), "_hfc_original_handle_card_action_event", None)
+    if callable(original):
+        await original(self, data)
+
+
+def _hfc_refresh_feishu_event_handler(adapter: Any) -> bool:
+    if getattr(adapter, "_hfc_command_card_event_handler_refreshed", False):
+        return False
+
+    current_handler = getattr(adapter, "_event_handler", None)
+    ws_client = getattr(adapter, "_ws_client", None)
+    ws_handler = getattr(ws_client, "_event_handler", None) if ws_client is not None else None
+    if current_handler is None and ws_handler is None:
+        return False
+
+    build_event_handler = getattr(adapter, "_build_event_handler", None)
+    if not callable(build_event_handler):
+        return False
+
+    try:
+        rebuilt_handler = build_event_handler()
+    except Exception as exc:
+        _hfc_warn(f"Feishu event handler refresh failed: {exc.__class__.__name__}: {exc}")
+        return False
+    if rebuilt_handler is None:
+        _hfc_warn("Feishu event handler refresh skipped: builder returned None")
+        return False
+
+    try:
+        setattr(adapter, "_event_handler", rebuilt_handler)
+        if ws_client is not None:
+            setattr(ws_client, "_event_handler", rebuilt_handler)
+        setattr(adapter, "_hfc_command_card_event_handler_refreshed", True)
+        _hfc_info("Feishu event handler refreshed for command card callbacks")
+        return True
+    except Exception as exc:
+        _hfc_warn(f"Feishu event handler refresh failed: {exc.__class__.__name__}: {exc}")
+        return False
 
 
 def _command_card_answer_text(answer: Any) -> str:
@@ -1523,11 +2129,16 @@ async def complete_command_card_from_hermes_locals_async(
         return False
 
 
-def install_feishu_command_card_adapter_methods(runner: Any) -> bool:
+def install_feishu_command_card_adapter_methods(runner: Any, event: Any = None) -> bool:
     try:
         adapters = getattr(runner, "adapters", None)
         if not isinstance(adapters, dict):
+            if event is not None:
+                _HFC_FEISHU_COMMAND_RESULT_CONTEXT.set(None)
             return False
+        command_result_context = (
+            _hfc_command_result_context_from_event(event) if event is not None else None
+        )
         installed = False
         for key, adapter in list(adapters.items()):
             if not _is_feishu_adapter_key(key, adapter):
@@ -1569,11 +2180,59 @@ def install_feishu_command_card_adapter_methods(runner: Any) -> bool:
             elif callable(getattr(adapter_type, "_on_card_action_trigger", None)):
                 adapter_ready = True
 
+            current_event_handler = adapter_type.__dict__.get("_handle_card_action_event")
+            if current_event_handler is _hfc_handle_feishu_card_action_event:
+                setattr(adapter_type, "_hfc_command_card_event_wrapped", True)
+                adapter_ready = True
+            elif not getattr(adapter_type, "_hfc_command_card_event_wrapped", False):
+                original_event_handler = current_event_handler or getattr(
+                    adapter_type, "_handle_card_action_event", None
+                )
+                if callable(original_event_handler):
+                    setattr(
+                        adapter_type,
+                        "_hfc_original_handle_card_action_event",
+                        original_event_handler,
+                    )
+                    setattr(
+                        adapter_type,
+                        "_handle_card_action_event",
+                        _hfc_handle_feishu_card_action_event,
+                    )
+                    setattr(adapter_type, "_hfc_command_card_event_wrapped", True)
+                    adapter_ready = True
+            elif callable(getattr(adapter_type, "_handle_card_action_event", None)):
+                adapter_ready = True
+
+            current_send = adapter_type.__dict__.get("send")
+            if current_send is _hfc_send_with_native_command_result_card:
+                setattr(adapter_type, "_hfc_command_result_send_wrapped", True)
+                adapter_ready = True
+            elif not getattr(adapter_type, "_hfc_command_result_send_wrapped", False):
+                original_send = current_send or getattr(adapter_type, "send", None)
+                if callable(original_send):
+                    setattr(adapter_type, "_hfc_original_send", original_send)
+                    setattr(adapter_type, "send", _hfc_send_with_native_command_result_card)
+                    setattr(adapter_type, "_hfc_command_result_send_wrapped", True)
+                    adapter_ready = True
+            elif callable(getattr(adapter_type, "send", None)):
+                adapter_ready = True
+
             if adapter_ready:
+                _hfc_refresh_feishu_event_handler(adapter)
                 setattr(adapter_type, "_hfc_command_card_methods_installed", True)
                 installed = True
+        if event is not None:
+            _HFC_FEISHU_COMMAND_RESULT_CONTEXT.set(
+                command_result_context if installed else None
+            )
         return installed
     except Exception:
+        if event is not None:
+            try:
+                _HFC_FEISHU_COMMAND_RESULT_CONTEXT.set(None)
+            except Exception:
+                pass
         return False
 
 

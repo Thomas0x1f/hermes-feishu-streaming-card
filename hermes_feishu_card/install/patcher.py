@@ -943,8 +943,11 @@ def _find_simple_owned_patch(
     indent = _leading_whitespace(_strip_line_ending(lines[begin_index]))
     newline = _line_ending(lines[begin_index]) or _detect_newline(content)
     expected = renderer(indent, newline)
+    expected_blocks = [expected]
+    if renderer is _render_command_card_adapter_hook_block:
+        expected_blocks.append(_render_legacy_command_card_adapter_hook_block(indent, newline))
     actual = lines[begin_index : end_index + 1]
-    if actual != expected:
+    if actual not in expected_blocks:
         raise ValueError(f"corrupt {error_label}")
     return begin_index, end_index
 
@@ -1464,6 +1467,21 @@ def _render_slash_confirm_hook_block(indent: str, newline: str):
 
 
 def _render_command_card_adapter_hook_block(indent: str, newline: str):
+    inner_indent = _child_indent(indent)
+    return [
+        f"{indent}{COMMAND_CARD_PATCH_BEGIN}{newline}",
+        f"{indent}try:{newline}",
+        (
+            f"{inner_indent}from hermes_feishu_card.hook_runtime "
+            f"import install_feishu_command_card_adapter_methods as _hfc_install_command_cards{newline}"
+        ),
+        f"{inner_indent}_hfc_install_command_cards(self, event=event){newline}",
+        *_render_hook_exception_handler(indent, newline),
+        f"{indent}{COMMAND_CARD_PATCH_END}{newline}",
+    ]
+
+
+def _render_legacy_command_card_adapter_hook_block(indent: str, newline: str):
     inner_indent = _child_indent(indent)
     return [
         f"{indent}{COMMAND_CARD_PATCH_BEGIN}{newline}",
