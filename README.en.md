@@ -27,6 +27,7 @@ Since V3.8.2, the final answer stays in the primary content area while pre-tool 
 - **Streaming card UX**: `thinking.delta`, `answer.delta`, `tool.updated`, and terminal events update one Feishu card.
 - **In-card interactions**: Hermes approval and clarify choices prefer Feishu buttons. Since V3.8.5, Feishu/Lark WebSocket long-connection deployments also render independent slash-command confirmations, pickers, and execution results such as `/new`, `/reset`, and `/model` as native interactive cards, falling back to Hermes native text only when cards are unavailable.
 - **Runtime notices stay tidy**: Since V3.8.8, native Hermes `Working` heartbeats, context/compression notices, automatic session resets, skill loading, and self-improvement reviews prefer cards or compact notice cards instead of scattered gray native text.
+- **Consistent topic replies**: Since V3.8.9, Feishu/Lark topic reply streams and system notices resolve back to the same card, avoiding frozen topic timelines and duplicate gray native notices.
 - **Long content protection**: Markdown tables and fenced code blocks split on structure boundaries instead of raw character cuts.
 - **Multi-bot / multi-profile**: bot registry, chat bindings, profile-aware session keys, titles, and routing diagnostics.
 - **sidecar-only runtime**: Hermes hook stays fail-open while Feishu delivery, session state, retries, and health checks live in the sidecar.
@@ -39,10 +40,25 @@ Since V3.8.2, the final answer stays in the primary content area while pre-tool 
 | Feishu only shows a final wall of text | Reasoning, answer, tool status, and runtime footer stream into one card |
 | Tool-heavy runs lose text, reorder chunks, or spill native gray messages | per-message ordering, PATCH coalescing, terminal priority, and native resend suppression |
 | Hermes emits separate gray `Working`, context, skill loading, or review notices | `system.notice` cardification: session notices enter the auxiliary timeline; task-external notices use compact standalone cards |
+| Topic replies show the first card but the timeline stops updating, while notices also appear outside the card | Topic events resolve by `reply_to_message_id`, keeping updates on the original card and suppressing duplicate native notice text |
 | Approval, choice prompts, or slash-command confirmations require manual text replies | Agent-turn choices stay in the active card; independent slash commands use standalone command cards, with numbered text fallback when cards are unavailable |
 | Long tables/code blocks render as raw Markdown | Markdown-aware table/code splitting with repeated headers and complete fences |
 | Multi-bot, group, and profile routing is hard to inspect | `bindings.chats`, profile-aware sessions, and `/health.routing` diagnostics |
 | Hook or sidecar failures are hard to debug | `doctor`, runtime import checks, `/health` metrics, fail-closed installer, restore/uninstall |
+
+## V3.8.9 Feishu Topic Card Continuity Patch
+
+V3.8.9 fixes Feishu/Lark topic reply flows where the first card appears, but later `answer.delta`, `thinking.delta`, `tool.updated`, or `system.notice` events can miss the same card because Hermes switches to a different internal streaming `message_id`. In that state, system notices can also appear both inside the card timeline and as separate gray native messages.
+
+- **One card keeps updating inside the topic**: the sidecar maps later topic events back to the active card session through `reply_to_message_id`.
+- **No duplicate gray notices after cardification**: when a session-scoped `system.notice` is accepted into the card, the sidecar returns `applied: true`; if card delivery briefly times out, recognized Hermes system notices are still suppressed instead of being resent as gray native text.
+- **Hermes v0.18.x Relay metadata support**: the hook runtime preserves Relay `source.message_id` as the original topic reply anchor.
+
+![Feishu topic reply card continuity and reasoning/tool timeline showcase](docs/assets/feishu-topic-card-showcase-v389.png)
+
+The screenshot above shows a real Feishu topic verification: the topic reply pane keeps the card updating, the reasoning/tool timeline, final answer, and footer stats stay on the same card. Context and self-improvement notices enter cards or compact standalone cards instead of spilling out as extra gray native messages.
+
+Full release notes: [docs/release-notes-v3.8.9.md](docs/release-notes-v3.8.9.md).
 
 ## V3.8.8 Hermes Native System Notice Cardification
 
@@ -249,7 +265,7 @@ Common environment variables:
 
 | Variable | Default | Description |
 |---|---|---|
-| `HFC_VERSION` | `latest` | Version to install, such as `v3.8.8`, `v3.6.6`, or `main` |
+| `HFC_VERSION` | `latest` | Version to install, such as `v3.8.9`, `v3.6.6`, or `main` |
 | `HERMES_DIR` | `~/.hermes/hermes-agent` | Hermes Agent Gateway directory |
 | `HFC_CONFIG` | `~/.hermes/config.yaml` | sidecar config path |
 | `HFC_ENV_FILE` | `.env` next to `HFC_CONFIG` | Feishu credential file |
@@ -276,7 +292,7 @@ Example:
 ```bash
 export FEISHU_APP_ID=cli_xxx
 export FEISHU_APP_SECRET=xxx
-export HFC_VERSION=v3.8.8
+export HFC_VERSION=v3.8.9
 bash install-docker.sh
 ```
 
@@ -312,7 +328,7 @@ python3 -m hermes_feishu_card.cli setup --hermes-dir ~/.hermes/hermes-agent --ye
 
 ## Upgrading
 
-Upgrading from V3.2.x/V3.3.0/V3.4.x/V3.5.x/V3.6.x/V3.7.x/V3.8.0/V3.8.1/V3.8.2/V3.8.3/V3.8.4/V3.8.5/V3.8.6/V3.8.7 to V3.8.8 is backward-compatible. **Single-profile configs need no changes.** If Hermes uses its own venv, rerun `setup` or `install` after upgrading so the package also lands in the Hermes runtime Python and the hook is refreshed. V3.8.8 keeps V3.8.7's newer-Hermes first-event compatibility and V3.8.6's Docker/Hermes v0.18.0 compatibility, then adds native Hermes system notice cardification; run `doctor --explain` once after upgrading and send a normal prompt, `/new`, `/model`, or a long-running/context-notice task in Feishu to verify state.
+Upgrading from V3.2.x/V3.3.0/V3.4.x/V3.5.x/V3.6.x/V3.7.x/V3.8.0/V3.8.1/V3.8.2/V3.8.3/V3.8.4/V3.8.5/V3.8.6/V3.8.7/V3.8.8 to V3.8.9 is backward-compatible. **Single-profile configs need no changes.** If Hermes uses its own venv, rerun `setup` or `install` after upgrading so the package also lands in the Hermes runtime Python and the hook is refreshed. V3.8.9 keeps V3.8.8's native Hermes system notice cardification, V3.8.7's newer-Hermes first-event compatibility, and V3.8.6's Docker/Hermes v0.18.0 compatibility, then fixes topic reply card continuity and duplicate native notice fallback; run `doctor --explain` once after upgrading and verify both a normal Feishu chat and a topic reply with a normal prompt, `/new`, `/model`, or a long-running/context-notice task.
 
 ```bash
 # 1. Stop sidecar
@@ -320,7 +336,7 @@ python3 -m hermes_feishu_card.cli stop --config ~/.hermes_feishu_card/config.yam
 
 # 2. Update code
 cd /path/to/hermes-feishu-streaming-card
-git checkout v3.8.8 && pip install -e ".[test]" --upgrade
+git checkout v3.8.9 && pip install -e ".[test]" --upgrade
 
 # 3. Diagnose Hermes hook strategy and anchors
 python3 -m hermes_feishu_card.cli doctor --config ~/.hermes_feishu_card/config.yaml --hermes-dir ~/.hermes/hermes-agent
@@ -489,6 +505,7 @@ The Hermes hook converts `message.started` / `thinking.delta` / `answer.delta` /
 
 | Version | Date | Highlights |
 |---------|------|-----------|
+| [v3.8.9](https://github.com/baileyh8/hermes-feishu-streaming-card/releases/tag/v3.8.9) | 2026-07 | Feishu/Lark topic card continuity: later stream events and `system.notice` resolve by `reply_to_message_id`, keeping the topic timeline updating and avoiding duplicate gray notices |
 | [v3.8.8](https://github.com/baileyh8/hermes-feishu-streaming-card/releases/tag/v3.8.8) | 2026-07 | Native Hermes system notice cardification: Working heartbeats, context/compression notices, session resets, skill loading, and self-improvement reviews enter cards or compact notice cards |
 | [v3.8.7](https://github.com/baileyh8/hermes-feishu-streaming-card/releases/tag/v3.8.7) | 2026-07 | issue #75: first `answer.delta` / `thinking.delta` / `tool.updated` / `message.completed` events create a card when newer Hermes omits `message.started` |
 | [v3.8.6](https://github.com/baileyh8/hermes-feishu-streaming-card/releases/tag/v3.8.6) | 2026-07 | issue #70 Docker/source-stripped Hermes fallback from missing `VERSION` to Gateway anchors, plus Hermes v0.18.0 / `v2026.7.1` compatibility |
@@ -548,6 +565,7 @@ MIT License. See [LICENSE](LICENSE).
 Thanks to these contributors for improving the project:
 
 - [gischuck](https://github.com/gischuck) — [PR #12](https://github.com/baileyh8/hermes-feishu-streaming-card/pull/12) Accept-Encoding fix (V3.2.1 brotli compatibility)
+- [gischuck](https://github.com/gischuck) — [PR #76](https://github.com/baileyh8/hermes-feishu-streaming-card/pull/76) reasoning/tool timeline UX proposal and implementation exploration (V3.8.x)
 - [fengs2021](https://github.com/fengs2021) — [PR #17](https://github.com/baileyh8/hermes-feishu-streaming-card/pull/17) lock optimization and update interval improvement (V3.3.0)
 
 ## Security

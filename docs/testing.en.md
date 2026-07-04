@@ -42,6 +42,8 @@ V3.8.7 adds a newer-Hermes compatibility regression: if the first normal message
 
 V3.8.8 adds native Hermes system notice cardification regressions: `system.notice` events should enter the session timeline or create standalone notice cards; Feishu adapter `send` / `edit_message` interception should suppress gray native text when the sidecar applies the notice and remain fail-open when the sidecar is unavailable or the notice is unknown.
 
+V3.8.9 adds Feishu/Lark topic reply regressions: when the first card is created from the original topic message `message_id` but later `tool.updated`, `answer.delta`, or `system.notice` events use a different streaming `message_id`, the sidecar should update the same card through `reply_to_message_id`, create no duplicate card, and avoid gray native fallback for applied system notices. Recognized system notices should also suppress native gray text if the card delivery attempt times out.
+
 ## Feishu HTTP Client Tests
 
 ```bash

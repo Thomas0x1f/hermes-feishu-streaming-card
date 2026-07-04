@@ -2,7 +2,7 @@
 
 当前 active runtime 是 `hermes_feishu_card/`。legacy adapter、dual mode、旧 `sidecar/`、旧 `patch/` 和 `installer_v2.py` 不是 active runtime，仅保留作历史参考。
 
-## V3.8 系列路线：V3.8.0 / V3.8.1 / V3.8.2 / V3.8.3 / V3.8.4 / V3.8.5 / V3.8.6 / V3.8.7 / V3.8.8
+## V3.8 系列路线：V3.8.0 / V3.8.1 / V3.8.2 / V3.8.3 / V3.8.4 / V3.8.5 / V3.8.6 / V3.8.7 / V3.8.8 / V3.8.9
 
 详细路线见 [docs/superpowers/specs/2026-06-30-v3-8-design.md](docs/superpowers/specs/2026-06-30-v3-8-design.md) 和 [docs/superpowers/plans/2026-06-30-v3-8-card-ux-stability.md](docs/superpowers/plans/2026-06-30-v3-8-card-ux-stability.md)。
 
@@ -80,6 +80,14 @@
 - [x] 补单元/集成测试：事件 schema、session timeline、独立 notice 卡片、Feishu adapter `send` / `edit_message` 拦截与 fallback。
 - [x] 本地 Hermes runtime 安装、Gateway/sidecar 重启、真实 Lark「奥妹」sidecar smoke：独立 notice 卡片和当前会话 notice timeline 均返回 applied；用户确认进入发版流程。
 
+### V3.8.9：飞书话题卡片连续更新补丁（已完成）
+
+- [x] 飞书/Lark 话题回复中，后续流式事件即使使用不同内部 `message_id`，也能通过 `reply_to_message_id` 回到原卡片 session。
+- [x] `tool.updated` / `answer.delta` / `thinking.delta` / `message.completed` 在话题场景继续更新同一张卡片，不新增重复卡片。
+- [x] `system.notice` 在话题内优先进入当前卡片 timeline，避免卡片内外同时出现同一条系统提示。
+- [x] hook runtime 保留 Hermes Relay `source.message_id` 作为原始 Feishu reply anchor，覆盖真实 WebSocket 长连接话题元数据。
+- [x] 补齐 topic stream/tool、topic `system.notice` 和 hook runtime reply anchor 回归测试。
+
 ### V3.8.x 后续维护与扩展面（待办）
 
 - [ ] 卡片内提供“继续”“重试”“取消”等写操作入口，需要单独做权限、幂等和误触发设计。
@@ -90,7 +98,7 @@
 - [ ] 评估卡片 timeline/metrics 的长期兼容边界，并补发布回归清单。
 - [ ] 完全兜住极端 Markdown table 边界：当结构化拆分失败时输出安全折叠提示，避免回退 plain split。
 - [ ] 清理 terminal 后的 closed `FlushController`，并评估更有诊断价值的 queue depth / coalesced backlog 指标。
-- [ ] V3.8.9 候选：按真实使用反馈补充更多 Hermes 原生 notice 分类、去重策略和中英文文案微调。
+- [ ] V3.8.x 候选：按真实使用反馈补充更多 Hermes 原生 notice 分类、去重策略和中英文文案微调。
 - [ ] V3.9 候选：Docker 完整运维体验（镜像内安装、外部 Hermes 目录挂载、doctor 一键诊断、升级流程）。
 - [ ] V3.9 候选：群聊能力（@bot、白名单、会话绑定提示、群内 slash command 行为差异）。
 - [ ] V4.0 候选：卡片交互中台化（slash command、授权请求、对话选项、运行提示统一 action/state 模型）。

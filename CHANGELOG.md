@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.2.0.html).
 
+## V3.8.9 — 2026-07-04
+
+See also: [docs/release-notes-v3.8.9.md](docs/release-notes-v3.8.9.md)
+
+### Fixed
+- Fixed Feishu/Lark topic replies where the initial card appeared but later `answer.delta`, `thinking.delta`, `tool.updated`, or `system.notice` events could fail to update the same card when Hermes used a different streaming `message_id`.
+- Session-scoped native Hermes notices in topics now resolve back to the active card by `reply_to_message_id`, so accepted notices return `applied: true` and do not fall through to duplicate gray native messages.
+- Recognized Hermes system notices no longer fall back to native gray Feishu/Lark text when card delivery times out. This suppresses the duplicate external notice while the active topic card continues to own the run state.
+- Hook runtime stream events now preserve the original Feishu reply anchor from Relay `source.message_id`, allowing topic updates to stay associated with the triggering user message even when Hermes' internal stream id changes.
+
+### Tests
+- Added Feishu topic regression coverage for stream/tool updates and `system.notice` updates that use a different event `message_id` but the same `reply_to_message_id`.
+- Added hook runtime coverage for topic stream events carrying `reply_to_message_id` from Relay source metadata.
+- Added a timeout regression for native Feishu adapter `send()` proving classified system notices are suppressed instead of being resent as gray text when the card attempt misses its deadline.
+
 ## V3.8.8 — 2026-07-03
 
 See also: [docs/release-notes-v3.8.8.md](docs/release-notes-v3.8.8.md)

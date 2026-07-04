@@ -196,6 +196,31 @@ def test_build_event_carries_feishu_thread_id_from_source():
     assert payload["thread_id"] == "omt_thread"
 
 
+def test_build_stream_event_carries_topic_reply_anchor_from_source_message_id():
+    class TopicSourceObject:
+        platform = "feishu"
+        chat_id = "oc_source"
+        thread_id = "omt_thread"
+        message_id = "om_topic_user"
+
+    payload = hook_runtime.build_event(
+        "tool.updated",
+        {
+            "source": TopicSourceObject(),
+            "session_id": "agent:main:feishu:dm:oc_source:omt_thread",
+            "message_id": "om_topic_stream_reply",
+            "tool_id": "terminal",
+            "name": "terminal",
+            "status": "running",
+            "detail": "brew install ripgrep",
+        },
+    )
+
+    assert payload["message_id"] == "om_topic_stream_reply"
+    assert payload["thread_id"] == "omt_thread"
+    assert payload["data"]["reply_to_message_id"] == "om_topic_user"
+
+
 def test_build_event_ignores_non_feishu_platforms():
     assert (
         hook_runtime.build_event(
@@ -851,6 +876,290 @@ def test_native_feishu_system_notice_send_posts_sidecar_and_suppresses_text(monk
     assert payload["data"]["title"] == "上下文窗口提示"
     assert payload["data"]["notice_scope"] == "session"
     assert "auto-compaction" in payload["data"]["content"]
+    assert posted[0][2] == hook_runtime.TERMINAL_TIMEOUT_SECONDS
+
+
+def test_native_feishu_system_notice_send_suppresses_text_when_card_times_out(monkeypatch):
+    attempts = []
+
+    async def fake_post_json_ordered_response(url, payload, timeout):
+        attempts.append((url, payload, timeout))
+        raise TimeoutError("timed out")
+
+    monkeypatch.setenv("HERMES_FEISHU_CARD_EVENT_URL", "http://127.0.0.1:8765/events")
+    monkeypatch.setattr(
+        hook_runtime,
+        "_post_json_ordered_response",
+        fake_post_json_ordered_response,
+    )
+
+    class DummyFeishuAdapter:
+        name = "feishu"
+
+        def __init__(self):
+            self._client = object()
+            self.text_sent = []
+
+        async def send(self, chat_id, content, reply_to=None, metadata=None):
+            self.text_sent.append((chat_id, content, reply_to, metadata))
+            return SimpleNamespace(success=True, message_id="om_native_text")
+
+    adapter = DummyFeishuAdapter()
+    runner = SimpleNamespace(adapters={"feishu": adapter})
+    event = SimpleNamespace(
+        source=SimpleNamespace(platform="feishu", chat_id="oc_abc"),
+        text="查一下广州明天天气",
+        message_id="om_user_weather",
+        get_command=lambda: "",
+    )
+    hook_runtime.install_feishu_command_card_adapter_methods(runner, event=event)
+
+    async def run():
+        return await adapter.send(
+            "oc_abc",
+            "ℹ Codex gpt-5.5 caps context at 272K, so auto-compaction was raised to 85%.",
+            reply_to="om_user_weather",
+            metadata={"reply_to_message_id": "om_user_weather"},
+        )
+
+    result = asyncio.run(run())
+
+    assert result.success is True
+    assert result.message_id == "om_user_weather"
+    assert len(attempts) == 1
+    assert adapter.text_sent == []
+
+
+def test_gateway_platform_notice_posts_sidecar_and_suppresses_native_text(monkeypatch):
+    posted = []
+
+    async def fake_post_json_ordered_response(url, payload, timeout):
+        posted.append((url, payload, timeout))
+        return {"ok": True, "applied": True}
+
+    monkeypatch.setenv("HERMES_FEISHU_CARD_EVENT_URL", "http://127.0.0.1:8765/events")
+    monkeypatch.setattr(
+        hook_runtime,
+        "_post_json_ordered_response",
+        fake_post_json_ordered_response,
+    )
+
+    class DummyFeishuAdapter:
+        name = "feishu"
+
+        def __init__(self):
+            self.text_sent = []
+
+        async def send(self, chat_id, content, reply_to=None, metadata=None):
+            self.text_sent.append((chat_id, content, reply_to, metadata))
+            return SimpleNamespace(success=True, message_id="om_native_notice")
+
+    class DummyGatewayRunner:
+        def __init__(self, adapter):
+            self.adapters = {"feishu": adapter}
+            self.native_notices = []
+
+        async def _deliver_platform_notice(self, source, content):
+            self.native_notices.append((source, content))
+            return await self.adapters["feishu"].send(source.chat_id, content)
+
+    adapter = DummyFeishuAdapter()
+    runner = DummyGatewayRunner(adapter)
+    source = SimpleNamespace(
+        platform="feishu",
+        chat_id="oc_topic",
+        message_id="om_topic_user",
+        thread_id="omt_topic",
+    )
+
+    installed = hook_runtime.install_feishu_command_card_adapter_methods(runner)
+
+    async def run():
+        result = await runner._deliver_platform_notice(
+            source,
+            "ℹ️ Codex gpt-5.5 caps context at 272K, so auto-compaction was raised to 85%.",
+        )
+        await drain_tasks()
+        return result
+
+    result = asyncio.run(run())
+
+    assert installed is True
+    assert result.success is True
+    assert result.message_id == "om_topic_user"
+    assert adapter.text_sent == []
+    assert runner.native_notices == []
+    assert len(posted) == 1
+    url, payload, timeout = posted[0]
+    assert url == "http://127.0.0.1:8765/events"
+    assert timeout == hook_runtime.TERMINAL_TIMEOUT_SECONDS
+    assert payload["event"] == "system.notice"
+    assert payload["chat_id"] == "oc_topic"
+    assert payload["message_id"] == "om_topic_user"
+    assert payload["thread_id"] == "omt_topic"
+    assert payload["conversation_id"] == "omt_topic"
+    assert payload["data"]["notice_scope"] == "session"
+    assert payload["data"]["reply_to_message_id"] == "om_topic_user"
+
+
+def test_handle_platform_notice_from_hermes_schedules_card(monkeypatch):
+    posted = []
+
+    async def fake_post_json_ordered_response(url, payload, timeout):
+        posted.append((url, payload, timeout))
+        return {"ok": True, "applied": True}
+
+    monkeypatch.setenv("HERMES_FEISHU_CARD_EVENT_URL", "http://127.0.0.1:8765/events")
+    monkeypatch.setattr(
+        hook_runtime,
+        "_post_json_ordered_response",
+        fake_post_json_ordered_response,
+    )
+
+    class DummyFeishuAdapter:
+        name = "feishu"
+
+    class DummyGatewayRunner:
+        def __init__(self, adapter):
+            self.adapters = {"feishu": adapter}
+
+    source = SimpleNamespace(
+        platform="feishu",
+        chat_id="oc_topic",
+        message_id="om_topic_user",
+        thread_id="omt_topic",
+    )
+
+    handled = hook_runtime.handle_platform_notice_from_hermes(
+        DummyGatewayRunner(DummyFeishuAdapter()),
+        source,
+        "ℹ️ Codex gpt-5.5 caps context at 272K, so auto-compaction was raised to 85%.",
+    )
+
+    assert handled is True
+    assert len(posted) == 1
+    _, payload, timeout = posted[0]
+    assert timeout == hook_runtime.TERMINAL_TIMEOUT_SECONDS
+    assert payload["event"] == "system.notice"
+    assert payload["chat_id"] == "oc_topic"
+    assert payload["message_id"] == "om_topic_user"
+    assert payload["thread_id"] == "omt_topic"
+
+
+def test_gateway_platform_notice_suppresses_native_text_when_card_attempt_fails(monkeypatch):
+    attempts = []
+
+    async def fake_post_json_ordered_response(url, payload, timeout):
+        attempts.append((url, payload, timeout))
+        raise TimeoutError("timed out")
+
+    monkeypatch.setenv("HERMES_FEISHU_CARD_EVENT_URL", "http://127.0.0.1:8765/events")
+    monkeypatch.setattr(
+        hook_runtime,
+        "_post_json_ordered_response",
+        fake_post_json_ordered_response,
+    )
+
+    class DummyFeishuAdapter:
+        name = "feishu"
+
+        def __init__(self):
+            self.text_sent = []
+
+        async def send(self, chat_id, content, reply_to=None, metadata=None):
+            self.text_sent.append((chat_id, content, reply_to, metadata))
+            return SimpleNamespace(success=True, message_id="om_native_notice")
+
+    class DummyGatewayRunner:
+        def __init__(self, adapter):
+            self.adapters = {"feishu": adapter}
+            self.native_notices = []
+
+        async def _deliver_platform_notice(self, source, content):
+            self.native_notices.append((source, content))
+            return await self.adapters["feishu"].send(source.chat_id, content)
+
+    adapter = DummyFeishuAdapter()
+    runner = DummyGatewayRunner(adapter)
+    source = SimpleNamespace(
+        platform="feishu",
+        chat_id="oc_topic",
+        message_id="om_topic_user",
+        thread_id="omt_topic",
+    )
+    hook_runtime.install_feishu_command_card_adapter_methods(runner)
+
+    async def run():
+        result = await runner._deliver_platform_notice(
+            source,
+            "ℹ️ Codex gpt-5.5 caps context at 272K, so auto-compaction was raised to 85%.",
+        )
+        await drain_tasks()
+        return result
+
+    result = asyncio.run(run())
+
+    assert result.success is True
+    assert result.message_id == "om_topic_user"
+    assert len(attempts) == 1
+    assert runner.native_notices == []
+    assert adapter.text_sent == []
+
+
+def test_gateway_platform_notice_falls_back_for_non_system_notice(monkeypatch):
+    posted = []
+
+    async def fake_post_json_ordered_response(url, payload, timeout):
+        posted.append(payload)
+        return {"ok": True, "applied": True}
+
+    monkeypatch.setattr(
+        hook_runtime,
+        "_post_json_ordered_response",
+        fake_post_json_ordered_response,
+    )
+
+    class DummyFeishuAdapter:
+        name = "feishu"
+
+        def __init__(self):
+            self.text_sent = []
+
+        async def send(self, chat_id, content, reply_to=None, metadata=None):
+            self.text_sent.append((chat_id, content, reply_to, metadata))
+            return SimpleNamespace(success=True, message_id="om_native_notice")
+
+    class DummyGatewayRunner:
+        def __init__(self, adapter):
+            self.adapters = {"feishu": adapter}
+            self.native_notices = []
+
+        async def _deliver_platform_notice(self, source, content):
+            self.native_notices.append((source, content))
+            return await self.adapters["feishu"].send(source.chat_id, content)
+
+    adapter = DummyFeishuAdapter()
+    runner = DummyGatewayRunner(adapter)
+    source = SimpleNamespace(
+        platform="feishu",
+        chat_id="oc_topic",
+        message_id="om_topic_user",
+        thread_id="omt_topic",
+    )
+    hook_runtime.install_feishu_command_card_adapter_methods(runner)
+
+    async def run():
+        return await runner._deliver_platform_notice(source, "ordinary native notice")
+
+    result = asyncio.run(run())
+
+    assert result.success is True
+    assert result.message_id == "om_native_notice"
+    assert posted == []
+    assert runner.native_notices == [(source, "ordinary native notice")]
+    assert adapter.text_sent == [
+        ("oc_topic", "ordinary native notice", None, None),
+    ]
 
 
 def test_native_feishu_system_notice_retries_as_independent_card_when_current_session_done(monkeypatch):

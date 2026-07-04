@@ -52,6 +52,11 @@ context-window/compression notices, automatic session resets, skill loading, and
 self-improvement reviews prefer Feishu/Lark cards or compact standalone notice
 cards instead of scattered gray native text.
 
+From V3.8.9, Feishu/Lark topic replies keep the same card session even when
+Hermes emits later stream events with a different internal `message_id`. Tool
+timeline updates and `system.notice` messages resolve through the original reply
+anchor instead of freezing the topic card or leaking duplicate gray messages.
+
 ## macOS / Linux
 
 ```bash
@@ -68,7 +73,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 | Variable | Default | Description |
 |---|---|---|
-| `HFC_VERSION` | `latest` | Git tag or branch to install, such as `v3.8.8`, `v3.6.6`, or `main`. |
+| `HFC_VERSION` | `latest` | Git tag or branch to install, such as `v3.8.9`, `v3.6.6`, or `main`. |
 | `HFC_REPO` | `baileyh8/hermes-feishu-streaming-card` | GitHub repository to install from. |
 | `HERMES_DIR` | `~/.hermes/hermes-agent` | Hermes Agent root directory. |
 | `HFC_CONFIG` | `~/.hermes/config.yaml` | Sidecar config path. |
@@ -88,7 +93,7 @@ script selects Hermes venv Python and does not fall back to system Python unless
 ```
 export FEISHU_APP_ID=cli_xxx
 export FEISHU_APP_SECRET=xxx
-export HFC_VERSION=v3.8.8
+export HFC_VERSION=v3.8.9
 bash install-docker.sh
 ```
 
