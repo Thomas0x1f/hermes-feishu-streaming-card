@@ -2,7 +2,7 @@
 
 当前 active runtime 是 `hermes_feishu_card/`。legacy adapter、dual mode、旧 `sidecar/`、旧 `patch/` 和 `installer_v2.py` 不是 active runtime，仅保留作历史参考。
 
-## V3.8 系列路线：V3.8.0 / V3.8.1 / V3.8.2 / V3.8.3 / V3.8.4 / V3.8.5 / V3.8.6 / V3.8.7 / V3.8.8 / V3.8.9 / V3.8.10 / V3.8.11
+## V3.8 系列路线：V3.8.0 / V3.8.1 / V3.8.2 / V3.8.3 / V3.8.4 / V3.8.5 / V3.8.6 / V3.8.7 / V3.8.8 / V3.8.9 / V3.8.10 / V3.8.11 / V3.8.12
 
 详细路线见 [docs/superpowers/specs/2026-06-30-v3-8-design.md](docs/superpowers/specs/2026-06-30-v3-8-design.md) 和 [docs/superpowers/plans/2026-06-30-v3-8-card-ux-stability.md](docs/superpowers/plans/2026-06-30-v3-8-card-ux-stability.md)。
 
@@ -102,6 +102,13 @@
 - [x] Gateway patch 在 Hermes 原生 unknown slash fallback 前拦截 `/hfc`，避免卡片和灰色 `Unknown command /hfc` 双发。
 - [x] hook runtime 从真实 Gateway `event.text` / `event.content` 补读 slash command 文本。
 - [x] 补齐慢 Feishu 发送、真实 event 文本解析和早期 patch 插入位置回归测试。
+
+### V3.8.12：附件摘要重复 reply 抑制补丁（已完成）
+
+- [x] issue #82：带 `colors.csv` / `styles.csv` 等附件摘要的完成卡片不再触发整段原生最终 reply。
+- [x] completed event 增加 `native_delivery` 判定，区分普通卡片摘要和真实原生媒体/文件投递需求。
+- [x] `MEDIA:/tmp/...`、本地文件路径、`files`、`media_files` 和 image/audio/video locals 继续保留 Hermes 原生投递路径。
+- [x] 补齐附件摘要、真实媒体路径、patcher suppression guard 和 installed hook event payload 回归测试。
 
 ### V3.8.x 后续维护与扩展面（待办）
 

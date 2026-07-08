@@ -48,6 +48,8 @@ V3.8.10 adds group-diagnostic and tool-detail regressions: `bindings.group_rules
 
 V3.8.11 adds `/hfc` native unknown suppression regressions: `/commands` must return `handled: true` after accepting `/hfc status` while real Feishu/Lark card sending continues in the background; the patcher's early `/hfc` interception must stay before Hermes' native slash fallback so cards do not double-send with the gray `Unknown command /hfc` reply.
 
+V3.8.12 adds issue #82 attachment-summary duplicate-reply regressions: generic `attachments` summaries should suppress the native final reply after the completed card is delivered; `MEDIA:/tmp/...`, local file paths, `files`, `media_files`, and image/audio/video locals should still preserve Hermes native file/media delivery.
+
 ## Feishu HTTP Client Tests
 
 ```bash

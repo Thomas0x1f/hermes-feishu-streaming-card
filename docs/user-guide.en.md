@@ -30,6 +30,7 @@ Since V3.8.2, the final answer stays in the primary content area while pre-tool 
 - **Consistent topic replies**: Since V3.8.9, Feishu/Lark topic reply streams and system notices resolve back to the same card, avoiding frozen topic timelines and duplicate gray native notices.
 - **Clearer group diagnostics**: Since V3.8.10, group `/hfc status` explains chat binding, fallback/default routing, the suggested bind command, and slash-command behavior boundaries.
 - **No duplicate diagnostic fallback**: Since V3.8.11, accepted `/hfc status` commands no longer also trigger the gray native `Unknown command /hfc` reply.
+- **No duplicate replies for attachment summaries**: Since V3.8.12, completed cards that show `colors.csv` / `styles.csv` style attachment summaries no longer send the same final answer again as a native reply.
 - **Long content protection**: Markdown tables and fenced code blocks split on structure boundaries instead of raw character cuts.
 - **Richer tool details**: `tool.updated` can show argument summaries, duration, and failure reason while keeping long details compact.
 - **Multi-bot / multi-profile**: bot registry, chat bindings, profile-aware session keys, titles, and routing diagnostics.
@@ -46,10 +47,21 @@ Since V3.8.2, the final answer stays in the primary content area while pre-tool 
 | Topic replies show the first card but the timeline stops updating, while notices also appear outside the card | Topic events resolve by `reply_to_message_id`, keeping updates on the original card and suppressing duplicate native notice text |
 | Group chats make it unclear whether a bot binding exists or why slash commands behave differently | `/hfc status` reports binding hints, fallback routing, and group slash-command boundaries |
 | `/hfc status` renders a card but Feishu also shows gray `Unknown command /hfc` | Accepted `/hfc` commands ACK Hermes Gateway quickly and send the card in the background, avoiding native unknown fallback |
+| A completed card already shows attachment summaries, then the same final answer appears again as a native reply | Generic attachment summaries stay card-only; only real media/file paths keep Hermes native delivery |
 | Approval, choice prompts, or slash-command confirmations require manual text replies | Agent-turn choices stay in the active card; independent slash commands use standalone command cards, with numbered text fallback when cards are unavailable |
 | Long tables/code blocks render as raw Markdown | Markdown-aware table/code splitting with repeated headers and complete fences |
 | Multi-bot, group, and profile routing is hard to inspect | `bindings.chats`, safe `group_rules` diagnostics, profile-aware sessions, and `/health.routing` diagnostics |
 | Hook or sidecar failures are hard to debug | `doctor`, runtime import checks, `/health` metrics, fail-closed installer, restore/uninstall |
+
+## V3.8.12 Attachment-Summary Duplicate Reply Suppression
+
+V3.8.12 fixes the follow-up issue #82 recurrence: when a completed card already included attachment summaries such as `colors.csv` / `styles.csv`, the plugin previously allowed Hermes' native final reply to pass through as a conservative attachment fallback. Completed events now distinguish generic card summaries from real native file/media delivery requirements.
+
+- **Generic attachment summaries stay card-only**: display summaries from `attachments` no longer force the whole final answer through native reply fallback.
+- **Real files and media remain fail-open**: `MEDIA:/tmp/...`, local file paths, `files`, `media_files`, and image/audio/video locals still preserve Hermes native delivery.
+- **More precise Gateway completion guard**: the patcher uses `native_delivery` instead of a broad "attachments are non-empty" check.
+
+Full release notes: [docs/release-notes-v3.8.12.md](release-notes-v3.8.12.md).
 
 ## V3.8.11 `/hfc` Native Unknown-Command Suppression
 
@@ -291,7 +303,7 @@ Common environment variables:
 
 | Variable | Default | Description |
 |---|---|---|
-| `HFC_VERSION` | `latest` | Version to install, such as `v3.8.11`, `v3.6.6`, or `main` |
+| `HFC_VERSION` | `latest` | Version to install, such as `v3.8.12`, `v3.6.6`, or `main` |
 | `HERMES_DIR` | `~/.hermes/hermes-agent` | Hermes Agent Gateway directory |
 | `HFC_CONFIG` | `~/.hermes/config.yaml` | sidecar config path |
 | `HFC_ENV_FILE` | `.env` next to `HFC_CONFIG` | Feishu credential file |
@@ -318,7 +330,7 @@ Example:
 ```bash
 export FEISHU_APP_ID=cli_xxx
 export FEISHU_APP_SECRET=xxx
-export HFC_VERSION=v3.8.11
+export HFC_VERSION=v3.8.12
 bash install-docker.sh
 ```
 
@@ -354,7 +366,7 @@ python3 -m hermes_feishu_card.cli setup --hermes-dir ~/.hermes/hermes-agent --ye
 
 ## Upgrading
 
-Upgrading from V3.2.x/V3.3.0/V3.4.x/V3.5.x/V3.6.x/V3.7.x/V3.8.0-V3.8.10 to V3.8.11 is backward-compatible. **Single-profile configs need no changes.** If Hermes uses its own venv, rerun `setup` or `install` after upgrading so the package also lands in the Hermes runtime Python and the hook is refreshed. V3.8.11 keeps V3.8.10 group diagnostics and tool details, then fixes the real Feishu/Lark race where an accepted `/hfc status` card could still be followed by a gray `Unknown command /hfc` reply; run `doctor --explain` once after upgrading and verify a normal chat, a topic reply, and the target group with a normal prompt, `/hfc status`, `/new`, or `/model`.
+Upgrading from V3.2.x/V3.3.0/V3.4.x/V3.5.x/V3.6.x/V3.7.x/V3.8.0-V3.8.11 to V3.8.12 is backward-compatible. **Single-profile configs need no changes.** If Hermes uses its own venv, rerun `setup` or `install` after upgrading so the package also lands in the Hermes runtime Python and the hook is refreshed. V3.8.12 keeps V3.8.10 group diagnostics and the V3.8.11 `/hfc` command-claim fix, then fixes completed cards with attachment summaries duplicating the final native reply; run `doctor --explain` once after upgrading and verify a normal chat, a topic reply, and the target group with a normal prompt, `/hfc status`, `/new`, or `/model`.
 
 ```bash
 # 1. Stop sidecar
@@ -362,7 +374,7 @@ python3 -m hermes_feishu_card.cli stop --config ~/.hermes_feishu_card/config.yam
 
 # 2. Update code
 cd /path/to/hermes-feishu-streaming-card
-git checkout v3.8.11 && pip install -e ".[test]" --upgrade
+git checkout v3.8.12 && pip install -e ".[test]" --upgrade
 
 # 3. Diagnose Hermes hook strategy and anchors
 python3 -m hermes_feishu_card.cli doctor --config ~/.hermes_feishu_card/config.yaml --hermes-dir ~/.hermes/hermes-agent
@@ -534,6 +546,7 @@ The Hermes hook converts `message.started` / `thinking.delta` / `answer.delta` /
 
 | Version | Date | Highlights |
 |---------|------|-----------|
+| [v3.8.12](https://github.com/baileyh8/hermes-feishu-streaming-card/releases/tag/v3.8.12) | 2026-07 | issue #82: completed cards with `colors.csv` / `styles.csv` style attachment summaries no longer duplicate the final native reply |
 | [v3.8.11](https://github.com/baileyh8/hermes-feishu-streaming-card/releases/tag/v3.8.11) | 2026-07 | `/hfc status` no longer triggers the gray native `Unknown command /hfc` reply after the card is accepted |
 | [v3.8.10](https://github.com/baileyh8/hermes-feishu-streaming-card/releases/tag/v3.8.10) | 2026-07 | Group `/hfc status` binding hints, fallback/default routing and slash-command boundaries; tool details show arguments, duration, and failure reason |
 | [v3.8.9](https://github.com/baileyh8/hermes-feishu-streaming-card/releases/tag/v3.8.9) | 2026-07 | Feishu/Lark topic card continuity: later stream events and `system.notice` resolve by `reply_to_message_id`, keeping the topic timeline updating and avoiding duplicate gray notices |

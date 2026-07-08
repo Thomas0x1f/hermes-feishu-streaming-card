@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.2.0
 
 ## Unreleased
 
+## V3.8.12 — 2026-07-08
+
+See also: [docs/release-notes-v3.8.12.md](docs/release-notes-v3.8.12.md)
+
+### Fixed
+- Fixed issue #82 recurrence where completed cards with attachment summaries such as `colors.csv` / `styles.csv` could still be followed by a duplicate native Feishu/Lark reply containing the full final answer.
+- Completed events now distinguish card attachment summaries from native file/media delivery requirements via `native_delivery`, so generic `attachments` stay card-only after successful Feishu delivery.
+- Native Hermes file/media paths remain fail-open: `MEDIA:/tmp/...`, local file paths, `files`, `media_files`, and image/audio/video file locals still allow Hermes' native attachment delivery path instead of being swallowed by card suppression.
+
+### Tests
+- Added regression coverage for generic attachment summaries suppressing the native Feishu final reply.
+- Added coverage proving real media/file delivery paths still bypass native response suppression.
+- Updated patcher and integration coverage for the new `native_delivery` completion guard.
+
 ## V3.8.11 — 2026-07-08
 
 See also: [docs/release-notes-v3.8.11.md](docs/release-notes-v3.8.11.md)

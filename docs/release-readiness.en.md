@@ -2,7 +2,7 @@
 
 [中文](release-readiness.md) | [English](release-readiness.en.md)
 
-Current package version: `3.8.11`. This release keeps the sidecar-only mainline, preserves the V3.8.2 timeline readability work and V3.8.10 group diagnostics/tool details, then fixes the real Feishu/Lark race where `/hfc status` could render a card and still trigger the gray native `Unknown command /hfc` reply.
+Current package version: `3.8.12`. This release keeps the sidecar-only mainline, preserves the V3.8.2 timeline readability work, V3.8.10 group diagnostics, and the V3.8.11 `/hfc` command-claim fix, then fixes issue #82 where completed cards with attachment summaries could still duplicate the final native reply.
 
 ## Ready
 
@@ -28,6 +28,7 @@ Current package version: `3.8.11`. This release keeps the sidecar-only mainline,
 - Terminal events flush pending deltas for the same message before final card rendering.
 - Feishu-side `/hfc help/status/doctor/monitor` commands return read-only diagnostic cards with hashed context ids.
 - Accepted `/hfc` diagnostic commands ACK Hermes Gateway quickly and send the real Feishu/Lark card in the background, preventing `/hfc status` from double-sending a card plus the gray native `Unknown command /hfc` reply.
+- Generic attachment summaries in completed cards no longer trigger native final-reply fallback; real `MEDIA:`, local file paths, and Hermes media/file locals still keep the native file/media delivery path available.
 - Group `/hfc status` reports chat binding state, fallback/default routing, the suggested `bots bind-chat` command, and group slash-command behavior boundaries while real @robot and allowlist admission remains owned by Hermes Gateway.
 - Pre-tool answers stay in the primary body first, then archive into the auxiliary timeline when the next answer or terminal event arrives; terminal cards strip already archived intermediate prefaces.
 - Auxiliary timeline reasoning and tool details use separate text sizes and visual weight, while raw `thinking.delta` stays out of the user-visible timeline.
