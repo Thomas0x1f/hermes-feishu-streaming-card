@@ -284,6 +284,33 @@ def test_handle_hfc_command_posts_command_without_building_normal_event(monkeypa
     assert payload["thread_id"] == ""
 
 
+def test_handle_hfc_command_reads_gateway_event_text(monkeypatch):
+    posted = []
+    monkeypatch.setenv("HERMES_FEISHU_CARD_EVENT_URL", "http://sidecar.test/events")
+
+    class HfcEventObject:
+        text = "/hfc status"
+        message_id = "om_event_command"
+
+    def fake_post(url, payload, timeout):
+        posted.append((url, payload, timeout))
+        return True
+
+    monkeypatch.setattr(hook_runtime, "_post_json_sync", fake_post)
+
+    handled = hook_runtime.handle_hfc_command_from_hermes_locals(
+        {
+            "source": SourceObject(),
+            "event": HfcEventObject(),
+            "message_id": "om_event_command",
+        }
+    )
+
+    assert handled is True
+    assert posted[0][1]["command"] == "status"
+    assert posted[0][1]["message_id"] == "om_event_command"
+
+
 def test_handle_hfc_command_ignores_regular_messages(monkeypatch):
     posted = []
     monkeypatch.setattr(

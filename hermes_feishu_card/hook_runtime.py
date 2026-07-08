@@ -553,6 +553,10 @@ def _command_text(local_vars: dict[str, Any]) -> str:
         return text
     message_obj = local_vars.get("message")
     text = _first_attr_raw_string(message_obj, ("text", "content"))
+    if text is not None:
+        return text
+    gateway_event_obj = local_vars.get("event")
+    text = _first_attr_raw_string(gateway_event_obj, ("text", "content"))
     return text or ""
 
 
