@@ -61,7 +61,7 @@ load_env_file() {
       export\ *) line="${line#export }" ;;
     esac
     case "$line" in
-      FEISHU_APP_ID=*|FEISHU_APP_SECRET=*|FEISHU_CONNECTION_MODE=*|FEISHU_HOME_CHANNEL=*|HERMES_FEISHU_CARD_HOST=*|HERMES_FEISHU_CARD_PORT=*)
+      FEISHU_APP_ID=*|FEISHU_APP_SECRET=*|FEISHU_CONNECTION_MODE=*|FEISHU_HOME_CHANNEL=*|HERMES_FEISHU_CARD_HOST=*|HERMES_FEISHU_CARD_PORT=*|HERMES_FEISHU_CARD_EVENT_URL=*|HERMES_FEISHU_CARD_PROFILE_ID=*)
         local key="${line%%=*}"
         local value="${line#*=}"
         value="${value#"${value%%[![:space:]]*}"}"

@@ -16,6 +16,8 @@ def test_install_sh_reads_dotenv_without_sourcing_unknown_keys(tmp_path):
             [
                 "FEISHU_APP_ID='cli_dotenv'",
                 "FEISHU_APP_SECRET='dotenv secret'",
+                "HERMES_FEISHU_CARD_EVENT_URL=http://127.0.0.1:8766/events",
+                "HERMES_FEISHU_CARD_PROFILE_ID=ops-agent",
                 "AGENT_BROWSER_EXECUTABLE_PATH=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
             ]
         ),
@@ -44,6 +46,14 @@ if [ "$1" = "-m" ] && [ "$2" = "hermes_feishu_card.cli" ]; then
   if [ "${FEISHU_APP_SECRET:-}" != "dotenv secret" ]; then
     echo "FEISHU_APP_SECRET was not loaded" >&2
     exit 3
+  fi
+  if [ "${HERMES_FEISHU_CARD_EVENT_URL:-}" != "http://127.0.0.1:8766/events" ]; then
+    echo "HERMES_FEISHU_CARD_EVENT_URL was not loaded" >&2
+    exit 5
+  fi
+  if [ "${HERMES_FEISHU_CARD_PROFILE_ID:-}" != "ops-agent" ]; then
+    echo "HERMES_FEISHU_CARD_PROFILE_ID was not loaded" >&2
+    exit 6
   fi
   exit 0
 fi

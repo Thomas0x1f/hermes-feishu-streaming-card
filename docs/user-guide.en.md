@@ -304,6 +304,8 @@ The installer installs or upgrades the package, reads or prompts for Feishu cred
 python3 -m hermes_feishu_card.cli setup --hermes-dir ~/.hermes/hermes-agent --config ~/.hermes/config.yaml --yes
 ```
 
+When `.env` exists next to the selected config, the installer imports only Feishu and card-sidecar variables, including `FEISHU_APP_ID`, `FEISHU_APP_SECRET`, `HERMES_FEISHU_CARD_HOST`, `HERMES_FEISHU_CARD_PORT`, `HERMES_FEISHU_CARD_EVENT_URL`, and `HERMES_FEISHU_CARD_PROFILE_ID`. For multiple Hermes Gateway / Feishu bot processes, give each Gateway an explicit `HERMES_FEISHU_CARD_EVENT_URL`, for example `http://127.0.0.1:8766/events`, plus a stable `HERMES_FEISHU_CARD_PROFILE_ID`.
+
 After installation:
 
 ```bash

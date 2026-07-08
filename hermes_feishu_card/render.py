@@ -136,6 +136,8 @@ def _render_status(session: CardSession) -> Dict[str, str]:
             "template": _notice_template(session.notice_level),
         }
     if session.status == "completed":
+        if _looks_like_in_progress_answer(session.answer_text):
+            return {"subtitle": "进行中", "summary": "生成中", "template": "blue"}
         return {"subtitle": "已完成", "template": "green"}
     if session.status == "failed":
         return {"subtitle": "处理失败", "template": "red"}
@@ -144,6 +146,26 @@ def _render_status(session: CardSession) -> Dict[str, str]:
     if normalize_stream_text(session.answer_text).strip():
         return {"subtitle": "", "summary": "生成中", "template": "blue"}
     return {"subtitle": "", "summary": "思考中", "template": "indigo"}
+
+
+def _looks_like_in_progress_answer(answer_text: str) -> bool:
+    text = normalize_stream_text(answer_text).strip()
+    if not text:
+        return False
+    markers = (
+        "数据收集中",
+        "数据到位后",
+        "请稍等",
+        "我会继续",
+        "正在收集",
+        "正在分析",
+        "后续生成",
+        "已派出",
+    )
+    if any(marker in text for marker in markers):
+        return True
+    lowered = text.lower()
+    return "subagent" in lowered and any(marker in text for marker in ("并行", "收集", "数据"))
 
 
 def _render_main_content_elements(main_text: str) -> list[Dict[str, Any]]:

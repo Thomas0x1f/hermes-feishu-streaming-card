@@ -48,6 +48,21 @@ def test_render_completed_card_replaces_thinking():
     assert "不会展示" not in content
 
 
+def test_render_completed_intermediate_progress_keeps_in_progress_header():
+    session = CardSession(conversation_id="chat-1", message_id="msg-1", chat_id="oc_abc")
+    session.answer_text = (
+        "数据收集中...\n\n"
+        "已派出3个 Subagent 并行收集数据，数据到位后我会继续生成报告，请稍等。"
+    )
+    session.status = "completed"
+
+    card = render_card(session)
+
+    assert card["header"]["subtitle"]["content"] == "进行中"
+    assert card["header"]["template"] == "blue"
+    assert card["config"]["summary"]["content"] == "生成中"
+
+
 def test_render_pending_interaction_as_buttons():
     from hermes_feishu_card.events import SidecarEvent
 

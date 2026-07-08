@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.2.0
 
 ## Unreleased
 
+### Fixed
+- Completed Feishu cards whose answer text is still an intermediate progress handoff now render a blue `进行中` header instead of a misleading green `已完成` header.
+- `install.sh` now imports `HERMES_FEISHU_CARD_EVENT_URL` and `HERMES_FEISHU_CARD_PROFILE_ID` from the selected `.env`, so multi-Gateway / multi-bot deployments can route each Hermes process to its own sidecar endpoint.
+
 ## V3.8.13 — 2026-07-08
 
 See also: [docs/release-notes-v3.8.13.md](docs/release-notes-v3.8.13.md)
