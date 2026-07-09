@@ -159,6 +159,7 @@
 - [ ] 评估卡片 timeline/metrics 的长期兼容边界，并补发布回归清单。
 - [ ] 完全兜住极端 Markdown table 边界：当结构化拆分失败时输出安全折叠提示，避免回退 plain split。
 - [ ] 清理 terminal 后的 closed `FlushController`，并评估更有诊断价值的 queue depth / coalesced backlog 指标。
+- [ ] 下次版本候选：整理 PR #84（贡献者 @Zanetach）的 Feishu card progress status routing 方向，和更多同类状态/安装路由需求一起评估；当前不单独发版。候选范围包括“完成态但内容仍是中间进度时显示 `进行中`”以及 `.env` 白名单读取 `HERMES_FEISHU_CARD_EVENT_URL` / `HERMES_FEISHU_CARD_PROFILE_ID`。
 - [ ] V3.8.x 候选：按真实使用反馈补充更多 Hermes 原生 notice 分类、去重策略和中英文文案微调。
 - [ ] V3.9 候选：Docker 完整运维体验（镜像内安装、外部 Hermes 目录挂载、doctor 一键诊断、升级流程）。
 - [ ] V3.9 候选：群聊体验后续（可视化配置向导、更多真实 E2E fixture、跨群会话迁移策略）。
