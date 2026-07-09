@@ -25,6 +25,8 @@ def test_readme_documents_sidecar_only_and_supported_hermes_version():
     assert "docs/assets/feishu-topic-card-showcase-v389.png" in readme
     assert "docs/user-guide.md" in readme
     assert "PR #76" in readme
+    assert "PR #87" in readme
+    assert "colinaaa" in readme
     assert "你能看到什么" in readme
     assert "适用场景" in readme
     assert "Hermes Agent Gateway 的飞书/Lark 回复变成一张持续更新的交互式卡片" in readme
@@ -405,6 +407,8 @@ def test_english_readme_and_docs_are_linked():
     assert "docs/assets/readme-cover.png" in english_readme
     assert "docs/assets/feishu-card-showcase-v385.png" in english_readme
     assert "PR #76" in english_readme
+    assert "PR #87" in english_readme
+    assert "colinaaa" in english_readme
     assert "setup --hermes-dir" in english_readme
     assert "Hermes Streaming Config" in english_readme
     assert "streaming.enabled" in english_readme

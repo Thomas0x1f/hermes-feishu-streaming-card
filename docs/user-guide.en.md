@@ -636,6 +636,7 @@ Thanks to these contributors for improving the project:
 - [gischuck](https://github.com/gischuck) — [PR #12](https://github.com/baileyh8/hermes-feishu-streaming-card/pull/12) Accept-Encoding fix (V3.2.1 brotli compatibility)
 - [gischuck](https://github.com/gischuck) — [PR #76](https://github.com/baileyh8/hermes-feishu-streaming-card/pull/76) reasoning/tool timeline UX proposal and implementation exploration (V3.8.x)
 - [fengs2021](https://github.com/fengs2021) — [PR #17](https://github.com/baileyh8/hermes-feishu-streaming-card/pull/17) lock optimization and update interval improvement (V3.3.0)
+- [colinaaa](https://github.com/colinaaa) — [PR #87](https://github.com/baileyh8/hermes-feishu-streaming-card/pull/87) WebSocket `interaction.select` clarify/approval card interaction support (V3.8.14)
 
 ## Security
 
