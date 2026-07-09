@@ -33,6 +33,7 @@ Since V3.8.2, the final answer stays in the primary content area while pre-tool 
 - **No duplicate replies for attachment summaries**: Since V3.8.12, completed cards that show `colors.csv` / `styles.csv` style attachment summaries no longer send the same final answer again as a native reply.
 - **More resilient Hermes upgrades**: Since V3.8.13, the installer treats verifiable `gateway/run.py` anchors as the final compatibility gate. Version metadata supports newer shapes such as `v2026.7.7.2` and `Hermes Agent v0.18.2 (...)`, and fully unparseable version text can still proceed when anchors validate.
 - **WebSocket interaction loop**: Since V3.8.14, agent clarify/approval buttons can resolve through native Feishu/Lark WebSocket `interaction.select` card actions and return to the sidecar.
+- **Input attachments no longer duplicate replies**: Since V3.8.15, input `.docx/files` context stays as card attachment summaries and no longer keeps Hermes' native final text reply.
 - **Long content protection**: Markdown tables and fenced code blocks split on structure boundaries instead of raw character cuts.
 - **Richer tool details**: `tool.updated` can show argument summaries, duration, and failure reason while keeping long details compact.
 - **Multi-bot / multi-profile**: bot registry, chat bindings, profile-aware session keys, titles, and routing diagnostics.
@@ -54,6 +55,16 @@ Since V3.8.2, the final answer stays in the primary content area while pre-tool 
 | Long tables/code blocks render as raw Markdown | Markdown-aware table/code splitting with repeated headers and complete fences |
 | Multi-bot, group, and profile routing is hard to inspect | `bindings.chats`, safe `group_rules` diagnostics, profile-aware sessions, and `/health.routing` diagnostics |
 | Hook or sidecar failures are hard to debug | `doctor`, runtime import checks, `/health` metrics, fail-closed installer, restore/uninstall |
+
+## V3.8.15 Input-Attachment Duplicate Reply Patch
+
+V3.8.15 fixes a follow-up issue #82 recurrence: when a session continued with a user-supplied `.docx` file context, the completed card could be delivered successfully and still be followed by a duplicate native Feishu/Lark reply containing the same final text. The completion hook was treating Hermes `files` locals as "native file delivery is required"; in this case those files are input context, not newly generated output files.
+
+- **Input files stay as card summaries**: `files` / `file` locals still appear in card attachment summaries, but no longer make Hermes resend the final text natively.
+- **Real outputs remain fail-open**: when the final answer explicitly contains `MEDIA:/tmp/...` or a local file path, Hermes native file/media delivery is still preserved.
+- **Structured media outputs stay protected**: `media_files`, `image_files`, `audio_files`, and `video_files` still mark `native_delivery` as required.
+
+Full release notes: [docs/release-notes-v3.8.15.md](release-notes-v3.8.15.md).
 
 ## V3.8.14 WebSocket Interaction Card Patch
 
@@ -325,7 +336,7 @@ Common environment variables:
 
 | Variable | Default | Description |
 |---|---|---|
-| `HFC_VERSION` | `latest` | Version to install, such as `v3.8.14`, `v3.6.6`, or `main` |
+| `HFC_VERSION` | `latest` | Version to install, such as `v3.8.15`, `v3.6.6`, or `main` |
 | `HERMES_DIR` | `~/.hermes/hermes-agent` | Hermes Agent Gateway directory |
 | `HFC_CONFIG` | `~/.hermes/config.yaml` | sidecar config path |
 | `HFC_ENV_FILE` | `.env` next to `HFC_CONFIG` | Feishu credential file |
@@ -352,7 +363,7 @@ Example:
 ```bash
 export FEISHU_APP_ID=cli_xxx
 export FEISHU_APP_SECRET=xxx
-export HFC_VERSION=v3.8.14
+export HFC_VERSION=v3.8.15
 bash install-docker.sh
 ```
 
@@ -388,7 +399,7 @@ python3 -m hermes_feishu_card.cli setup --hermes-dir ~/.hermes/hermes-agent --ye
 
 ## Upgrading
 
-Upgrading from V3.2.x/V3.3.0/V3.4.x/V3.5.x/V3.6.x/V3.7.x/V3.8.0-V3.8.13 to V3.8.14 is backward-compatible. **Single-profile configs need no changes.** If Hermes uses its own venv, rerun `setup` or `install` after upgrading so the package also lands in the Hermes runtime Python and the hook is refreshed. V3.8.14 keeps V3.8.10 group diagnostics, the V3.8.11 `/hfc` command-claim fix, V3.8.12 attachment-summary duplicate reply suppression, and V3.8.13 Hermes upgrade compatibility, then adds WebSocket-native agent clarify/approval `interaction.select` card actions; run `doctor --explain` once after upgrading and verify a normal chat, a topic reply, and the target group with a normal prompt, `/hfc status`, `/new`, `/model`, or one clarify/approval card.
+Upgrading from V3.2.x/V3.3.0/V3.4.x/V3.5.x/V3.6.x/V3.7.x/V3.8.0-V3.8.14 to V3.8.15 is backward-compatible. **Single-profile configs need no changes.** If Hermes uses its own venv, rerun `setup` or `install` after upgrading so the package also lands in the Hermes runtime Python and the hook is refreshed. V3.8.15 keeps V3.8.10 group diagnostics, the V3.8.11 `/hfc` command-claim fix, V3.8.12 attachment-summary duplicate reply suppression, V3.8.13 Hermes upgrade compatibility, and V3.8.14 WebSocket interaction card actions, then fixes a duplicate native final reply recurrence when input `.docx/files` context is present; run `doctor --explain` once after upgrading and verify a normal chat, a topic reply, and the target group with a normal prompt, `/hfc status`, `/new`, `/model`, and one prompt with an input attachment.
 
 ```bash
 # 1. Stop sidecar
@@ -396,7 +407,7 @@ python3 -m hermes_feishu_card.cli stop --config ~/.hermes_feishu_card/config.yam
 
 # 2. Update code
 cd /path/to/hermes-feishu-streaming-card
-git checkout v3.8.14 && pip install -e ".[test]" --upgrade
+git checkout v3.8.15 && pip install -e ".[test]" --upgrade
 
 # 3. Diagnose Hermes hook strategy and anchors
 python3 -m hermes_feishu_card.cli doctor --config ~/.hermes_feishu_card/config.yaml --hermes-dir ~/.hermes/hermes-agent
@@ -568,6 +579,7 @@ The Hermes hook converts `message.started` / `thinking.delta` / `answer.delta` /
 
 | Version | Date | Highlights |
 |---------|------|-----------|
+| [v3.8.15](https://github.com/baileyh8/hermes-feishu-streaming-card/releases/tag/v3.8.15) | 2026-07 | issue #82 follow-up: input `.docx/files` context no longer keeps a duplicate native final reply |
 | [v3.8.14](https://github.com/baileyh8/hermes-feishu-streaming-card/releases/tag/v3.8.14) | 2026-07 | issue #86 / PR #87: agent clarify/approval `interaction.select` buttons resolve through Feishu/Lark WebSocket-native card actions |
 | [v3.8.13](https://github.com/baileyh8/hermes-feishu-streaming-card/releases/tag/v3.8.13) | 2026-07 | Hermes `v2026.7.7.2` / `0.18.2` upgrade compatibility, anchor fallback, and stale install-state repair |
 | [v3.8.12](https://github.com/baileyh8/hermes-feishu-streaming-card/releases/tag/v3.8.12) | 2026-07 | issue #82: completed cards with `colors.csv` / `styles.csv` style attachment summaries no longer duplicate the final native reply |

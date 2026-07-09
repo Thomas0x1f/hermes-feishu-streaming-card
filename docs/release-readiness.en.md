@@ -2,7 +2,7 @@
 
 [中文](release-readiness.md) | [English](release-readiness.en.md)
 
-Current package version: `3.8.14`. This release keeps the sidecar-only mainline, preserves V3.8.2 timeline readability, V3.8.10 group diagnostics, the V3.8.11 `/hfc` command-claim fix, V3.8.12 attachment-summary duplicate reply suppression, and V3.8.13 Hermes upgrade compatibility, then adds Feishu/Lark WebSocket-native agent clarify/approval `interaction.select` button handling.
+Current package version: `3.8.15`. This release keeps the sidecar-only mainline, preserves V3.8.2 timeline readability, V3.8.10 group diagnostics, the V3.8.11 `/hfc` command-claim fix, V3.8.12 attachment-summary duplicate reply suppression, V3.8.13 Hermes upgrade compatibility, and V3.8.14 WebSocket interaction card actions, then fixes the duplicate native final reply recurrence caused by input `.docx/files` context.
 
 ## Ready
 

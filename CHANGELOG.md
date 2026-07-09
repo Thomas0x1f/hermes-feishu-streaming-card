@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.2.0
 
 ## Unreleased
 
+## V3.8.15 — 2026-07-09
+
+See also: [docs/release-notes-v3.8.15.md](docs/release-notes-v3.8.15.md)
+
+### Fixed
+- Fixed issue #82 follow-up recurrence where a completed card with an input `.docx` / `files` context could still be followed by a duplicate native Feishu/Lark final reply.
+- Structured `files` / `file` locals now remain card attachment summaries only; they no longer force `native_delivery=required` unless the final answer itself references an output path.
+- Real output delivery remains fail-open for explicit `MEDIA:/tmp/...`, local file paths in the final answer, and structured output media fields such as `media_files`, `image_files`, `audio_files`, and `video_files`.
+
+### Tests
+- Added regression coverage for card-only input file context while keeping explicit media/file output paths on native delivery.
+
 ## V3.8.14 — 2026-07-09
 
 See also: [docs/release-notes-v3.8.14.md](docs/release-notes-v3.8.14.md)

@@ -2,7 +2,7 @@
 
 当前 active runtime 是 `hermes_feishu_card/`。legacy adapter、dual mode、旧 `sidecar/`、旧 `patch/` 和 `installer_v2.py` 不是 active runtime，仅保留作历史参考。
 
-## V3.8 系列路线：V3.8.0 / V3.8.1 / V3.8.2 / V3.8.3 / V3.8.4 / V3.8.5 / V3.8.6 / V3.8.7 / V3.8.8 / V3.8.9 / V3.8.10 / V3.8.11 / V3.8.12 / V3.8.13 / V3.8.14
+## V3.8 系列路线：V3.8.0 / V3.8.1 / V3.8.2 / V3.8.3 / V3.8.4 / V3.8.5 / V3.8.6 / V3.8.7 / V3.8.8 / V3.8.9 / V3.8.10 / V3.8.11 / V3.8.12 / V3.8.13 / V3.8.14 / V3.8.15
 
 详细路线见 [docs/superpowers/specs/2026-06-30-v3-8-design.md](docs/superpowers/specs/2026-06-30-v3-8-design.md) 和 [docs/superpowers/plans/2026-06-30-v3-8-card-ux-stability.md](docs/superpowers/plans/2026-06-30-v3-8-card-ux-stability.md)。
 
@@ -125,6 +125,14 @@
 - [x] 保持 sidecar 作为安全边界：`interaction_id`、callback token 和可用的 chat id 继续在 `/card/actions` 校验。
 - [x] sidecar 拒绝、过期或无 card 返回时保持空 callback response，不崩溃也不落入未知原生 handler。
 - [x] 合并时保留贡献者 @colinaaa 的原始 commits，并补齐 rejected interaction 回归测试。
+
+### V3.8.15：输入附件重复 reply 抑制补丁（已完成）
+
+- [x] issue #82 后续复现：延续 session 且带输入 `.docx/files` 上下文时，完成卡片下方不再重复出现原生最终 reply。
+- [x] `files` / `file` locals 继续作为卡片附件摘要，但不再自动触发 `native_delivery=required`。
+- [x] 最终 answer 明确包含 `MEDIA:/tmp/...` 或本地文件路径时，仍保留 Hermes 原生文件/媒体投递。
+- [x] `media_files`、`image_files`、`audio_files`、`video_files` 等结构化输出媒体字段继续保护原生投递路径。
+- [x] 补齐输入文件 card-only 和显式媒体输出 fail-open 回归测试。
 
 ### V3.8.x 后续维护与扩展面（待办）
 

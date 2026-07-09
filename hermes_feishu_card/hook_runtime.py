@@ -40,6 +40,13 @@ NATIVE_DELIVERY_ATTACHMENT_FIELDS = (
     "audio_files",
     "video_files",
 )
+NATIVE_DELIVERY_OUTPUT_ATTACHMENT_FIELDS = (
+    "media_files",
+    "media",
+    "image_files",
+    "audio_files",
+    "video_files",
+)
 
 SUPPORTED_RUNTIME_EVENTS = {
     "message.started",
@@ -3688,7 +3695,7 @@ def _structured_attachment_candidates(local_vars: dict[str, Any]) -> list[Any]:
 
 
 def _structured_native_delivery_candidates(local_vars: dict[str, Any]) -> list[Any]:
-    return _structured_candidates(local_vars, NATIVE_DELIVERY_ATTACHMENT_FIELDS)
+    return _structured_candidates(local_vars, NATIVE_DELIVERY_OUTPUT_ATTACHMENT_FIELDS)
 
 
 def _structured_candidates(

@@ -2258,6 +2258,38 @@ def test_completed_event_allows_card_only_for_generic_attachment_summaries():
     )
 
 
+def test_completed_event_allows_card_only_for_input_file_context():
+    payload = hook_runtime.build_event(
+        "message.completed",
+        {
+            "chat_id": "oc_1",
+            "message_id": "m_1",
+            "answer": "我读完了你修改的简历。几个观察：",
+            "files": [
+                {
+                    "file_path": "/tmp/resume_260709.docx",
+                    "filename": "resume_260709.docx",
+                    "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                }
+            ],
+        },
+    )
+
+    attachments = payload["data"]["attachments"]
+    assert {
+        "kind": "file",
+        "name": "resume_260709.docx",
+        "summary": "resume_260709.docx",
+    } in attachments
+    assert payload["data"]["native_delivery"] == "allowed"
+    assert (
+        hook_runtime.should_suppress_native_response(
+            "feishu", True, attachments, payload["data"]["native_delivery"]
+        )
+        is True
+    )
+
+
 def test_completed_event_extracts_hermes_media_files_for_native_delivery_guard():
     payload = hook_runtime.build_event(
         "message.completed",
