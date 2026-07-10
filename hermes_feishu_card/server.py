@@ -14,7 +14,7 @@ import time
 import asyncio
 import logging
 import re
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 
 from aiohttp import web
 
@@ -90,6 +90,7 @@ UPDATE_MAX_ATTEMPTS = 3
 UPDATE_MIN_INTERVAL_SECONDS = 0.2
 RUNTIME_CLEANUP_INTERVAL_SECONDS = 60.0
 MAX_OPERATION_DELIVERIES = 200
+MAX_STALE_OPERATIONS_REPUBLISHES = 1
 MAX_CONCURRENT_OPERATION_DIAGNOSTICS = 4
 OPERATIONS_DIAGNOSTIC_TIMEOUT_SECONDS = 12.0
 RESTART_CALLBACK_GRACE_SECONDS = 0.25
@@ -866,6 +867,13 @@ def _failed_operations_report(profile_id: str) -> DiagnosticReport:
     )
 
 
+def _operations_report_available(report: DiagnosticReport) -> bool:
+    return not any(
+        finding.code == "operations_diagnosis_failed"
+        for finding in report.findings
+    )
+
+
 async def _build_operations_report(
     app: web.Application,
     *,
@@ -1019,7 +1027,9 @@ def _transfer_operation_delivery(
 ) -> None:
     delivery = app[OPERATIONS_DELIVERIES_KEY].pop(previous_operation_id, None)
     if isinstance(delivery, dict):
-        _store_operation_delivery(app, successor_operation_id, dict(delivery))
+        transferred = dict(delivery)
+        transferred["generation"] = int(transferred.get("generation") or 0) + 1
+        _store_operation_delivery(app, successor_operation_id, transferred)
 
 
 def _store_operation_delivery(
@@ -1028,7 +1038,12 @@ def _store_operation_delivery(
     delivery: dict[str, object],
 ) -> None:
     deliveries = app[OPERATIONS_DELIVERIES_KEY]
-    deliveries[operation_id] = delivery
+    stored = dict(delivery)
+    generation = stored.get("generation")
+    if isinstance(generation, bool) or not isinstance(generation, int):
+        generation = 1
+    stored["generation"] = generation
+    deliveries[operation_id] = stored
     while len(deliveries) > MAX_OPERATION_DELIVERIES:
         store: OperationStore = app[OPERATIONS_STORE_KEY]
         candidate = next(
@@ -1134,18 +1149,46 @@ async def _run_operations_recheck(
             profile_source="recheck",
             preparing_operation_id=operation.operation_id,
         )
-        diagnosed = store.diagnose(operation.operation_id, report=report)
     except asyncio.CancelledError:
         raise
     except Exception:
         failed_report = _failed_operations_report(operation.profile_id)
-        failed = _mark_operations_diagnosis_failed(
-            store, operation.operation_id, report=failed_report
+        failed = _complete_operations_recheck(
+            app,
+            operation,
+            failed_report,
+            state="failed",
+            result={"message": "诊断暂时不可用，请稍后重新检测。"},
         )
         if failed is not None:
             await _publish_operations_card(app, failed_report, failed)
         return
-    await _publish_operations_card(app, report, diagnosed)
+    diagnosed = _complete_operations_recheck(app, operation, report)
+    if diagnosed is not None:
+        await _publish_operations_card(app, report, diagnosed)
+
+
+def _complete_operations_recheck(
+    app: web.Application,
+    preparing: OperationRecord,
+    report: DiagnosticReport,
+    *,
+    state: str = "diagnosed",
+    result: dict[str, object] | None = None,
+) -> OperationRecord | None:
+    store: OperationStore = app[OPERATIONS_STORE_KEY]
+    if not store.is_preparing(preparing.operation_id):
+        return None
+    try:
+        return _successor_operation(
+            app,
+            preparing,
+            report,
+            state=state,
+            result=result,
+        )
+    except OperationRejected:
+        return None
 
 
 async def _run_operations_repair(
@@ -1207,7 +1250,7 @@ async def _run_operations_repair(
             profile_id=operation.profile_id,
             profile_source="post_repair",
         )
-        post_repair_available = True
+        post_repair_available = _operations_report_available(post_repair_report)
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -1367,6 +1410,8 @@ async def _publish_operations_card(
     app: web.Application,
     report: DiagnosticReport,
     operation: OperationRecord,
+    *,
+    stale_republishes_remaining: int = MAX_STALE_OPERATIONS_REPUBLISHES,
 ) -> bool:
     delivery = app[OPERATIONS_DELIVERIES_KEY].get(operation.operation_id)
     if not isinstance(delivery, dict):
@@ -1374,12 +1419,39 @@ async def _publish_operations_card(
     message_id = str(delivery.get("message_id") or "")
     if not message_id:
         return False
+    generation = delivery.get("generation")
+
+    def still_current() -> bool:
+        current = app[OPERATIONS_DELIVERIES_KEY].get(operation.operation_id)
+        return current is delivery and current.get("generation") == generation
+
     updated = await _update_card_for_app(
         app,
         message_id,
         _render_operations_for_app(app, report, operation),
         delivery.get("bot_id"),
+        is_current=still_current,
     )
+    if not still_current():
+        if stale_republishes_remaining > 0:
+            current = app[OPERATIONS_STORE_KEY].current_successor(
+                operation.operation_id
+            )
+            if current is not None and current.operation_id != operation.operation_id:
+                current_delivery = app[OPERATIONS_DELIVERIES_KEY].get(
+                    current.operation_id
+                )
+                if (
+                    isinstance(current_delivery, dict)
+                    and str(current_delivery.get("message_id") or "") == message_id
+                ):
+                    await _publish_operations_card(
+                        app,
+                        _operation_report_snapshot(current),
+                        current,
+                        stale_republishes_remaining=stale_republishes_remaining - 1,
+                    )
+        return False
     if not updated:
         result = dict(operation.result or {})
         result["delivery_error"] = "card update unavailable"
@@ -2405,10 +2477,17 @@ async def _update_card(
 
 
 async def _update_card_for_app(
-    app: web.Application, message_id: str, card: dict[str, Any], bot_id: str | None
+    app: web.Application,
+    message_id: str,
+    card: dict[str, Any],
+    bot_id: str | None,
+    *,
+    is_current: Callable[[], bool] | None = None,
 ) -> bool:
     metrics: SidecarMetrics = app[METRICS_KEY]
     for attempt in range(UPDATE_MAX_ATTEMPTS):
+        if is_current is not None and not is_current():
+            return False
         if attempt > 0:
             metrics.feishu_update_retries += 1
         metrics.feishu_update_attempts += 1
@@ -2423,9 +2502,13 @@ async def _update_card_for_app(
             app[DIAGNOSTICS_KEY]["last_update_error"] = message[:500]
             logger.warning("Feishu card update failed: %s", message)
             metrics.feishu_update_failures += 1
+            if is_current is not None and not is_current():
+                return False
             continue
         metrics.feishu_update_latency_ms = int((time.monotonic() - started_at) * 1000)
         metrics.feishu_update_successes += 1
+        if is_current is not None and not is_current():
+            return False
         return True
     return False
 

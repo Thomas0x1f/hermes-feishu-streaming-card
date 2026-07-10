@@ -846,6 +846,48 @@ def test_begin_recheck_preserves_capacity_and_refuses_late_predecessor_diagnose(
     assert successor.report is previous.report
 
 
+def test_recheck_preparing_record_keeps_snapshot_until_completion_successor():
+    store = OperationStore(secret=b"store", now=lambda: 100.0)
+    original_report = report()
+    previous = _prepared_diagnosed_operation(
+        store,
+        operation_id="operation-preparing",
+        diagnostic_report=original_report,
+    )
+    preparing, created = store.begin_recheck(
+        store.token(previous, "recheck"), **_recheck_callback(store, previous)
+    )
+    preparing_token = store.token(preparing, "recheck")
+    preparing_callback = _recheck_callback(store, preparing)
+    fresh_report = replace(
+        original_report,
+        config={**original_report.config, "marker": "fresh-completion"},
+    )
+
+    repeated, repeated_created = store.begin_recheck(
+        preparing_token, **preparing_callback
+    )
+    completed = store.create_successor(preparing.operation_id, report=fresh_report)
+    _claims, linked_preparing = store.inspect(
+        preparing_token,
+        callback_chat_id="oc_group",
+        callback_profile_id="default",
+        callback_profile_scope=store.scope_fingerprint(preparing),
+        allow_recheck_predecessor=True,
+    )
+
+    assert created is True
+    assert repeated_created is False
+    assert repeated is preparing
+    assert preparing.report is original_report
+    assert preparing.report_fingerprint == original_report.fingerprint
+    assert preparing.recovery_fingerprint == original_report.recovery_fingerprint
+    assert linked_preparing is preparing
+    assert store.current_successor(preparing.operation_id) is completed
+    assert completed.report is fresh_report
+    assert completed.report_fingerprint == fresh_report.fingerprint
+
+
 def test_begin_recheck_rejects_legacy_predecessor_without_report_snapshot():
     store = OperationStore(secret=b"store", now=lambda: 100.0, max_records=2)
     previous = store.create(

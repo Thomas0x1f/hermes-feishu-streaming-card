@@ -65,3 +65,33 @@ DONE
 
 - The bounded diagnostic timeout still cannot interrupt a synchronous report-builder thread already running in its executor; tests release all blocked fixtures in `finally`, and the task/future lifecycle remains bounded from the callback perspective.
 - No real Feishu smoke test was run for this follow-up; coverage is fake-client HTTP integration plus unit state-store behavior.
+
+## Second Re-review Fixes
+
+### Status
+
+DONE
+
+### Scope Delivered
+
+- Recheck now leaves the callback-visible `preparing` record unchanged. Its old report, fingerprints, and token remain valid while the worker creates a linked diagnosed or failed completion successor with the fresh report and transfers delivery before publishing.
+- Repeated recheck fallback from the in-progress card is idempotent, including a same-fingerprint diagnosis while a controlled PATCH is delayed or fails. The old preparing token resolves the linked completion successor after that PATCH failure without scheduling another worker.
+- Operations delivery records now carry a generation. The publisher checks current ownership before and after every PATCH attempt/result; a stale publisher does not add its own delivery error and performs one bounded republish of the current successor after its old write finishes.
+- A normally returned synthetic `operations_diagnosis_failed` report is treated as unavailable after repair. The repaired card truthfully says recheck is unavailable and does not offer restart.
+
+### RED Evidence
+
+- `test_recheck_preparing_record_keeps_snapshot_until_completion_successor` first failed because `begin_recheck` rejected the callback-visible `preparing` recheck as an invalid transition.
+- `test_same_fingerprint_slow_recheck_patch_keeps_one_worker_and_links_old_token` first failed because the slow same-fingerprint fallback started a second recheck worker.
+
+### GREEN Evidence
+
+- Added controlled delayed-PATCH coverage for old preparing-token lookup, same-fingerprint fallback idempotency, and all-attempt PATCH failure.
+- Added controlled two-publisher ordering coverage proving the final emitted card belongs to the newest delivery owner.
+- Added post-repair coverage where `_build_operations_report_sync` swallows an internal exception and returns the synthetic failure report normally.
+- `.venv/bin/python -m pytest tests/integration/test_server.py -q -x`: 142 passed in 9.27s.
+- `.venv/bin/python -m pytest tests/unit -q -x`: 824 passed, 3 skipped in 7.65s.
+
+### Remaining Boundary
+
+- No real Feishu/Lark smoke test was run; the new behavior is covered through HTTP integration and controlled fake-client PATCH ordering.

@@ -357,6 +357,8 @@ class OperationStore:
             )
             if claims.action != "recheck":
                 raise OperationRejected("operation action mismatch")
+            if record.state == "preparing":
+                return record, False
             if record.successor_operation_id:
                 successor = self._records.get(record.successor_operation_id)
                 if successor is not None:
