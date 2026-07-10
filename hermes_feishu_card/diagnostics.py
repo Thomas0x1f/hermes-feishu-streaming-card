@@ -319,6 +319,30 @@ def build_route_chain(
     }
 
 
+def build_route_diagnostics(
+    config: dict[str, object],
+    *,
+    profile_id: str,
+    profile_source: str,
+    event_url: str,
+    route: dict[str, object] | None,
+) -> tuple[dict[str, object], tuple[DiagnosticFinding, ...]]:
+    """Build route state and findings without requiring Hermes detection."""
+    routing = build_route_chain(
+        config,
+        profile_id=profile_id,
+        profile_source=profile_source,
+        event_url=event_url,
+        route=route,
+    )
+    return routing, tuple(_route_findings(config, routing))
+
+
+def safe_event_endpoint_for_output(event_url: str) -> str:
+    """Render only the reviewed /events path in user-visible diagnostics."""
+    return _card_safe_endpoint(event_url)
+
+
 def diagnostic_fingerprint(report: DiagnosticReport) -> str:
     canonical = _fingerprint_value(_card_safe_report(_report_dict(report)))
     if not isinstance(canonical, dict):

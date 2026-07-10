@@ -256,6 +256,12 @@ profiles:
     feishu:
       app_id: child-app
       app_secret: child-secret
+    bots:
+      default: child-bot
+      items:
+        child-bot:
+          app_id: child-bot-app
+          app_secret: child-bot-secret
 """,
         encoding="utf-8",
     )
@@ -302,8 +308,9 @@ profiles:
     assert "profile_id: child" in captured.out
     assert "event_endpoint: http://127.0.0.1:8765/events" in captured.out
     assert "config_profile: child" in captured.out
-    assert "bot_id: default" in captured.out
+    assert "bot_id: child-bot" in captured.out
     assert "route_reason: bots.default" in captured.out
+    assert "profile_credentials_missing" not in captured.out
     assert "child-secret" not in captured.out
 
 

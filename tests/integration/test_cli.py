@@ -329,9 +329,12 @@ def test_module_doctor_explain_reports_summary_and_next_steps(tmp_path):
     assert "Next steps" in result.stdout
 
 
-@pytest.mark.parametrize("profile_id", ["default", "child"])
+@pytest.mark.parametrize(
+    ("profile_id", "expected_bot_id"),
+    [("default", "main-bot"), ("child", "child-bot")],
+)
 def test_doctor_explain_reports_profile_route_without_credentials(
-    profile_id, tmp_path, monkeypatch, capsys
+    profile_id, expected_bot_id, tmp_path, monkeypatch, capsys
 ):
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
@@ -343,10 +346,22 @@ profiles:
     feishu:
       app_id: cli-default-app
       app_secret: cli-default-secret
+    bots:
+      default: main-bot
+      items:
+        main-bot:
+          app_id: cli-main-bot-app
+          app_secret: cli-main-bot-secret
   child:
     feishu:
       app_id: cli-child-app
       app_secret: cli-child-secret
+    bots:
+      default: child-bot
+      items:
+        child-bot:
+          app_id: cli-child-bot-app
+          app_secret: cli-child-bot-secret
 """,
         encoding="utf-8",
     )
@@ -374,11 +389,112 @@ profiles:
     assert f"profile_id: {profile_id}" in captured.out
     assert "event_endpoint: http://127.0.0.1:8765/events" in captured.out
     assert f"config_profile: {profile_id}" in captured.out
-    assert "bot_id: default" in captured.out
+    assert f"bot_id: {expected_bot_id}" in captured.out
     assert "route_reason: bots.default" in captured.out
+    assert "profile_credentials_missing" not in captured.out
     assert "cli-child-app" not in captured.out
     assert "cli-child-secret" not in captured.out
     assert "cli-default-secret" not in captured.out
+
+
+@pytest.mark.parametrize(
+    ("hermes_args", "expected_hermes"),
+    [(["--skip-hermes"], "Hermes: skipped"), ([], "Hermes: not_checked")],
+)
+def test_doctor_explain_reports_profile_route_before_hermes_detection(
+    hermes_args, expected_hermes, tmp_path, capsys
+):
+    config_path = tmp_path / "config.yaml"
+    env_path = tmp_path / ".env"
+    config_path.write_text(
+        """server:
+  host: 127.0.0.1
+  port: 8765
+profiles:
+  child:
+    feishu:
+      app_id: child-app
+      app_secret: child-secret
+    bots:
+      default: child-bot
+      items:
+        child-bot:
+          app_id: child-bot-app
+          app_secret: child-bot-secret
+""",
+        encoding="utf-8",
+    )
+    original_env = (
+        "# doctor must stay read-only\n"
+        "HERMES_FEISHU_CARD_EVENT_URL=http://127.0.0.1:8765/events\n"
+    )
+    env_path.write_text(original_env, encoding="utf-8")
+
+    exit_code = main(
+        [
+            "doctor",
+            "--config",
+            str(config_path),
+            "--profile-id",
+            "child",
+            "--explain",
+            *hermes_args,
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0, captured.err
+    assert expected_hermes in captured.out
+    assert "Route Chain" in captured.out
+    assert "profile_id: child" in captured.out
+    assert "event_endpoint: http://127.0.0.1:8765/events" in captured.out
+    assert "config_profile: child" in captured.out
+    assert "bot_id: child-bot" in captured.out
+    assert "route_reason: bots.default" in captured.out
+    assert "profile_credentials_missing" not in captured.out
+    assert env_path.read_text(encoding="utf-8") == original_env
+
+
+@pytest.mark.parametrize("secret_segment", ["SECRET_TOKEN", "oc_private", "ou_private"])
+def test_doctor_explain_redacts_unreviewed_nested_event_path(
+    secret_segment, tmp_path, monkeypatch, capsys
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """server:
+  host: 127.0.0.1
+  port: 8765
+profiles:
+  child:
+    feishu:
+      app_id: child-app
+      app_secret: child-secret
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        "HERMES_FEISHU_CARD_EVENT_URL",
+        f"http://127.0.0.1:8765/private/{secret_segment}/events",
+    )
+
+    exit_code = main(
+        [
+            "doctor",
+            "--config",
+            str(config_path),
+            "--hermes-dir",
+            str(FIXTURE),
+            "--profile-id",
+            "child",
+            "--explain",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0, captured.err
+    assert "event_endpoint: http://127.0.0.1:8765/[redacted-path]" in captured.out
+    assert secret_segment not in captured.out
+    assert "event_endpoint_mismatch" in captured.out
 
 
 @pytest.mark.parametrize(

@@ -1,4 +1,5 @@
 import os
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -822,3 +823,166 @@ def test_install_powershell_declares_and_forwards_profile_parameters():
         assert argument in script
     assert '$args += "--no-repair"' in script
     assert "UNKNOWN_KEY" not in script
+
+
+def test_install_powershell_env_parser_has_safe_dotenv_contract():
+    script = (ROOT / "install.ps1").read_text(encoding="utf-8")
+
+    assert "ConvertFrom-HfcEnvLine" in script
+    assignment_pattern = (
+        "^(?:export\\s+)?([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*(.*)$"
+    )
+    assert assignment_pattern in script
+    assert "ConvertFrom-HfcEnvValue" in script
+    assert "^'([^']*)'\\s*(?:#.*)?$" in script
+    assert '^"([^"]*)"\\s*(?:#.*)?$' in script
+    assert "\\s+#.*$" in script
+    assert "Invoke-Expression" not in script
+    assert "iex $line" not in script.lower()
+    assert script.index("$key -notin $HfcAllowedEnvKeys") < script.index(
+        "ConvertFrom-HfcEnvValue $match.Groups[2].Value"
+    )
+
+    file_resolution = script.index("$envValues = Read-HfcEnvFile")
+    defaults = script.index(
+        '$Config = if ($Config) { $Config } else { Join-Path $HOME ".hermes/config.yaml" }'
+    )
+    assert file_resolution < script.index(
+        'if (!$Config -and $envValues.ContainsKey("HFC_CONFIG"))'
+    ) < defaults
+    assert file_resolution < script.index(
+        'if (!$Version -and $envValues.ContainsKey("HFC_VERSION"))'
+    ) < defaults
+    assert file_resolution < script.index(
+        'if (!$ProfileId -and $envValues.ContainsKey("HERMES_FEISHU_CARD_PROFILE_ID"))'
+    ) < defaults
+    assert file_resolution < script.index(
+        'if (!$EventUrl -and $envValues.ContainsKey("HERMES_FEISHU_CARD_EVENT_URL"))'
+    ) < defaults
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason="pwsh is not installed")
+@pytest.mark.parametrize("source", ["argument", "process", "env_file"])
+def test_install_powershell_executes_safe_env_parsing_and_precedence(source, tmp_path):
+    fake_python = tmp_path / "fake-python.ps1"
+    fake_python.write_text(
+        """$line = [string]::Join(' ', $args)
+$normalized = @(
+  $env:HFC_CONFIG,
+  $env:HFC_ENV_FILE,
+  $env:HFC_VERSION,
+  $env:HERMES_FEISHU_CARD_PROFILE_ID,
+  $env:HERMES_FEISHU_CARD_EVENT_URL,
+  $env:HFC_NO_REPAIR,
+  $env:FEISHU_APP_ID,
+  $env:FEISHU_APP_SECRET
+) -join '|'
+Add-Content -LiteralPath $env:FAKE_PYTHON_LOG -Value "normalized=$normalized"
+Add-Content -LiteralPath $env:FAKE_PYTHON_LOG -Value "args=$line"
+exit 0
+""",
+        encoding="utf-8",
+    )
+    env_file = tmp_path / "selected.env"
+    injection_marker = tmp_path / "unknown-line-executed"
+    env_file.write_text(
+        "  export FEISHU_APP_ID = \"file-app\"   # supported comment\n"
+        "export FEISHU_APP_SECRET=\"file\\secret\" # supported comment\n"
+        f" export HFC_CONFIG = '{tmp_path / 'file config.yaml'}' # comment\n"
+        "HFC_VERSION = 'v-file' # comment\n"
+        "HERMES_FEISHU_CARD_PROFILE_ID = file-profile # comment\n"
+        "HERMES_FEISHU_CARD_EVENT_URL = \"http://file-sidecar:8765/events\" # comment\n"
+        "HFC_NO_REPAIR = 1 # comment\n"
+        f"UNKNOWN_KEY=$(New-Item -ItemType File '{injection_marker}')\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    for key in (
+        "HFC_CONFIG",
+        "HFC_VERSION",
+        "HERMES_FEISHU_CARD_PROFILE_ID",
+        "HERMES_FEISHU_CARD_EVENT_URL",
+        "HFC_NO_REPAIR",
+        "FEISHU_APP_ID",
+        "FEISHU_APP_SECRET",
+    ):
+        env.pop(key, None)
+    env.update(
+        {
+            "FAKE_PYTHON_LOG": str(tmp_path / "python.log"),
+            "HFC_ENV_FILE": str(env_file),
+            "HFC_NO_PROMPT": "1",
+            "HFC_SKIP_START": "1",
+            "HFC_PIP_USER": "0",
+            "HERMES_DIR": str(tmp_path / "hermes"),
+            "PYTHON": str(fake_python),
+        }
+    )
+    command = ["pwsh", "-NoProfile", "-File", str(ROOT / "install.ps1")]
+    if source in {"argument", "process"}:
+        env.update(
+            {
+                "HFC_CONFIG": str(tmp_path / "process-config.yaml"),
+                "HFC_VERSION": "v-process",
+                "HERMES_FEISHU_CARD_PROFILE_ID": "process-profile",
+                "HERMES_FEISHU_CARD_EVENT_URL": "http://process-sidecar:8765/events",
+                "HFC_NO_REPAIR": "0",
+            }
+        )
+    if source == "argument":
+        command.extend(
+            [
+                "-Config",
+                str(tmp_path / "argument-config.yaml"),
+                "-Version",
+                "v-argument",
+                "-ProfileId",
+                "argument-profile",
+                "-EventUrl",
+                "http://argument-sidecar:8765/events",
+                "-NoRepair",
+            ]
+        )
+
+    result = subprocess.run(
+        command,
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert not injection_marker.exists()
+    log = (tmp_path / "python.log").read_text(encoding="utf-8")
+    if source == "argument":
+        expected = (
+            str(tmp_path / "argument-config.yaml"),
+            "v-argument",
+            "argument-profile",
+            "http://argument-sidecar:8765/events",
+            "1",
+        )
+    elif source == "process":
+        expected = (
+            str(tmp_path / "process-config.yaml"),
+            "v-process",
+            "process-profile",
+            "http://process-sidecar:8765/events",
+            "0",
+        )
+    else:
+        expected = (
+            str(tmp_path / "file config.yaml"),
+            "v-file",
+            "file-profile",
+            "http://file-sidecar:8765/events",
+            "1",
+        )
+    config, version, profile, event_url, no_repair = expected
+    normalized = (
+        f"normalized={config}|{env_file}|{version}|{profile}|{event_url}|"
+        f"{no_repair}|file-app|file\\secret"
+    )
+    assert normalized in log

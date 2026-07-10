@@ -21,7 +21,9 @@ from hermes_feishu_card.bots import BotRegistry, RoutingContext
 from hermes_feishu_card.diagnostics import (
     DiagnosticReport,
     build_diagnostic_report,
+    build_route_diagnostics,
     format_diagnostic_text,
+    safe_event_endpoint_for_output,
 )
 from hermes_feishu_card.events import SidecarEvent
 from hermes_feishu_card.feishu_client import FeishuAPIError, FeishuClient, FeishuClientConfig
@@ -381,7 +383,10 @@ def _run_doctor(args: argparse.Namespace) -> int:
                     f"{_format_route_chain(report)}"
                 )
             else:
-                print(_format_doctor_explanation(report))
+                explanation = _format_doctor_explanation(report)
+                if isinstance(report.get("routing"), dict):
+                    explanation = f"{explanation}\n\n{_format_route_chain(report)}"
+                print(explanation)
         return _doctor_exit_code(payload)
 
     host = config["server"]["host"]
@@ -509,7 +514,7 @@ def _build_doctor_report(
                 "next_step": "Run doctor with --hermes-dir to check hook compatibility.",
             }
         )
-        return _finalize_doctor_report(report)
+        return _finalize_doctor_report(_attach_route_diagnostics(report, config, args))
 
     if not args.hermes_dir:
         recommendations.append(
@@ -520,7 +525,7 @@ def _build_doctor_report(
                 "next_step": "Run doctor with --hermes-dir PATH to check hook compatibility.",
             }
         )
-        return _finalize_doctor_report(report)
+        return _finalize_doctor_report(_attach_route_diagnostics(report, config, args))
 
     detection = detect_hermes(args.hermes_dir)
     report["hermes"] = _doctor_hermes_report(detection)
@@ -753,15 +758,55 @@ def _diagnostic_route(
     return {"bot_id": route.bot_id, "reason": route.reason}
 
 
-def _format_route_chain(report: DiagnosticReport) -> str:
-    routing = report.routing
+def _attach_route_diagnostics(
+    report: dict[str, Any], config: dict[str, Any], args: argparse.Namespace
+) -> dict[str, Any]:
+    if getattr(args, "profile_id", None) is None:
+        return report
+    profile_id = str(getattr(args, "_profile_id", "") or "")
+    routing, findings = build_route_diagnostics(
+        config,
+        profile_id=profile_id,
+        profile_source=str(getattr(args, "_profile_source", "") or ""),
+        event_url=str(getattr(args, "_event_url", "") or ""),
+        route=_diagnostic_route(config, profile_id),
+    )
+    report["routing"] = routing
+    recommendations = report.setdefault("recommendations", [])
+    recommendations.extend(
+        {
+            "severity": finding.severity,
+            "code": finding.code,
+            "message": finding.message,
+            "next_step": finding.actions[0] if finding.actions else "",
+        }
+        for finding in findings
+    )
+    return report
+
+
+def _format_route_chain(report: DiagnosticReport | dict[str, Any]) -> str:
+    if isinstance(report, DiagnosticReport):
+        routing = report.routing
+        finding_codes = [finding.code for finding in report.findings]
+    else:
+        routing = report.get("routing", {})
+        recommendations = report.get("recommendations", [])
+        finding_codes = [
+            str(item.get("code") or "")
+            for item in recommendations
+            if isinstance(item, dict)
+        ]
     profile_id = str(routing.get("profile_id") or "")
     profile_exists = bool(routing.get("profile_exists"))
+    endpoint = safe_event_endpoint_for_output(
+        str(routing.get("event_endpoint") or "")
+    )
     lines = [
         "Route Chain",
         f"- identity_source: {routing.get('profile_source') or 'unknown'}",
         f"- profile_id: {profile_id or 'missing'}",
-        f"- event_endpoint: {routing.get('event_endpoint') or 'missing'}",
+        f"- event_endpoint: {endpoint or 'missing'}",
         f"- config_profile: {profile_id if profile_exists else 'missing'}",
         f"- bot_id: {routing.get('bot_id') or 'missing'}",
         f"- route_reason: {routing.get('route_reason') or 'missing'}",
@@ -774,7 +819,7 @@ def _format_route_chain(report: DiagnosticReport) -> str:
         "bot_unknown",
         "route_fallback",
     }
-    findings = [finding.code for finding in report.findings if finding.code in route_codes]
+    findings = [code for code in finding_codes if code in route_codes]
     if findings:
         lines.append(f"- findings: {', '.join(findings)}")
     return "\n".join(lines)

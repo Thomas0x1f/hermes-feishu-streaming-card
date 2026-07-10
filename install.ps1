@@ -45,35 +45,78 @@ function Resolve-HfcVersion {
     return "main"
 }
 
+$HfcAllowedEnvKeys = @(
+    "FEISHU_APP_ID",
+    "FEISHU_APP_SECRET",
+    "FEISHU_CONNECTION_MODE",
+    "FEISHU_HOME_CHANNEL",
+    "HERMES_FEISHU_CARD_HOST",
+    "HERMES_FEISHU_CARD_PORT",
+    "HERMES_FEISHU_CARD_PROFILE_ID",
+    "HERMES_FEISHU_CARD_EVENT_URL",
+    "HFC_CONFIG",
+    "HFC_VERSION",
+    "HFC_NO_REPAIR"
+)
+
+function ConvertFrom-HfcEnvValue {
+    param([string]$RawValue)
+    $text = $RawValue.Trim()
+    if (!$text) {
+        return [PSCustomObject]@{ Valid = $true; Value = "" }
+    }
+    if ($text.StartsWith("'")) {
+        $match = [regex]::Match($text, "^'([^']*)'\s*(?:#.*)?$")
+        if (!$match.Success) {
+            return [PSCustomObject]@{ Valid = $false; Value = "" }
+        }
+        return [PSCustomObject]@{ Valid = $true; Value = $match.Groups[1].Value }
+    }
+    if ($text.StartsWith('"')) {
+        $match = [regex]::Match($text, '^"([^"]*)"\s*(?:#.*)?$')
+        if (!$match.Success) {
+            return [PSCustomObject]@{ Valid = $false; Value = "" }
+        }
+        return [PSCustomObject]@{ Valid = $true; Value = $match.Groups[1].Value }
+    }
+    $value = [regex]::Replace($text, '\s+#.*$', '').TrimEnd()
+    return [PSCustomObject]@{ Valid = $true; Value = $value }
+}
+
+function ConvertFrom-HfcEnvLine {
+    param([string]$Line)
+    $text = $Line.Trim()
+    if (!$text -or $text.StartsWith("#")) {
+        return $null
+    }
+    $match = [regex]::Match(
+        $text,
+        '^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$'
+    )
+    if (!$match.Success) {
+        return $null
+    }
+    $key = $match.Groups[1].Value
+    if ($key -notin $HfcAllowedEnvKeys) {
+        return $null
+    }
+    $parsed = ConvertFrom-HfcEnvValue $match.Groups[2].Value
+    if (!$parsed.Valid) {
+        return $null
+    }
+    return [PSCustomObject]@{ Key = $key; Value = $parsed.Value }
+}
+
 function Read-HfcEnvFile {
     $values = @{}
     if (!(Test-Path $EnvFile)) {
         return $values
     }
     Write-HfcLog "loading credentials from $EnvFile"
-    $allowed = @(
-        "FEISHU_APP_ID",
-        "FEISHU_APP_SECRET",
-        "FEISHU_CONNECTION_MODE",
-        "FEISHU_HOME_CHANNEL",
-        "HERMES_FEISHU_CARD_HOST",
-        "HERMES_FEISHU_CARD_PORT",
-        "HERMES_FEISHU_CARD_PROFILE_ID",
-        "HERMES_FEISHU_CARD_EVENT_URL",
-        "HFC_CONFIG",
-        "HFC_VERSION",
-        "HFC_NO_REPAIR"
-    )
-    Get-Content $EnvFile | ForEach-Object {
-        $line = $_.Trim()
-        if (!$line -or $line.StartsWith("#") -or !$line.Contains("=")) {
-            return
-        }
-        $parts = $line.Split("=", 2)
-        $key = $parts[0].Trim()
-        $value = $parts[1].Trim().Trim('"').Trim("'")
-        if ($key -in $allowed) {
-            $values[$key] = $value
+    foreach ($line in Get-Content $EnvFile) {
+        $entry = ConvertFrom-HfcEnvLine $line
+        if ($null -ne $entry) {
+            $values[$entry.Key] = $entry.Value
         }
     }
     return $values
