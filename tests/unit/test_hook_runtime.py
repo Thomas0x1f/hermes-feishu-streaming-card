@@ -1,4 +1,5 @@
 import asyncio
+import base64
 from concurrent.futures import ThreadPoolExecutor
 import json
 import math
@@ -12,6 +13,19 @@ from urllib import error
 import pytest
 
 from hermes_feishu_card import hook_runtime
+
+
+def _operation_token(operation_id="operation-1"):
+    payload = json.dumps(
+        {
+            "operation_id": operation_id,
+            "action": "repair",
+            "report_fingerprint": "report-1",
+            "expires_at": 9999999999,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=") + ".signature"
 
 
 @pytest.fixture(autouse=True)
@@ -323,8 +337,9 @@ def test_handle_hfc_command_forwards_chat_type_and_operator(monkeypatch):
 
     monkeypatch.setattr(
         hook_runtime,
-        "_post_json_sync",
-        lambda url, payload, timeout: posted.append(payload) or True,
+        "_post_json_sync_response",
+        lambda url, payload, timeout: posted.append(payload)
+        or {"ok": True, "operation_id": "operation-1"},
     )
 
     handled = hook_runtime.handle_hfc_command_from_hermes_locals(
@@ -338,6 +353,11 @@ def test_handle_hfc_command_forwards_chat_type_and_operator(monkeypatch):
     assert handled is True
     assert posted[0]["chat_type"] == "group"
     assert posted[0]["operator"] == "ou_initiator"
+    secret = posted[0]["adapter_transport_secret"]
+    assert len(secret) >= 32
+    assert hook_runtime._transport_secret_for_token(_operation_token()) == secret.encode(
+        "utf-8"
+    )
 
 
 def test_handle_hfc_command_ignores_regular_messages(monkeypatch):
@@ -4505,6 +4525,8 @@ def test_operations_select_passes_admission_and_forwards_profile_context(monkeyp
         return {"ok": True, "card": {"header": {"template": "orange"}}}
 
     monkeypatch.setattr(hook_runtime, "_post_json_sync_response", fake_post)
+    token = _operation_token()
+    hook_runtime._remember_operation_transport("operation-1", "process-local-secret")
     adapter = DummyFeishuAdapter()
     data = SimpleNamespace(
         event=SimpleNamespace(
@@ -4512,7 +4534,7 @@ def test_operations_select_passes_admission_and_forwards_profile_context(monkeyp
                 value={
                     "hfc_action": "operations.select",
                     "operation_action": "repair",
-                    "token": "opaque-token",
+                    "token": token,
                     "profile_scope": "opaque-scope",
                 }
             ),
@@ -4533,9 +4555,11 @@ def test_operations_select_passes_admission_and_forwards_profile_context(monkeyp
     assert posted["payload"]["event"]["action"]["value"] == {
         "hfc_action": "operations.select",
         "operation_action": "repair",
-        "token": "opaque-token",
+        "token": token,
         "profile_scope": "opaque-scope",
     }
+    assert posted["payload"]["adapter_transport_proof"]["signature"]
+    assert posted["payload"]["adapter_transport_proof"]["timestamp"] > 0
     assert response.card.type == "raw"
 
 

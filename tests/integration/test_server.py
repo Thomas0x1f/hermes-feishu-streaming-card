@@ -17,6 +17,7 @@ from hermes_feishu_card.lifecycle import (
     cleanup_orphan_message_lock,
     cleanup_runtime_state,
 )
+from hermes_feishu_card.operations import sign_transport_proof
 from hermes_feishu_card.session import CardSession, InteractionState
 from hermes_feishu_card.server import (
     CARD_SUMMARIES_KEY,
@@ -40,6 +41,7 @@ from hermes_feishu_card.server import (
 
 
 _REAL_ASYNCIO_SLEEP = asyncio.sleep
+TRANSPORT_SECRET = "test-adapter-process-local-secret"
 
 
 class FakeFeishuClient:
@@ -155,7 +157,22 @@ def operations_action_payload(
     context = {"open_chat_id": chat_id}
     if profile_id:
         context["profile_id"] = profile_id
+    timestamp = int(sidecar_server.time.time())
+    proof = sign_transport_proof(
+        TRANSPORT_SECRET.encode("utf-8"),
+        token=str(value.get("token") or ""),
+        action=str(value.get("operation_action") or ""),
+        callback_chat_id=chat_id,
+        callback_profile_id=profile_id,
+        callback_profile_scope=str(value.get("profile_scope") or ""),
+        operator_open_id=operator,
+        timestamp=timestamp,
+    )
     return {
+        "adapter_transport_proof": {
+            "timestamp": timestamp,
+            "signature": proof,
+        },
         "event": {
             "action": {"value": value},
             "context": context,
@@ -734,6 +751,7 @@ async def test_hfc_doctor_sends_group_owned_operations_card(monkeypatch):
                 "message_id": "om_doctor",
                 "chat_type": "group",
                 "operator": "ou_initiator",
+                "adapter_transport_secret": TRANSPORT_SECRET,
             },
         )
         await _wait_until(lambda: bool(feishu_client.sent))
@@ -767,6 +785,48 @@ async def test_hfc_doctor_sends_group_owned_operations_card(monkeypatch):
     assert operations_button(body["card"], "安全修复")
 
 
+async def test_http_operations_reject_forged_operator_without_valid_adapter_proof(
+    monkeypatch,
+):
+    feishu_client = FakeFeishuClient()
+    report = operations_report()
+    monkeypatch.setattr(
+        sidecar_server,
+        "_build_operations_report_sync",
+        lambda *args, **kwargs: (
+            report,
+            SimpleNamespace(root=Path("/private/hermes")),
+        ),
+    )
+    app = create_app(feishu_client)
+    test_client = TestClient(TestServer(app))
+    await test_client.start_server()
+    try:
+        await test_client.post(
+            "/commands",
+            json={
+                "command": "doctor",
+                "chat_id": "oc_group",
+                "message_id": "om_doctor",
+                "chat_type": "group",
+                "operator": "ou_owner",
+                "adapter_transport_secret": TRANSPORT_SECRET,
+            },
+        )
+        await _wait_until(lambda: bool(feishu_client.sent))
+        repair = operations_button(feishu_client.sent[0][1], "安全修复")
+        forged = operations_action_payload(repair, operator="ou_owner")
+        forged["adapter_transport_proof"]["signature"] = "0" * 64
+
+        response = await test_client.post("/card/actions", json=forged)
+        body = await response.json()
+    finally:
+        await test_client.close()
+
+    assert response.status == 403
+    assert body == {"ok": False, "error": "operation rejected"}
+
+
 async def test_group_operations_first_claim_missing_identity_and_read_only_matrix(
     monkeypatch,
 ):
@@ -796,6 +856,7 @@ async def test_group_operations_first_claim_missing_identity_and_read_only_matri
                 "chat_id": "oc_group",
                 "message_id": "om_doctor",
                 "chat_type": "group",
+                "adapter_transport_secret": TRANSPORT_SECRET,
             },
         )
         await _wait_until(lambda: bool(feishu_client.sent))
@@ -869,6 +930,7 @@ async def test_private_repair_is_exactly_once_under_concurrent_confirmation(monk
                 "message_id": "om_doctor",
                 "chat_type": "private",
                 "operator": "ou_first",
+                "adapter_transport_secret": TRANSPORT_SECRET,
             },
         )
         await _wait_until(lambda: bool(feishu_client.sent))
@@ -930,6 +992,7 @@ async def test_changed_recovery_fingerprint_refuses_confirm_without_execution(mo
                 "message_id": "om_doctor",
                 "chat_type": "group",
                 "operator": "ou_owner",
+                "adapter_transport_secret": TRANSPORT_SECRET,
             },
         )
         await _wait_until(lambda: bool(feishu_client.sent))
@@ -978,6 +1041,7 @@ async def test_http_operations_reject_tampered_and_profile_mismatched_tokens(
                 "message_id": "om_doctor",
                 "profile_id": "default",
                 "chat_type": "private",
+                "adapter_transport_secret": TRANSPORT_SECRET,
             },
         )
         await _wait_until(lambda: bool(feishu_client.sent))
@@ -1024,6 +1088,46 @@ async def test_http_operations_reject_tampered_and_profile_mismatched_tokens(
     }
 
 
+async def test_http_operations_reject_unsigned_forged_operator(monkeypatch):
+    feishu_client = FakeFeishuClient()
+    report = operations_report()
+    monkeypatch.setattr(
+        sidecar_server,
+        "_build_operations_report_sync",
+        lambda *args, **kwargs: (report, SimpleNamespace(root=Path("/private/hermes"))),
+    )
+    app = create_app(feishu_client)
+    test_client = TestClient(TestServer(app))
+    await test_client.start_server()
+    try:
+        await test_client.post(
+            "/commands",
+            json={
+                "command": "doctor",
+                "chat_id": "oc_group",
+                "message_id": "om_doctor",
+                "chat_type": "group",
+                "operator": "ou_owner",
+                "adapter_transport_secret": TRANSPORT_SECRET,
+            },
+        )
+        await _wait_until(lambda: bool(feishu_client.sent))
+        repair = operations_button(feishu_client.sent[0][1], "安全修复")
+
+        forged_payload = operations_action_payload(repair, operator="ou_owner")
+        forged_payload.pop("adapter_transport_proof")
+        forged = await test_client.post(
+            "/card/actions",
+            json=forged_payload,
+        )
+        body = await forged.json()
+    finally:
+        await test_client.close()
+
+    assert forged.status == 403
+    assert body == {"ok": False, "error": "operation rejected"}
+
+
 async def test_http_stale_operation_renders_recheck_only_expired_card(monkeypatch):
     feishu_client = FakeFeishuClient()
     report = operations_report()
@@ -1044,6 +1148,7 @@ async def test_http_stale_operation_renders_recheck_only_expired_card(monkeypatc
                 "message_id": "om_doctor",
                 "profile_id": "default",
                 "chat_type": "private",
+                "adapter_transport_secret": TRANSPORT_SECRET,
             },
         )
         await _wait_until(lambda: bool(feishu_client.sent))
@@ -1099,6 +1204,7 @@ async def test_confirmed_restart_returns_callback_before_sanitized_background_re
     restart_started = threading.Event()
     restart_release = threading.Event()
     restart_calls = []
+    ordering = []
     monkeypatch.setattr(
         sidecar_server,
         "_build_operations_report_sync",
@@ -1114,13 +1220,19 @@ async def test_confirmed_restart_returns_callback_before_sanitized_background_re
     )
 
     def fake_run(*args, **kwargs):
+        ordering.append("restart_started")
         restart_calls.append((args, kwargs))
         restart_started.set()
         restart_release.wait(timeout=2.0)
         return SimpleNamespace(
             returncode=1,
-            stdout="token=super-secret /private/hermes/runtime.log",
-            stderr="restart failed",
+            stdout=(
+                'Authorization: Bearer bearer-secret '
+                '{"password":"json-secret","token":"json-token"} '
+                "open_id=ou_secret chat_id=oc_secret message_id=om_secret "
+                "user_id=user_secret /private/hermes/runtime.log"
+            ),
+            stderr="restart failed secret=plain-secret",
         )
 
     monkeypatch.setattr(sidecar_server.subprocess, "run", fake_run)
@@ -1136,6 +1248,7 @@ async def test_confirmed_restart_returns_callback_before_sanitized_background_re
                 "message_id": "om_doctor",
                 "chat_type": "private",
                 "operator": "ou_first",
+                "adapter_transport_secret": TRANSPORT_SECRET,
             },
         )
         await _wait_until(lambda: bool(feishu_client.sent))
@@ -1175,9 +1288,10 @@ async def test_confirmed_restart_returns_callback_before_sanitized_background_re
             timeout=0.5,
         )
         callback_body = await callback.json()
+        ordering.append("client_received_response")
         assert callback.status == 200
         assert "正在重启 Gateway" in str(callback_body["card"])
-        assert restart_started.wait(timeout=0.5)
+        await _wait_until(restart_started.is_set, attempts=150)
 
         restart_release.set()
         await wait_for_card_update(feishu_client, "修复完成，重启失败")
@@ -1186,6 +1300,7 @@ async def test_confirmed_restart_returns_callback_before_sanitized_background_re
         await test_client.close()
 
     assert len(restart_calls) == 1
+    assert ordering[:2] == ["client_received_response", "restart_started"]
     args, kwargs = restart_calls[0]
     assert args == (["/usr/local/bin/hermes", "gateway", "restart"],)
     assert kwargs == {
@@ -1196,8 +1311,54 @@ async def test_confirmed_restart_returns_callback_before_sanitized_background_re
         "timeout": 30,
     }
     updated = str(feishu_client.updated[-1][1])
-    assert "super-secret" not in updated
-    assert "/private/hermes" not in updated
+    stored_results = [
+        record.result
+        for record in app[sidecar_server.OPERATIONS_STORE_KEY]._records.values()
+        if record.result
+    ]
+    serialized = str(stored_results)
+    for sensitive in (
+        "bearer-secret",
+        "json-secret",
+        "json-token",
+        "ou_secret",
+        "oc_secret",
+        "om_secret",
+        "user_secret",
+        "plain-secret",
+        "/private/hermes",
+    ):
+        assert sensitive not in serialized
+        assert sensitive not in updated
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "Authorization: Bearer secret.jwt.value",
+        '{"token":"secret","open_id":"ou_private"}',
+        "token=secret-value",
+        "oc_private ou_private profile=finance",
+        "failed (/Users/bailey/Private Folder/runtime.log)",
+        "gateway restarted; token=secret",
+    ],
+)
+def test_restart_output_sanitization_is_fail_closed_for_unknown_output(output):
+    assert sidecar_server._restart_output_status(output) == "suppressed"
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ("", "empty"),
+        ("gateway restart completed", "reported_success"),
+        ("restart successful", "reported_success"),
+    ],
+)
+def test_restart_output_sanitization_retains_only_explicit_safe_statuses(
+    output, expected
+):
+    assert sidecar_server._restart_output_status(output) == expected
 
 
 async def test_health_reports_profile_diagnostics_for_profile_events():

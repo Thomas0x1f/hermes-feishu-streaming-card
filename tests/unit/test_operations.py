@@ -12,6 +12,7 @@ from hermes_feishu_card.operations import (
     OperationRejected,
     OperationStore,
     render_operations_card,
+    sign_transport_proof,
 )
 
 
@@ -131,6 +132,36 @@ def test_cancel_returns_to_stable_state():
     operation.state = "repaired"
     confirm_restart = transition(store, operation, "restart")
     assert transition(store, confirm_restart, "cancel").state == "repaired"
+
+
+def test_group_restart_first_click_claim_and_confirmation_operator_matrix():
+    store = OperationStore(secret=b"test", now=lambda: 100.0)
+    operation = store.create(group=True, **operation_kwargs())
+    operation.state = "repaired"
+
+    confirm = transition(store, operation, "restart", operator="ou_first")
+    with pytest.raises(OperationRejected, match="different operator"):
+        transition(store, confirm, "confirm_restart", operator="ou_other")
+    assert transition(
+        store, confirm, "confirm_restart", operator="ou_first"
+    ).state == "restarting"
+
+
+def test_group_restart_initiator_must_make_first_click_and_confirmation():
+    store = OperationStore(secret=b"test", now=lambda: 100.0)
+    operation = store.create(
+        group=True, initiator_open_id="ou_owner", **operation_kwargs()
+    )
+    operation.state = "repaired"
+
+    with pytest.raises(OperationRejected, match="different operator"):
+        transition(store, operation, "restart", operator="ou_other")
+    confirm = transition(store, operation, "restart", operator="ou_owner")
+    with pytest.raises(OperationRejected, match="different operator"):
+        transition(store, confirm, "confirm_restart", operator="ou_other")
+    assert transition(
+        store, confirm, "confirm_restart", operator="ou_owner"
+    ).state == "restarting"
 
 
 def test_operation_expires_at_exactly_120_seconds():
@@ -324,6 +355,134 @@ def test_record_retention_is_bounded_and_prunes_old_expired_records():
     clock[0] = 421.0
     latest = store.create(group=False, **operation_kwargs())
     assert transition(store, latest, "details").operation_id == latest.operation_id
+
+
+def test_record_capacity_never_evicts_inflight_operations():
+    store = OperationStore(secret=b"test", now=lambda: 100.0, max_records=2)
+    executing = store.create(group=False, **operation_kwargs())
+    restarting = store.create(group=False, **operation_kwargs())
+    executing.state = "executing"
+    restarting.state = "restarting"
+
+    with pytest.raises(OperationRejected, match="capacity"):
+        store.create(group=False, **operation_kwargs())
+
+    assert store.complete(
+        executing.operation_id,
+        expected_state="executing",
+        state="repaired",
+        result={"status": "repaired"},
+    ).state == "repaired"
+    assert store.complete(
+        restarting.operation_id,
+        expected_state="restarting",
+        state="restarted",
+        result={"status": "restarted"},
+    ).state == "restarted"
+
+
+def test_record_capacity_prunes_non_inflight_before_inflight():
+    store = OperationStore(secret=b"test", now=lambda: 100.0, max_records=2)
+    executing = store.create(group=False, **operation_kwargs())
+    disposable = store.create(group=False, **operation_kwargs())
+    executing.state = "executing"
+
+    created = store.create(group=False, **operation_kwargs())
+
+    assert store.complete(
+        executing.operation_id,
+        expected_state="executing",
+        state="repaired",
+        result={"status": "repaired"},
+    ).state == "repaired"
+    with pytest.raises(OperationRejected, match="expired"):
+        transition(store, disposable, "details")
+    assert transition(store, created, "details").operation_id == created.operation_id
+
+
+def test_record_retention_never_evicts_executing_or_restarting_operations():
+    store = OperationStore(secret=b"test", now=lambda: 100.0, max_records=2)
+    executing = store.create(group=False, **operation_kwargs())
+    transition(store, executing, "repair")
+    transition(store, executing, "confirm_repair")
+    restarting = store.create(group=False, **operation_kwargs())
+    restarting.state = "restarting"
+
+    with pytest.raises(OperationRejected, match="store overloaded"):
+        store.create(group=False, **operation_kwargs())
+
+    assert store.complete(
+        executing.operation_id,
+        expected_state="executing",
+        state="repaired",
+        result={"status": "repaired"},
+    ).state == "repaired"
+    assert store.complete(
+        restarting.operation_id,
+        expected_state="restarting",
+        state="restarted",
+        result={"return_code": 0},
+    ).state == "restarted"
+
+
+def test_record_retention_evicts_stable_record_before_active_operation():
+    store = OperationStore(secret=b"test", now=lambda: 100.0, max_records=2)
+    active = store.create(group=False, **operation_kwargs())
+    transition(store, active, "repair")
+    transition(store, active, "confirm_repair")
+    stable = store.create(group=False, **operation_kwargs())
+
+    replacement = store.create(group=False, **operation_kwargs())
+
+    assert store.complete(
+        active.operation_id,
+        expected_state="executing",
+        state="repaired",
+        result={},
+    ).state == "repaired"
+    with pytest.raises(OperationRejected, match="expired"):
+        transition(store, stable, "details")
+    assert transition(store, replacement, "details").operation_id == replacement.operation_id
+
+
+def test_transport_proof_binds_token_scope_operator_action_and_timestamp():
+    clock = [100.0]
+    transport_secret = b"adapter-process-local-proof"
+    store = OperationStore(secret=b"store", now=lambda: clock[0])
+    operation = store.create(
+        group=True,
+        initiator_open_id="ou_owner",
+        transport_secret=transport_secret,
+        **operation_kwargs(),
+    )
+    token = store.token(operation, "repair")
+    fields = {
+        "token": token,
+        "action": "repair",
+        "callback_chat_id": "oc_group",
+        "callback_profile_id": "default",
+        "callback_profile_scope": store.scope_fingerprint(operation),
+        "operator_open_id": "ou_owner",
+        "timestamp": 100,
+    }
+    proof = sign_transport_proof(transport_secret, **fields)
+
+    assert store.verify_transport_proof(proof=proof, **fields) is operation
+
+    for key, forged in {
+        "action": "confirm_repair",
+        "callback_chat_id": "oc_other",
+        "callback_profile_id": "sales",
+        "operator_open_id": "ou_forged",
+        "timestamp": 99,
+    }.items():
+        changed = {**fields, key: forged}
+        with pytest.raises(OperationRejected, match="transport proof"):
+            store.verify_transport_proof(proof=proof, **changed)
+
+    clock[0] = 131.0
+    with pytest.raises(OperationRejected, match="transport proof expired"):
+        store.verify_transport_proof(proof=proof, **fields)
 
 
 def report(*, executable: bool = True) -> DiagnosticReport:

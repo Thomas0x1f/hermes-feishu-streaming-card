@@ -14,6 +14,8 @@ from .diagnostics import DiagnosticReport
 
 
 _TOKEN_MAX_CHARS = 2048
+_TRANSPORT_PROOF_MAX_AGE_SECONDS = 30
+_INFLIGHT_STATES = frozenset({"executing", "restarting"})
 _MUTATION_ACTIONS = {
     "repair",
     "confirm_repair",
@@ -88,6 +90,7 @@ class OperationStore:
         self._now = now
         self._max_records = max_records
         self._records: dict[str, OperationRecord] = {}
+        self._transport_secrets: dict[str, bytes] = {}
         self._lock = threading.RLock()
 
     def create(
@@ -99,9 +102,24 @@ class OperationStore:
         recovery_fingerprint: str,
         group: bool,
         initiator_open_id: str = "",
+        transport_secret: bytes | None = None,
+        transport_source_operation_id: str = "",
     ) -> OperationRecord:
+        if transport_secret is not None and transport_source_operation_id:
+            raise ValueError("operation transport binding is ambiguous")
+        if transport_secret is not None and (
+            not isinstance(transport_secret, bytes) or len(transport_secret) < 16
+        ):
+            raise ValueError("operation transport secret is invalid")
         with self._lock:
+            if transport_source_operation_id:
+                transport_secret = self._transport_secrets.get(
+                    transport_source_operation_id
+                )
+                if transport_secret is None:
+                    raise OperationRejected("operation transport binding expired")
             self._prune_locked()
+            self._reserve_capacity_locked()
             operation_id = secrets.token_urlsafe(18)
             record = OperationRecord(
                 operation_id=operation_id,
@@ -115,16 +133,40 @@ class OperationStore:
                 expires_at=self._now() + 120.0,
             )
             self._records[operation_id] = record
-            self._prune_locked()
+            if transport_secret is not None:
+                self._transport_secrets[operation_id] = transport_secret
             return record
+
+    def is_inflight(self, operation_id: str) -> bool:
+        with self._lock:
+            record = self._records.get(operation_id)
+            return record is not None and record.state in _INFLIGHT_STATES
 
     def _prune_locked(self) -> None:
         cutoff = self._now() - 300.0
         for operation_id, item in list(self._records.items()):
-            if item.expires_at < cutoff:
-                self._records.pop(operation_id, None)
-        while len(self._records) > self._max_records:
-            self._records.pop(next(iter(self._records)))
+            if item.expires_at < cutoff and item.state not in _INFLIGHT_STATES:
+                self._remove_locked(operation_id)
+
+    def _reserve_capacity_locked(self) -> None:
+        while len(self._records) >= self._max_records:
+            candidate = next(
+                (
+                    operation_id
+                    for operation_id, record in self._records.items()
+                    if record.state not in _INFLIGHT_STATES
+                ),
+                None,
+            )
+            if candidate is None:
+                raise OperationRejected(
+                    "operation store overloaded: capacity exhausted"
+                )
+            self._remove_locked(candidate)
+
+    def _remove_locked(self, operation_id: str) -> None:
+        self._records.pop(operation_id, None)
+        self._transport_secrets.pop(operation_id, None)
 
     def token(self, record: OperationRecord, action: str) -> str:
         payload = json.dumps(
@@ -150,6 +192,66 @@ class OperationStore:
             self._scope_input(record, prefix="callback"),
             sha256,
         ).hexdigest()
+
+    def verify_transport_proof(
+        self,
+        *,
+        proof: str,
+        token: str,
+        action: str,
+        callback_chat_id: str,
+        callback_profile_id: str,
+        callback_profile_scope: str,
+        operator_open_id: str,
+        timestamp: int,
+    ) -> OperationRecord:
+        with self._lock:
+            if isinstance(timestamp, bool) or not isinstance(timestamp, int):
+                raise OperationRejected("invalid transport proof")
+            if abs(self._now() - timestamp) > _TRANSPORT_PROOF_MAX_AGE_SECONDS:
+                raise OperationRejected("transport proof expired")
+            operation_id = self._operation_id_from_token_locked(token)
+            record = self._records.get(operation_id)
+            if record is None:
+                raise OperationRejected("invalid transport proof")
+            secret = self._transport_secrets.get(record.operation_id)
+            if secret is None:
+                raise OperationRejected("invalid transport proof")
+            expected = sign_transport_proof(
+                secret,
+                token=token,
+                action=action,
+                callback_chat_id=callback_chat_id,
+                callback_profile_id=callback_profile_id,
+                callback_profile_scope=callback_profile_scope,
+                operator_open_id=operator_open_id,
+                timestamp=timestamp,
+            )
+            if not isinstance(proof, str) or not hmac.compare_digest(proof, expected):
+                raise OperationRejected("invalid transport proof")
+            return record
+
+    @staticmethod
+    def _operation_id_from_token_locked(token: str) -> str:
+        try:
+            if not isinstance(token, str) or not token or len(token) > _TOKEN_MAX_CHARS:
+                raise ValueError
+            encoded, _signature = token.rsplit(".", 1)
+            padding = "=" * (-len(encoded) % 4)
+            decoded = base64.b64decode(
+                encoded + padding,
+                altchars=b"-_",
+                validate=True,
+            )
+            if len(decoded) > 1024:
+                raise ValueError
+            payload = json.loads(decoded.decode("utf-8"))
+            operation_id = payload.get("operation_id") if isinstance(payload, dict) else None
+            if not isinstance(operation_id, str) or not operation_id:
+                raise ValueError
+            return operation_id
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise OperationRejected("invalid transport proof") from exc
 
     def inspect(
         self,
@@ -318,6 +420,36 @@ class OperationStore:
         return (
             f"{prefix}\0{record.chat_id}\0{record.profile_id}"
         ).encode("utf-8")
+
+
+def sign_transport_proof(
+    secret: bytes,
+    *,
+    token: str,
+    action: str,
+    callback_chat_id: str,
+    callback_profile_id: str,
+    callback_profile_scope: str,
+    operator_open_id: str,
+    timestamp: int,
+) -> str:
+    if not isinstance(secret, bytes) or not secret:
+        raise ValueError("transport secret is required")
+    canonical = json.dumps(
+        [
+            "hfc-operation-transport-v1",
+            token,
+            action,
+            callback_chat_id,
+            callback_profile_id,
+            callback_profile_scope,
+            operator_open_id,
+            timestamp,
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hmac.new(secret, canonical, sha256).hexdigest()
 
 
 def render_operations_card(

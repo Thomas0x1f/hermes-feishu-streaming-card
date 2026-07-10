@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from contextlib import suppress
 import hashlib
+import json
 import os
 from pathlib import Path
 import secrets
@@ -71,6 +72,7 @@ UPDATE_MAX_ATTEMPTS = 3
 UPDATE_MIN_INTERVAL_SECONDS = 0.2
 RUNTIME_CLEANUP_INTERVAL_SECONDS = 60.0
 MAX_OPERATION_DELIVERIES = 200
+RESTART_CALLBACK_GRACE_SECONDS = 0.25
 TERMINAL_EVENTS = {"message.completed", "message.failed"}
 SESSION_CREATING_EVENTS = {
     "thinking.delta",
@@ -84,6 +86,22 @@ SESSION_CREATING_EVENTS = {
 DIAGNOSTICS_KEY = web.AppKey("diagnostics", dict)
 PROFILE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 logger = logging.getLogger(__name__)
+
+
+class _AfterEofJsonResponse(web.Response):
+    def __init__(self, data: dict[str, object], after_eof: Any):
+        super().__init__(
+            body=json.dumps(data, ensure_ascii=False).encode("utf-8"),
+            content_type="application/json",
+        )
+        self._after_eof = after_eof
+
+    async def write_eof(self, data: bytes = b"") -> None:
+        await super().write_eof(data)
+        after_eof = self._after_eof
+        self._after_eof = None
+        if callable(after_eof):
+            after_eof()
 
 
 def create_app(
@@ -330,6 +348,28 @@ async def _operations_action(
 
     store: OperationStore = request.app[OPERATIONS_STORE_KEY]
     try:
+        transport_proof = payload.get("adapter_transport_proof")
+        if not isinstance(transport_proof, dict):
+            raise OperationRejected("invalid transport proof")
+        timestamp = transport_proof.get("timestamp")
+        if isinstance(timestamp, bool) or not isinstance(timestamp, int):
+            raise OperationRejected("invalid transport proof")
+        store.verify_transport_proof(
+            proof=str(transport_proof.get("signature") or ""),
+            token=token,
+            action=action,
+            callback_chat_id=chat_id,
+            callback_profile_id=profile_id,
+            callback_profile_scope=profile_scope,
+            operator_open_id=operator_open_id,
+            timestamp=timestamp,
+        )
+    except OperationRejected:
+        return web.json_response(
+            {"ok": False, "error": "operation rejected"}, status=403
+        )
+
+    try:
         _claims, record = store.inspect(
             token,
             callback_chat_id=chat_id,
@@ -410,16 +450,18 @@ async def _operations_action(
             return _operations_response(
                 request.app, report, failed, ok=False, toast="重启不可用"
             )
-        response = _operations_response(request.app, report, transitioned)
-        asyncio.get_running_loop().call_soon(
-            _schedule_restart_operation_after_callback,
+        return _operations_response(
             request.app,
             report,
-            detection,
             transitioned,
-            hermes_binary,
+            after_eof=lambda: _schedule_restart_operation_after_callback(
+                request.app,
+                report,
+                detection,
+                transitioned,
+                hermes_binary,
+            ),
         )
-        return response
     return _operations_response(request.app, report, transitioned)
 
 
@@ -469,19 +511,38 @@ async def _commands(request: web.Request) -> web.Response:
     route = _resolve_route(request, event)
     operation_id = ""
     if command == "doctor":
+        transport_secret_value = payload.get("adapter_transport_secret")
+        if not isinstance(transport_secret_value, str):
+            return web.json_response(
+                {"ok": False, "error": "operation authentication required"},
+                status=400,
+            )
+        transport_secret = transport_secret_value.encode("utf-8")
+        if len(transport_secret) < 16 or len(transport_secret) > 256:
+            return web.json_response(
+                {"ok": False, "error": "operation authentication required"},
+                status=400,
+            )
         report, _detection = await _build_operations_report(
             request.app,
             profile_id=str(data.get("profile_id") or "default"),
             profile_source=str(data.get("profile_source") or ""),
         )
-        operation = _create_operation(
-            request.app,
-            report,
-            chat_id=chat_id,
-            profile_id=str(data.get("profile_id") or "default"),
-            group=_is_group_chat(chat_type),
-            initiator_open_id=_safe_command_operator(payload.get("operator")),
-        )
+        try:
+            operation = _create_operation(
+                request.app,
+                report,
+                chat_id=chat_id,
+                profile_id=str(data.get("profile_id") or "default"),
+                group=_is_group_chat(chat_type),
+                initiator_open_id=_safe_command_operator(payload.get("operator")),
+                transport_secret=transport_secret,
+            )
+        except OperationRejected:
+            return web.json_response(
+                {"ok": False, "error": "operations overloaded"},
+                status=503,
+            )
         operation_id = operation.operation_id
         card = _render_operations_for_app(request.app, report, operation)
     else:
@@ -499,7 +560,10 @@ async def _commands(request: web.Request) -> web.Response:
     )
     task.add_done_callback(_log_background_task_failure)
     await asyncio.sleep(0)
-    return web.json_response({"ok": True, "handled": True, "command": command})
+    response = {"ok": True, "handled": True, "command": command}
+    if operation_id:
+        response["operation_id"] = operation_id
+    return web.json_response(response)
 
 
 async def _send_command_card(
@@ -615,6 +679,8 @@ def _create_operation(
     profile_id: str,
     group: bool,
     initiator_open_id: str = "",
+    transport_secret: bytes | None = None,
+    transport_source_operation_id: str = "",
 ) -> OperationRecord:
     store: OperationStore = app[OPERATIONS_STORE_KEY]
     return store.create(
@@ -626,6 +692,8 @@ def _create_operation(
         ),
         group=group,
         initiator_open_id=initiator_open_id,
+        transport_secret=transport_secret,
+        transport_source_operation_id=transport_source_operation_id,
     )
 
 
@@ -645,6 +713,7 @@ def _successor_operation(
         profile_id=previous.profile_id,
         group=previous.group,
         initiator_open_id=previous.owner_open_id,
+        transport_source_operation_id=previous.operation_id,
     )
     if state != "diagnosed" or result is not None:
         successor = store.complete(
@@ -668,7 +737,18 @@ def _store_operation_delivery(
     deliveries = app[OPERATIONS_DELIVERIES_KEY]
     deliveries[operation_id] = delivery
     while len(deliveries) > MAX_OPERATION_DELIVERIES:
-        deliveries.pop(next(iter(deliveries)))
+        store: OperationStore = app[OPERATIONS_STORE_KEY]
+        candidate = next(
+            (
+                item_id
+                for item_id in deliveries
+                if not store.is_inflight(item_id)
+            ),
+            None,
+        )
+        if candidate is None:
+            break
+        deliveries.pop(candidate, None)
 
 
 def _render_operations_for_app(
@@ -695,17 +775,20 @@ def _operations_response(
     *,
     ok: bool = True,
     toast: str = "已更新",
+    after_eof: Any = None,
 ) -> web.Response:
-    return web.json_response(
-        {
-            "ok": ok,
-            "toast": {
-                "type": "success" if ok else "warning",
-                "content": toast,
-            },
-            "card": _render_operations_for_app(app, report, operation),
-        }
-    )
+    data = {
+        "ok": ok,
+        "operation_id": operation.operation_id,
+        "toast": {
+            "type": "success" if ok else "warning",
+            "content": toast,
+        },
+        "card": _render_operations_for_app(app, report, operation),
+    }
+    if after_eof is not None:
+        return _AfterEofJsonResponse(data, after_eof)
+    return web.json_response(data)
 
 
 async def _execute_repair_operation(
@@ -791,17 +874,17 @@ async def _restart_operation_after_callback(
             timeout=30,
         )
         return_code = int(completed.returncode)
-        tail = _sanitize_subprocess_tail(
+        output_status = _restart_output_status(
             f"{completed.stdout or ''}\n{completed.stderr or ''}"
         )
     except Exception:
         return_code = -1
-        tail = "restart command failed"
+        output_status = "unavailable"
 
     state = "restarted" if return_code == 0 else "restart_failed"
     result = {
         "return_code": return_code,
-        "output_tail": tail,
+        "output_status": output_status,
         "message": (
             "Gateway 重启已完成。"
             if return_code == 0
@@ -851,7 +934,7 @@ def _schedule_restart_operation_after_callback(
     hermes_binary: str,
 ) -> None:
     task = asyncio.create_task(
-        _restart_operation_after_callback(
+        _restart_operation_after_grace(
             app,
             report,
             detection,
@@ -862,15 +945,35 @@ def _schedule_restart_operation_after_callback(
     task.add_done_callback(_log_background_task_failure)
 
 
-def _sanitize_subprocess_tail(output: str) -> str:
-    tail = str(output or "")[-1000:]
-    tail = re.sub(
-        r"(?i)(secret|token|password|authorization)\s*[:=]\s*\S+",
-        r"\1=[REDACTED]",
-        tail,
+async def _restart_operation_after_grace(
+    app: web.Application,
+    report: DiagnosticReport,
+    detection: HermesDetection,
+    operation: OperationRecord,
+    hermes_binary: str,
+) -> None:
+    await asyncio.sleep(RESTART_CALLBACK_GRACE_SECONDS)
+    await _restart_operation_after_callback(
+        app,
+        report,
+        detection,
+        operation,
+        hermes_binary,
     )
-    tail = re.sub(r"(?:/[A-Za-z0-9._ -]+){2,}", "[path]", tail)
-    return " ".join(tail.split())[-500:]
+
+
+def _restart_output_status(output: str) -> str:
+    normalized = " ".join(str(output or "").split()).strip().lower()
+    if not normalized:
+        return "empty"
+    if normalized in {
+        "gateway restart completed",
+        "gateway restarted",
+        "restart completed",
+        "restart successful",
+    }:
+        return "reported_success"
+    return "suppressed"
 
 
 async def _events(request: web.Request) -> web.Response:
