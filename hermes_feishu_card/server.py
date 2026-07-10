@@ -445,7 +445,7 @@ async def _operations_action(
     except OperationRejected:
         return web.json_response({"ok": False, "error": "operation rejected"})
 
-    report, detection = await _build_operations_report(
+    report, detection = await _bounded_operations_report(
         request.app,
         profile_id=record.profile_id,
         profile_source="callback",
@@ -729,6 +729,10 @@ def _schedule_operations_diagnosis(
             profile_source=profile_source,
         )
     )
+    _track_operations_task(app, task)
+
+
+def _track_operations_task(app: web.Application, task: asyncio.Task[None]) -> None:
     tasks = app[OPERATIONS_DIAGNOSTIC_TASKS_KEY]
     tasks.add(task)
     task.add_done_callback(tasks.discard)
@@ -748,14 +752,11 @@ async def _run_operations_diagnosis(
     if not store.is_preparing(operation.operation_id):
         return
     try:
-        report, _detection = await asyncio.wait_for(
-            _build_operations_report(
-                app,
-                profile_id=operation.profile_id,
-                profile_source=profile_source,
-                preparing_operation_id=operation.operation_id,
-            ),
-            timeout=OPERATIONS_DIAGNOSTIC_TIMEOUT_SECONDS,
+        report, _detection = await _bounded_operations_report(
+            app,
+            profile_id=operation.profile_id,
+            profile_source=profile_source,
+            preparing_operation_id=operation.operation_id,
         )
         diagnosed = store.diagnose(
             operation.operation_id,
@@ -860,6 +861,41 @@ async def _build_operations_report(
         futures.add(future)
         future.add_done_callback(futures.discard)
         return await asyncio.shield(future)
+
+
+async def _bounded_operations_report(
+    app: web.Application,
+    *,
+    profile_id: str,
+    profile_source: str,
+    preparing_operation_id: str = "",
+) -> tuple[DiagnosticReport, HermesDetection]:
+    return await asyncio.wait_for(
+        _build_operations_report(
+            app,
+            profile_id=profile_id,
+            profile_source=profile_source,
+            preparing_operation_id=preparing_operation_id,
+        ),
+        timeout=OPERATIONS_DIAGNOSTIC_TIMEOUT_SECONDS,
+    )
+
+
+async def _fresh_operations_report_or_failed(
+    app: web.Application,
+    *,
+    profile_id: str,
+    profile_source: str,
+) -> tuple[DiagnosticReport, bool]:
+    try:
+        report, _detection = await _bounded_operations_report(
+            app,
+            profile_id=profile_id,
+            profile_source=profile_source,
+        )
+        return report, True
+    except (_OperationsDiagnosticCapacityError, asyncio.TimeoutError):
+        return _failed_operations_report(profile_id), False
 
 
 def _build_operations_report_sync(
@@ -1059,7 +1095,7 @@ async def _execute_repair_operation(
             state="failed",
             result={"message": "安全修复未执行；当前证据不再满足自动修复条件。"},
         )
-        fresh_report, _fresh_detection = await _build_operations_report(
+        fresh_report, _diagnostics_available = await _fresh_operations_report_or_failed(
             app,
             profile_id=operation.profile_id,
             profile_source="callback",
@@ -1082,7 +1118,7 @@ async def _execute_repair_operation(
         state="repaired",
         result={"status": str(getattr(recovery_result, "status", "repaired"))},
     )
-    fresh_report, _fresh_detection = await _build_operations_report(
+    fresh_report, diagnostics_available = await _fresh_operations_report_or_failed(
         app,
         profile_id=operation.profile_id,
         profile_source="callback",
@@ -1094,11 +1130,21 @@ async def _execute_repair_operation(
         state="repaired",
         result={
             "status": str(getattr(recovery_result, "status", "repaired")),
-            "message": "已完成安全修复并重新检测。",
-            "restart_available": bool(shutil.which("hermes")),
+            "message": (
+                "已完成安全修复并重新检测。"
+                if diagnostics_available
+                else "已完成安全修复，但重新检测暂时不可用。"
+            ),
+            "restart_available": diagnostics_available and bool(shutil.which("hermes")),
         },
     )
-    return _operations_response(app, fresh_report, repaired, toast="安全修复已完成")
+    return _operations_response(
+        app,
+        fresh_report,
+        repaired,
+        ok=diagnostics_available,
+        toast="安全修复已完成" if diagnostics_available else "重新检测暂时不可用",
+    )
 
 
 async def _restart_operation_after_callback(
@@ -1146,11 +1192,13 @@ async def _restart_operation_after_callback(
         )
     except OperationRejected:
         return
-    fresh_report, _fresh_detection = await _build_operations_report(
+    fresh_report, diagnostics_available = await _fresh_operations_report_or_failed(
         app,
         profile_id=operation.profile_id,
         profile_source="callback",
     )
+    if not diagnostics_available:
+        result["message"] = f"{result['message']} 重新检测暂时不可用。"
     completed_operation = _successor_operation(
         app,
         operation,
@@ -1187,7 +1235,7 @@ def _schedule_restart_operation_after_callback(
             hermes_binary,
         )
     )
-    task.add_done_callback(_log_background_task_failure)
+    _track_operations_task(app, task)
 
 
 async def _restart_operation_after_grace(
