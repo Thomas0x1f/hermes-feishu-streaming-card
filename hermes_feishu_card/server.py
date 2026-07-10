@@ -637,6 +637,48 @@ def _register_session_aliases(
             aliases[alias_key] = canonical_key
 
 
+def _cleanup_failed_session_state(
+    app: web.Application,
+    session_key: str,
+    failed_session: CardSession | None = None,
+    session_card_config: dict[str, Any] | None = None,
+) -> None:
+    sessions: Dict[str, CardSession] = app[SESSIONS_KEY]
+    current_session = sessions.get(session_key)
+    if failed_session is not None:
+        if current_session is not failed_session:
+            return
+        sessions.pop(session_key, None)
+    elif current_session is not None:
+        return
+
+    if sessions.get(session_key) is not None:
+        return
+
+    aliases: Dict[str, str] = app[SESSION_ALIASES_KEY]
+    for alias_key, canonical_key in tuple(aliases.items()):
+        if canonical_key == session_key and aliases.get(alias_key) == session_key:
+            aliases.pop(alias_key, None)
+
+    owned_state = (
+        (CARD_SUMMARIES_KEY, CARD_SUMMARY_SESSION_KEYS_KEY),
+        (INTERACTION_RESULTS_KEY, INTERACTION_RESULT_SESSION_KEYS_KEY),
+    )
+    for values_key, owners_key in owned_state:
+        values = app[values_key]
+        owners = app[owners_key]
+        for value_key, owner_key in tuple(owners.items()):
+            if owner_key == session_key and owners.get(value_key) == session_key:
+                owners.pop(value_key, None)
+                values.pop(value_key, None)
+
+    if (
+        session_card_config is not None
+        and app[SESSION_CARD_CONFIGS_KEY].get(session_key) is session_card_config
+    ):
+        app[SESSION_CARD_CONFIGS_KEY].pop(session_key, None)
+
+
 def _event_for_session(event: SidecarEvent, session: CardSession) -> SidecarEvent:
     if (
         event.conversation_id == session.conversation_id
@@ -731,15 +773,16 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
         if applied and session_key not in feishu_message_ids:
             route = _resolve_route(request, event)
             if route is None:
-                sessions.pop(session_key, None)
+                _cleanup_failed_session_state(request.app, session_key, session)
                 metrics.events_rejected += 1
                 return web.json_response(
                     {"ok": False, "error": "bot route failed"},
                     status=502,
                 ), None
-            request.app[SESSION_CARD_CONFIGS_KEY][session_key] = (
-                _resolve_session_card_config(request.app, route.bot_id, event)
+            session_card_config = _resolve_session_card_config(
+                request.app, route.bot_id, event
             )
+            request.app[SESSION_CARD_CONFIGS_KEY][session_key] = session_card_config
             message_id = await _send_card(
                 request,
                 event.chat_id,
@@ -749,8 +792,12 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                 reply_to_message_id=_reply_to_message_id_for_event(event),
             )
             if message_id is None:
-                sessions.pop(session_key, None)
-                request.app[SESSION_CARD_CONFIGS_KEY].pop(session_key, None)
+                _cleanup_failed_session_state(
+                    request.app,
+                    session_key,
+                    session,
+                    session_card_config,
+                )
                 metrics.events_rejected += 1
                 return web.json_response(
                     {"ok": False, "error": "feishu send failed"},
@@ -781,7 +828,7 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                 )
                 route = _resolve_route(request, event)
                 if route is None:
-                    sessions.pop(session_key, None)
+                    _cleanup_failed_session_state(request.app, session_key, session)
                     if is_cron_completed:
                         metrics.cron_fallbacks += 1
                     metrics.events_rejected += 1
@@ -789,9 +836,10 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                         {"ok": False, "error": "bot route failed"},
                         status=502,
                     ), None
-                request.app[SESSION_CARD_CONFIGS_KEY][session_key] = (
-                    _resolve_session_card_config(request.app, route.bot_id, event)
+                session_card_config = _resolve_session_card_config(
+                    request.app, route.bot_id, event
                 )
+                request.app[SESSION_CARD_CONFIGS_KEY][session_key] = session_card_config
                 message_id = await _send_card(
                     request,
                     event.chat_id,
@@ -801,8 +849,12 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                     reply_to_message_id=_reply_to_message_id_for_event(event),
                 )
                 if message_id is None:
-                    sessions.pop(session_key, None)
-                    request.app[SESSION_CARD_CONFIGS_KEY].pop(session_key, None)
+                    _cleanup_failed_session_state(
+                        request.app,
+                        session_key,
+                        session,
+                        session_card_config,
+                    )
                     if is_cron_completed:
                         metrics.cron_fallbacks += 1
                     metrics.events_rejected += 1

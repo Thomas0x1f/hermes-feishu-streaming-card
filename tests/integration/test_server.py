@@ -2147,7 +2147,10 @@ async def test_send_failure_returns_json_error_and_allows_started_retry(client):
 
 
 @pytest.mark.parametrize("failure_kind", ["send", "route"])
-async def test_repeated_distinct_failed_messages_do_not_retain_locks(failure_kind):
+@pytest.mark.parametrize("replacement", [False, True])
+async def test_repeated_failed_messages_do_not_retain_runtime_state(
+    failure_kind, replacement
+):
     if failure_kind == "send":
         boundary = FakeFeishuClient()
         boundary.fail_send = True
@@ -2164,20 +2167,108 @@ async def test_repeated_distinct_failed_messages_do_not_retain_locks(failure_kin
     await test_client.start_server()
     try:
         for index in range(12):
+            session_key = f"om_failed_{index}"
+            reply_alias = f"om_reply_{index}"
+            parent_alias = f"om_parent_{index}"
+            if replacement:
+                old_session = CardSession("oc_abc", session_key, "oc_abc")
+                old_session.status = "completed"
+                old_session.answer_text = f"old answer {index}"
+                old_session.active_interaction = InteractionState(
+                    interaction_id=f"approval-{index}",
+                    kind="approval",
+                    prompt="Old approval",
+                    status="completed",
+                )
+                app[SESSIONS_KEY][session_key] = old_session
+                app[FEISHU_MESSAGE_IDS_KEY][session_key] = f"om_card_{index}"
+                app[MESSAGE_BOT_IDS_KEY][session_key] = "default"
+                app[SESSION_CARD_CONFIGS_KEY][session_key] = {"title": "Old"}
+                app[SESSION_ALIASES_KEY][f"om_old_alias_{index}"] = session_key
+                sidecar_server._store_interaction_result(app, old_session)
+                sidecar_server._store_card_summary(
+                    app,
+                    SidecarEvent.from_dict(
+                        event_payload(
+                            "message.completed",
+                            1,
+                            {"answer": old_session.answer_text},
+                            message_id=session_key,
+                        )
+                    ),
+                    old_session,
+                    f"om_card_{index}",
+                )
+
             response = await test_client.post(
                 "/events",
                 json=event_payload(
                     "message.started",
                     0,
-                    message_id=f"om_failed_{index}",
+                    {
+                        "reply_to_message_id": reply_alias,
+                        "parent_message_id": parent_alias,
+                    },
+                    message_id=session_key,
+                    thread_id=f"omt_topic_{index}",
                 ),
             )
             assert response.status == 502
 
         assert app[SESSIONS_KEY] == {}
+        assert app[SESSION_ALIASES_KEY] == {}
         assert app[MESSAGE_LOCKS_KEY] == {}
+        assert app[MESSAGE_LOCK_USERS_KEY] == {}
+        assert app[FEISHU_MESSAGE_IDS_KEY] == {}
+        assert app[MESSAGE_BOT_IDS_KEY] == {}
+        assert app[SESSION_CARD_CONFIGS_KEY] == {}
+        assert app[FLUSH_CONTROLLERS_KEY] == {}
+        assert app[CARD_SUMMARIES_KEY] == {}
+        assert app[CARD_SUMMARY_SESSION_KEYS_KEY] == {}
+        assert app[INTERACTION_RESULTS_KEY] == {}
+        assert app[INTERACTION_RESULT_SESSION_KEYS_KEY] == {}
     finally:
         await test_client.close()
+
+
+def test_failed_session_cleanup_preserves_reassigned_aliases_and_owners():
+    app = create_app(FakeFeishuClient())
+    failed_key = "om_failed"
+    active_key = "om_active"
+    active_session = CardSession("oc_abc", active_key, "oc_abc")
+    app[SESSIONS_KEY][active_key] = active_session
+    app[SESSION_ALIASES_KEY]["om_reply"] = active_key
+    app[CARD_SUMMARIES_KEY]["om_card"] = {"summary": "active"}
+    app[CARD_SUMMARY_SESSION_KEYS_KEY]["om_card"] = active_key
+    app[INTERACTION_RESULTS_KEY]["approval-active"] = {"status": "pending"}
+    app[INTERACTION_RESULT_SESSION_KEYS_KEY]["approval-active"] = active_key
+
+    sidecar_server._cleanup_failed_session_state(app, failed_key)
+
+    assert app[SESSION_ALIASES_KEY] == {"om_reply": active_key}
+    assert app[CARD_SUMMARIES_KEY] == {"om_card": {"summary": "active"}}
+    assert app[CARD_SUMMARY_SESSION_KEYS_KEY] == {"om_card": active_key}
+    assert app[INTERACTION_RESULTS_KEY] == {
+        "approval-active": {"status": "pending"}
+    }
+    assert app[INTERACTION_RESULT_SESSION_KEYS_KEY] == {
+        "approval-active": active_key
+    }
+
+    app[SESSIONS_KEY][failed_key] = CardSession("oc_abc", failed_key, "oc_abc")
+    app[SESSION_ALIASES_KEY]["om_failed_reply"] = failed_key
+    app[CARD_SUMMARIES_KEY]["om_failed_card"] = {"summary": "current"}
+    app[CARD_SUMMARY_SESSION_KEYS_KEY]["om_failed_card"] = failed_key
+    app[INTERACTION_RESULTS_KEY]["approval-current"] = {"status": "pending"}
+    app[INTERACTION_RESULT_SESSION_KEYS_KEY]["approval-current"] = failed_key
+
+    sidecar_server._cleanup_failed_session_state(app, failed_key)
+
+    assert app[SESSION_ALIASES_KEY]["om_failed_reply"] == failed_key
+    assert app[CARD_SUMMARIES_KEY]["om_failed_card"] == {"summary": "current"}
+    assert app[CARD_SUMMARY_SESSION_KEYS_KEY]["om_failed_card"] == failed_key
+    assert app[INTERACTION_RESULTS_KEY]["approval-current"] == {"status": "pending"}
+    assert app[INTERACTION_RESULT_SESSION_KEYS_KEY]["approval-current"] == failed_key
 
 
 async def test_started_routes_card_to_bound_bot_client():
