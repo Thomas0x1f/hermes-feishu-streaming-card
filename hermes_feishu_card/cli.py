@@ -467,28 +467,20 @@ def _redact_doctor_json_paths(value: Any, key: str = "") -> Any:
     return value
 
 
-_DOCTOR_JSON_PATH_COMPONENT = r"[^\s\"'<>/\\]+(?:[ \t]+[^\s\"'<>/\\]+)*"
-_DOCTOR_JSON_PATH_FILENAME = (
-    r"[^\s\"'<>/\\]*?\.(?:cfg|conf|env|ini|json|py|toml|ya?ml)"
-)
-_DOCTOR_JSON_ABSOLUTE_PATH_RE = re.compile(
-    rf"(?<![A-Za-z0-9_.:/-])(?:"
-    rf"/(?:{_DOCTOR_JSON_PATH_COMPONENT}/)*{_DOCTOR_JSON_PATH_FILENAME}"
-    rf"|[A-Za-z]:\\(?:{_DOCTOR_JSON_PATH_COMPONENT}\\)*{_DOCTOR_JSON_PATH_FILENAME}"
-    rf"|\\\\{_DOCTOR_JSON_PATH_COMPONENT}\\{_DOCTOR_JSON_PATH_COMPONENT}"
-    rf"(?:\\{_DOCTOR_JSON_PATH_COMPONENT})*\\{_DOCTOR_JSON_PATH_FILENAME}"
-    rf"|/(?:[^\s\"'<>]+)"
-    rf")"
+_DOCTOR_JSON_ABSOLUTE_PATH_PREFIX_RE = re.compile(
+    r"(?<![A-Za-z0-9_./-])(?:"
+    r"/[^\s\"'<>/\\]+/"
+    r"|[A-Za-z]:\\"
+    r"|\\\\[^\s\"'<>/\\]+\\[^\s\"'<>/\\]+"
+    r")"
 )
 
 
 def _redact_absolute_paths_in_text(value: str) -> str:
-    def replace(match: re.Match[str]) -> str:
-        path = match.group(0)
-        digest = hashlib.sha256(path.encode("utf-8")).hexdigest()[:12]
-        return f"[path:{digest}]"
-
-    return _DOCTOR_JSON_ABSOLUTE_PATH_RE.sub(replace, value)
+    if not _DOCTOR_JSON_ABSOLUTE_PATH_PREFIX_RE.search(value):
+        return value
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+    return f"[redacted-path-text:{digest}]"
 
 
 def _doctor_error_report(config_path: Path, exc: Exception) -> dict[str, Any]:

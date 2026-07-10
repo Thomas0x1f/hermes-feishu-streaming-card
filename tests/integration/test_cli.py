@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import shutil
@@ -261,8 +262,8 @@ def test_module_doctor_json_redacts_paths_inside_error_and_recommendation_text(t
     assert str(config_path) not in captured.out
     report = json.loads(captured.out)
     assert report["config"]["path"] == "[redacted]"
-    assert "[path:" in report["config"]["error"]
-    assert "[path:" in report["recommendations"][0]["message"]
+    assert report["config"]["error"].startswith("[redacted-path-text:")
+    assert report["recommendations"][0]["message"].startswith("[redacted-path-text:")
 
 
 @pytest.mark.parametrize(
@@ -286,10 +287,9 @@ def test_doctor_json_redacts_common_absolute_paths_in_text_fields(sensitive_path
     output_text = json.dumps(output)
 
     assert sensitive_path not in output_text
-    assert "could not load [path:" in output["config"]["error"]
-    assert "unsupported root [path:" in output["hermes"]["reason"]
-    assert "inspect [path:" in output["recommendations"][0]["next_step"]
-    assert output["recommendations"][0]["next_step"].endswith("then retry")
+    assert output["config"]["error"].startswith("[redacted-path-text:")
+    assert output["hermes"]["reason"].startswith("[redacted-path-text:")
+    assert output["recommendations"][0]["next_step"].startswith("[redacted-path-text:")
 
 
 @pytest.mark.parametrize(
@@ -315,8 +315,71 @@ def test_doctor_json_config_load_failure_redacts_common_absolute_paths(
     output_text = json.dumps(report)
 
     assert sensitive_path not in output_text
-    assert "invalid config [path:" in report["config"]["error"]
-    assert "invalid config [path:" in report["recommendations"][0]["message"]
+    assert report["config"]["error"].startswith("[redacted-path-text:")
+    assert report["recommendations"][0]["message"].startswith("[redacted-path-text:")
+
+
+@pytest.mark.parametrize(
+    "path_text",
+    [
+        "/Users/Alice/My Project",
+        "/var/log/hermes.log",
+        "/opt/hermes/config.bak",
+        r"C:\Users\Alice\My Project",
+        r"C:\Program Files\Hermes",
+        r"C:\Logs\hermes.log",
+        r"C:\Backups\config.bak",
+        r"\\server\share\My Folder",
+    ],
+)
+def test_doctor_json_redacts_entire_text_field_for_absolute_path_prefix(path_text):
+    value = f"operation failed near {path_text} and should be retried"
+
+    result = cli_module._redact_doctor_json_paths({"message": value})["message"]
+
+    assert result.startswith("[redacted-path-text:")
+    assert result.endswith("]")
+    assert path_text not in result
+    assert "operation failed" not in result
+    assert "retried" not in result
+
+
+def test_doctor_json_redacts_entire_text_field_when_it_contains_multiple_paths():
+    first_path = "/Users/Alice/My Project/config.yaml"
+    second_path = r"C:\Backups\config.bak"
+    value = f"copy {first_path} to {second_path} before retrying the operation"
+
+    result = cli_module._redact_doctor_json_paths({"message": value})["message"]
+
+    assert result.startswith("[redacted-path-text:")
+    assert first_path not in result
+    assert second_path not in result
+    assert "before retrying" not in result
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "ordinary diagnostic text",
+        "see https://example.com/health for details",
+        "/health",
+    ],
+)
+def test_doctor_json_keeps_non_local_path_text(value):
+    assert cli_module._redact_doctor_json_paths({"message": value})["message"] == value
+
+
+def test_doctor_json_path_text_summaries_are_stable_and_distinct():
+    first = "failure at /Users/Alice/private/config.yaml"
+    second = "failure at /Users/Bob/private/config.yaml"
+
+    first_summary = cli_module._redact_doctor_json_paths({"message": first})["message"]
+
+    assert first_summary == (
+        f"[redacted-path-text:{hashlib.sha256(first.encode('utf-8')).hexdigest()[:12]}]"
+    )
+    assert first_summary == cli_module._redact_doctor_json_paths({"message": first})["message"]
+    assert first_summary != cli_module._redact_doctor_json_paths({"message": second})["message"]
 
 
 def test_module_doctor_json_reports_supported_hermes_and_clean_install_state(tmp_path):
