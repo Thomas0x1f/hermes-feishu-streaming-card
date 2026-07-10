@@ -110,6 +110,71 @@ def test_card_safe_report_redacts_secrets_source_text_and_raw_hashes(tmp_path):
         assert sensitive not in serialized
 
 
+def test_card_safe_report_allowlists_nested_data_and_scrubs_finding_text(tmp_path):
+    raw_hash = "d" * 64
+    report = _report(
+        tmp_path,
+        config={
+            "path": str(tmp_path / "private" / "config.yaml"),
+            "source": "raw source content",
+            "oauth_credentials": {
+                "client_material": "private-oauth-material",
+            },
+        },
+        routing={
+            "profile_id": "work",
+            "profile_source": "env",
+            "event_endpoint": "http://127.0.0.1:8765/events",
+            "profile_exists": True,
+            "credentials_present": True,
+            "bot_id": "sales",
+            "route_reason": "bindings.chats",
+            "source": "nested route source",
+        },
+        runtime={
+            "details": [
+                {"source": "list source text"},
+                {"oauth_credentials": ["list-oauth-material", "ou_list_operator"]},
+            ]
+        },
+        findings=(
+            DiagnosticFinding(
+                "custom_sensitive_finding",
+                "warning",
+                (
+                    "Source raw finding text used oauth_credentials=private-finding-oauth "
+                    f"for oc_private_chat at {tmp_path / 'private' / 'source.py'} "
+                    f"with hash {raw_hash}."
+                ),
+                "Credential private-impact-secret cannot be shown.",
+                ("Use token private-action-token for ou_private_operator.",),
+            ),
+        ),
+    )
+
+    payload = report.to_dict(card_safe=True)
+    serialized = json.dumps(payload, ensure_ascii=False)
+
+    for sensitive in (
+        "raw source content",
+        "private-oauth-material",
+        "nested route source",
+        "list source text",
+        "list-oauth-material",
+        "ou_list_operator",
+        "private-finding-oauth",
+        "oc_private_chat",
+        "private-impact-secret",
+        "private-action-token",
+        "ou_private_operator",
+        raw_hash,
+        str(tmp_path),
+    ):
+        assert sensitive not in serialized
+    assert payload["routing"]["profile_source"] == "env"
+    assert payload["routing"]["event_endpoint"] == "http://127.0.0.1:8765/events"
+
+
 def test_cli_report_keeps_existing_top_level_doctor_contract(tmp_path):
     payload = _report(tmp_path, status="ok").to_dict()
 
@@ -171,6 +236,50 @@ def test_diagnostic_fingerprint_changes_with_recovery_and_profile_state(tmp_path
     assert report.fingerprint != changed_recovery.fingerprint
     assert report.fingerprint != changed_profile.fingerprint
     assert report.fingerprint != changed_recovery_evidence.fingerprint
+
+
+def test_diagnostic_fingerprint_changes_with_valid_profile_and_bot_identity(tmp_path):
+    report = _report(
+        tmp_path,
+        routing={
+            "profile_id": "work",
+            "profile_source": "env",
+            "profile_exists": True,
+            "credentials_present": True,
+            "bot_id": "sales",
+            "route_reason": "bindings.chats",
+        },
+    )
+    changed_profile = replace(
+        report,
+        routing={**report.routing, "profile_id": "personal"},
+    )
+    changed_bot = replace(
+        report,
+        routing={**report.routing, "bot_id": "support"},
+    )
+
+    assert report.fingerprint != changed_profile.fingerprint
+    assert report.fingerprint != changed_bot.fingerprint
+
+
+def test_diagnostic_fingerprint_changes_with_normalized_endpoint_state(tmp_path):
+    report = _report(
+        tmp_path,
+        routing={
+            **_report(tmp_path).routing,
+            "event_endpoint": "http://127.0.0.1:8765/events",
+        },
+    )
+    changed_endpoint = replace(
+        report,
+        routing={
+            **report.routing,
+            "event_endpoint": "http://sidecar.example:8765/events",
+        },
+    )
+
+    assert report.fingerprint != changed_endpoint.fingerprint
 
 
 def test_finding_defaults_are_immutable_tuples():
@@ -285,3 +394,75 @@ def test_build_report_emits_profile_route_findings(
     )
 
     assert expected_code in {finding.code for finding in report.findings}
+
+
+@pytest.mark.parametrize(
+    "event_url",
+    [
+        "http://sidecar.example:8765/events",
+        "https://127.0.0.1:8765/events",
+        "http://127.0.0.1:8765/wrong-path",
+    ],
+)
+def test_build_report_compares_complete_normalized_event_endpoint(tmp_path, event_url):
+    config = {
+        "server": {"host": "127.0.0.1", "port": 8765},
+        "feishu": {"app_id": "app", "app_secret": "secret"},
+    }
+
+    report = build_diagnostic_report(
+        tmp_path / "config.yaml",
+        config,
+        _detection(tmp_path),
+        _recovery_plan(tmp_path),
+        event_url=event_url,
+    )
+
+    assert "event_endpoint_mismatch" in {finding.code for finding in report.findings}
+
+
+def test_card_safe_endpoint_is_useful_and_strips_url_credentials(tmp_path):
+    config = {
+        "server": {"host": "127.0.0.1", "port": 8765},
+        "feishu": {"app_id": "app", "app_secret": "secret"},
+    }
+    report = build_diagnostic_report(
+        tmp_path / "config.yaml",
+        config,
+        _detection(tmp_path),
+        _recovery_plan(tmp_path),
+        event_url=(
+            "http://private-user:private-password@localhost:8765/events"
+            "?tenant_token=private-token#private-fragment"
+        ),
+    )
+
+    payload = report.to_dict(card_safe=True)
+    serialized = json.dumps(payload, ensure_ascii=False)
+
+    assert payload["routing"]["event_endpoint"] == "http://localhost:8765/events"
+    assert "event_endpoint_mismatch" not in {finding.code for finding in report.findings}
+    for sensitive in (
+        "private-user",
+        "private-password",
+        "private-token",
+        "private-fragment",
+    ):
+        assert sensitive not in serialized
+
+
+def test_build_report_finds_missing_credentials_for_legacy_single_profile(tmp_path):
+    config = {
+        "server": {"host": "127.0.0.1", "port": 8765},
+        "feishu": {"app_id": "", "app_secret": ""},
+    }
+
+    report = build_diagnostic_report(
+        tmp_path / "config.yaml",
+        config,
+        _detection(tmp_path),
+        _recovery_plan(tmp_path),
+        profile_id="",
+    )
+
+    assert "profile_credentials_missing" in {finding.code for finding in report.findings}

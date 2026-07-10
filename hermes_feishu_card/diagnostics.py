@@ -58,8 +58,125 @@ _RAW_HASH_KEYS = {
     "raw_hash",
     "sha256",
 }
-_ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|/)[^\s,;)]*")
-_RAW_HEX_RE = re.compile(r"^[0-9a-fA-F]{32,}$")
+_SAFE_VERSION_RE = re.compile(r"^(?:v?\d+(?:\.\d+)+|unknown)$")
+_SAFE_HOST_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
+_CARD_PROFILE_SOURCES = {
+    "env",
+    "fallback_default",
+    "hermes_home",
+    "locals",
+    "sanitized_env",
+}
+_CARD_ROUTE_REASONS = {
+    "bindings.chats",
+    "bindings.fallback_bot",
+    "bots.default",
+    "default",
+}
+_CARD_CAPABILITIES = {
+    "answer_delta_callback",
+    "attachment_delivery",
+    "completion_return",
+    "cron_delivery",
+    "message_handler",
+    "reply_context",
+    "run_agent",
+    "thinking_delta_callback",
+    "tool_callback",
+}
+_CARD_METRICS = {
+    "cron_cards_sent",
+    "cron_fallbacks",
+    "events_applied",
+    "events_ignored",
+    "events_received",
+    "events_rejected",
+    "feishu_send_attempts",
+    "feishu_send_failures",
+    "feishu_send_successes",
+    "feishu_update_attempts",
+    "feishu_update_failures",
+    "feishu_update_latency_ms",
+    "feishu_update_retries",
+    "feishu_update_successes",
+    "flush_controllers_collected",
+    "profile_mismatches",
+    "recovery_attempts",
+    "recovery_plans_available",
+    "recovery_refusals",
+    "recovery_successes",
+    "sessions_collected",
+    "terminal_drain_latency_ms",
+    "terminal_drain_timeouts",
+    "terminal_drains",
+    "update_coalesced",
+    "update_queue_peak",
+    "update_scheduled",
+    "zombie_sessions_collected",
+}
+_CARD_RECOVERY_ACTIONS = {
+    "clear_stale_install_state",
+    "reapply_current_cron_hook",
+    "reapply_current_hook",
+    "rebuild_backup",
+    "rebuild_cron_backup",
+    "rebuild_manifest",
+    "restore_verified_backup",
+    "restore_verified_cron_backup",
+}
+_CARD_FINDING_CODES = {
+    "backup_hash_mismatch",
+    "backup_invalid",
+    "backup_missing",
+    "backup_read_error",
+    "backup_source_mismatch",
+    "bot_unknown",
+    "config_load_failed",
+    "cron_backup_hash_mismatch",
+    "cron_backup_invalid",
+    "cron_backup_read_error",
+    "cron_backup_source_mismatch",
+    "cron_current_hash_mismatch",
+    "cron_current_patch_mismatch",
+    "cron_current_read_error",
+    "cron_manifest_backup_hash_invalid",
+    "cron_manifest_current_hash_invalid",
+    "cron_manifest_missing",
+    "cron_manifest_path_mismatch",
+    "cron_marker_error",
+    "cron_reapplication_invalid",
+    "cron_source_missing",
+    "cron_symlink_refused",
+    "cron_unsupported_anchors",
+    "current_hash_mismatch",
+    "current_patch_mismatch",
+    "current_read_error",
+    "event_endpoint_mismatch",
+    "hermes_check_skipped",
+    "hermes_compatibility_partial",
+    "hermes_not_checked",
+    "hermes_unsupported",
+    "install_state_changed",
+    "install_state_clean",
+    "install_state_incomplete",
+    "install_state_installed",
+    "manifest_backup_hash_invalid",
+    "manifest_current_hash_invalid",
+    "manifest_invalid",
+    "manifest_missing",
+    "manifest_path_mismatch",
+    "marker_error",
+    "profile_credentials_missing",
+    "profile_identity_missing",
+    "profile_unknown",
+    "reapplication_invalid",
+    "route_fallback",
+    "runtime_import_failed",
+    "streaming_disabled",
+    "streaming_not_detected",
+    "symlink_refused",
+    "unsupported_anchors",
+}
 
 
 @dataclass(frozen=True)
@@ -202,23 +319,23 @@ def build_route_chain(
 
 
 def diagnostic_fingerprint(report: DiagnosticReport) -> str:
-    canonical = {
-        "status": report.status,
-        "config": _fingerprint_value(report.config),
-        "hermes": _fingerprint_value(report.hermes),
-        "streaming": _fingerprint_value(report.streaming),
-        "install_state": _fingerprint_value(report.install_state),
-        "routing": _fingerprint_value(report.routing),
-        "runtime": _fingerprint_value(report.runtime),
-        "findings": [
-            {
-                "code": finding.code,
-                "severity": finding.severity,
-                "impact": finding.impact,
-                "actions": list(finding.actions),
-            }
-            for finding in report.findings
-        ],
+    canonical = _fingerprint_value(_card_safe_report(_report_dict(report)))
+    if not isinstance(canonical, dict):
+        canonical = {}
+    canonical["internal_state"] = {
+        "profile_identity": _state_digest(
+            "profile_identity", str(report.routing.get("profile_id") or "")
+        ),
+        "bot_identity": _state_digest(
+            "bot_identity", str(report.routing.get("bot_id") or "")
+        ),
+        "event_endpoint": _state_digest(
+            "event_endpoint", _canonical_endpoint(str(report.routing.get("event_endpoint") or ""))
+        ),
+        "recovery_evidence": _state_digest(
+            "recovery_evidence",
+            str(report.install_state.get("recovery_fingerprint") or ""),
+        ),
     }
     encoded = json.dumps(
         canonical,
@@ -254,7 +371,45 @@ def _report_dict(report: DiagnosticReport) -> dict[str, object]:
 
 
 def _card_safe_report(data: dict[str, object]) -> dict[str, object]:
-    return _card_safe_mapping(data)
+    findings = _card_safe_findings(data.get("findings"))
+    result: dict[str, object] = {
+        "schema_version": "1",
+        "status": _safe_enum(data.get("status"), {"error", "ok", "warning"}, "warning"),
+        "config": _card_safe_config(data.get("config")),
+        "sidecar": {},
+        "hermes": _card_safe_hermes(data.get("hermes")),
+        "streaming": _card_safe_status_section(
+            data.get("streaming"),
+            {"disabled", "enabled", "not_checked", "not_detected", "skipped"},
+        ),
+        "install_state": _card_safe_install_state(data.get("install_state")),
+        "runtime_import": _card_safe_runtime_import(data.get("runtime_import")),
+        "routing": _card_safe_routing(data.get("routing")),
+        "runtime": _card_safe_runtime(data.get("runtime")),
+        "findings": findings,
+        "recommendations": [
+            {
+                "severity": finding["severity"],
+                "code": finding["code"],
+                "message": finding["message"],
+                "next_step": "",
+            }
+            for finding in findings
+        ],
+    }
+    created_at = data.get("created_at")
+    if isinstance(created_at, (int, float)) and not isinstance(created_at, bool):
+        result["created_at"] = created_at
+    config_server = _mapping(_mapping(result["config"]).get("server"))
+    host = str(config_server.get("host") or "")
+    port = config_server.get("port")
+    if host and isinstance(port, int):
+        rendered_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+        result["sidecar"] = {"address": f"{rendered_host}:{port}"}
+    fingerprint = data.get("fingerprint")
+    if isinstance(fingerprint, str) and re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        result["fingerprint"] = fingerprint
+    return result
 
 
 def format_diagnostic_text(report: DiagnosticReport, explain: bool) -> str:
@@ -432,7 +587,7 @@ def _route_findings(
                 ("Select a configured profile id and rerun doctor.",),
             )
         )
-    elif profile_id and not routing.get("credentials_present"):
+    elif routing.get("profile_exists") and not routing.get("credentials_present"):
         findings.append(
             DiagnosticFinding(
                 "profile_credentials_missing",
@@ -621,11 +776,19 @@ def _bot_exists(config: dict[str, object], profile_id: str, bot_id: str) -> bool
 
 
 def _endpoint_matches_config(endpoint: str, config: dict[str, object]) -> bool:
-    parsed = urlsplit(endpoint)
     server = _mapping(config.get("server"))
+    actual = _endpoint_parts(endpoint)
+    if actual is None:
+        return False
+    scheme, host, port, path = actual
+    expected_host = _normalize_host(str(server.get("host") or "127.0.0.1"))
     expected_port = _integer(server.get("port"), 8765)
-    endpoint_port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    return endpoint_port == expected_port
+    return (
+        scheme == "http"
+        and _hosts_equivalent(host, expected_host)
+        and port == expected_port
+        and path == "/events"
+    )
 
 
 def _safe_endpoint(event_url: str) -> str:
@@ -636,13 +799,64 @@ def _safe_endpoint(event_url: str) -> str:
         parsed = urlsplit(text)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             return ""
-        host = parsed.hostname
+        host = _normalize_host(parsed.hostname)
         if ":" in host and not host.startswith("["):
             host = f"[{host}]"
         netloc = f"{host}:{parsed.port}" if parsed.port is not None else host
-        return urlunsplit((parsed.scheme, netloc, parsed.path or "/events", "", ""))
+        path = _normalize_endpoint_path(parsed.path)
+        return urlunsplit((parsed.scheme.lower(), netloc, path, "", ""))
     except ValueError:
         return ""
+
+
+def _endpoint_parts(endpoint: str) -> tuple[str, str, int, str] | None:
+    try:
+        parsed = urlsplit(endpoint)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            return None
+        scheme = parsed.scheme.lower()
+        port = parsed.port or (443 if scheme == "https" else 80)
+        return (
+            scheme,
+            _normalize_host(parsed.hostname),
+            port,
+            _normalize_endpoint_path(parsed.path),
+        )
+    except ValueError:
+        return None
+
+
+def _canonical_endpoint(endpoint: str) -> str:
+    parts = _endpoint_parts(_safe_endpoint(endpoint))
+    if parts is None:
+        return ""
+    scheme, host, port, path = parts
+    if host in {"127.0.0.1", "::1", "localhost"}:
+        host = "loopback"
+    return f"{scheme}|{host}|{port}|{path}"
+
+
+def _normalize_endpoint_path(path: str) -> str:
+    normalized = path or "/events"
+    if normalized != "/":
+        normalized = normalized.rstrip("/") or "/"
+    return normalized
+
+
+def _normalize_host(host: str) -> str:
+    return str(host or "").strip().lower().rstrip(".")
+
+
+def _hosts_equivalent(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    loopback = {"127.0.0.1", "::1", "localhost"}
+    wildcard = {"0.0.0.0", "::"}
+    if left in loopback and right in loopback:
+        return True
+    return (left in loopback and right in wildcard) or (
+        left in wildcard and right in loopback
+    )
 
 
 def _fingerprint_value(value: object, key: str = "") -> object:
@@ -677,45 +891,220 @@ def _is_volatile_key(key: str) -> bool:
     )
 
 
-def _card_safe_mapping(data: dict[str, object]) -> dict[str, object]:
+def _card_safe_config(value: object) -> dict[str, object]:
+    data = _mapping(value)
     result: dict[str, object] = {}
-    for raw_key, value in data.items():
-        key = str(raw_key)
-        lowered = key.lower()
-        if _is_sensitive_key(lowered) or lowered in _RAW_HASH_KEYS:
-            continue
-        if lowered in _PATH_KEYS or lowered.endswith("_path"):
-            if value:
-                result[f"{key}_hash"] = _short_hash(str(value))
-            continue
-        if lowered in _IDENTIFIER_KEYS or lowered.endswith("_id"):
-            if value:
-                result[f"{key}_hash"] = _short_hash(str(value))
-            continue
-        if isinstance(value, dict):
-            result[key] = _card_safe_mapping(value)
-        elif isinstance(value, (list, tuple)):
-            result[key] = [_card_safe_value(item) for item in value]
-        elif isinstance(value, str) and _RAW_HEX_RE.fullmatch(value):
-            if lowered == "fingerprint":
-                result[key] = value
-        elif isinstance(value, str):
-            result[key] = _ABSOLUTE_PATH_RE.sub("[path]", value)
-        else:
-            result[key] = value
+    _copy_path_hash(result, data, "path")
+    _copy_bool(result, data, "loaded")
+    server = _mapping(data.get("server"))
+    host = _safe_host(server.get("host"))
+    port = _safe_port(server.get("port"))
+    if host and port is not None:
+        result["server"] = {"host": host, "port": port}
+    credentials = _safe_enum(
+        data.get("feishu_credentials"), {"configured", "missing"}, ""
+    )
+    if credentials:
+        result["feishu_credentials"] = credentials
+    _copy_bool(result, data, "profiles_enabled")
+    _copy_nonnegative_int(result, data, "profile_count")
     return result
 
 
-def _card_safe_value(value: object) -> object:
-    if isinstance(value, dict):
-        return _card_safe_mapping(value)
-    if isinstance(value, (list, tuple)):
-        return [_card_safe_value(item) for item in value]
-    if isinstance(value, str):
-        if _RAW_HEX_RE.fullmatch(value):
-            return "[hash]"
-        return _ABSOLUTE_PATH_RE.sub("[path]", value)
-    return value
+def _card_safe_hermes(value: object) -> dict[str, object]:
+    data = _mapping(value)
+    result: dict[str, object] = {}
+    _copy_bool(result, data, "checked")
+    status = _safe_enum(
+        data.get("status"), {"not_checked", "skipped", "supported", "unsupported"}, ""
+    )
+    if status:
+        result["status"] = status
+    for key in ("root", "run_py", "cron_py", "suggested_root"):
+        _copy_path_hash(result, data, key)
+    _copy_bool(result, data, "run_py_exists")
+    _copy_bool(result, data, "cron_py_exists")
+    for key in ("version", "minimum_supported_version"):
+        text = str(data.get(key) or "")
+        if _SAFE_VERSION_RE.fullmatch(text):
+            result[key] = text
+    hook_strategy = _safe_enum(
+        data.get("hook_strategy"),
+        {"gateway_run_013_plus", "legacy_gateway_run"},
+        "",
+    )
+    if hook_strategy:
+        result["hook_strategy"] = hook_strategy
+    cron_strategy = _safe_enum(data.get("cron_hook_strategy"), {"cron_scheduler"}, "")
+    if cron_strategy:
+        result["cron_hook_strategy"] = cron_strategy
+    compatibility = _safe_enum(
+        data.get("compatibility"), {"full", "partial", "unsupported"}, ""
+    )
+    if compatibility:
+        result["compatibility"] = compatibility
+    anchors = _mapping(data.get("anchors"))
+    result["anchors"] = {
+        key: bool(anchors[key])
+        for key in sorted(_CARD_CAPABILITIES)
+        if isinstance(anchors.get(key), bool)
+    }
+    suggestion_reason = _safe_enum(
+        data.get("suggestion_reason"), {"hermes_cli_project"}, ""
+    )
+    if suggestion_reason:
+        result["suggestion_reason"] = suggestion_reason
+    return result
+
+
+def _card_safe_status_section(value: object, statuses: set[str]) -> dict[str, object]:
+    data = _mapping(value)
+    result: dict[str, object] = {}
+    status = _safe_enum(data.get("status"), statuses, "")
+    if status:
+        result["status"] = status
+    _copy_bool(result, data, "checked")
+    return result
+
+
+def _card_safe_install_state(value: object) -> dict[str, object]:
+    data = _mapping(value)
+    result = _card_safe_status_section(
+        data, {"changed", "clean", "error", "incomplete", "installed", "skipped"}
+    )
+    for key in (
+        "automatic_repair_available",
+        "manual_action_required",
+        "recovery_executable",
+    ):
+        _copy_bool(result, data, key)
+    recovery_state = _safe_enum(
+        data.get("recovery_state"),
+        {"clean", "corrupt_owned", "installed", "owned_incomplete", "refused", "stale_unpatched"},
+        "",
+    )
+    if recovery_state:
+        result["recovery_state"] = recovery_state
+    actions = data.get("recovery_actions")
+    if isinstance(actions, (list, tuple)):
+        result["recovery_actions"] = [
+            action
+            for action in actions
+            if isinstance(action, str) and action in _CARD_RECOVERY_ACTIONS
+        ]
+    findings = data.get("recovery_findings")
+    if isinstance(findings, (list, tuple)):
+        result["recovery_findings"] = _card_safe_findings(findings)
+    return result
+
+
+def _card_safe_runtime_import(value: object) -> dict[str, object]:
+    data = _mapping(value)
+    result = _card_safe_status_section(
+        data, {"failed", "not_checked", "ok", "skipped"}
+    )
+    _copy_path_hash(result, data, "python")
+    return result
+
+
+def _card_safe_routing(value: object) -> dict[str, object]:
+    data = _mapping(value)
+    result: dict[str, object] = {}
+    for key in sorted(_IDENTIFIER_KEYS):
+        raw = data.get(key)
+        if isinstance(raw, str) and raw:
+            result[f"{key}_hash"] = _short_hash(raw)
+    profile_source = _safe_enum(data.get("profile_source"), _CARD_PROFILE_SOURCES, "")
+    if profile_source:
+        result["profile_source"] = profile_source
+    endpoint = _safe_endpoint(str(data.get("event_endpoint") or ""))
+    if endpoint:
+        result["event_endpoint"] = endpoint
+    _copy_bool(result, data, "profile_exists")
+    _copy_bool(result, data, "credentials_present")
+    route_reason = _safe_enum(data.get("route_reason"), _CARD_ROUTE_REASONS, "")
+    if route_reason:
+        result["route_reason"] = route_reason
+    return result
+
+
+def _card_safe_runtime(value: object) -> dict[str, object]:
+    data = _mapping(value)
+    result: dict[str, object] = {}
+    if isinstance(data.get("runtime_import"), dict):
+        result["runtime_import"] = _card_safe_runtime_import(data["runtime_import"])
+    status = _safe_enum(data.get("sidecar_status"), {"degraded", "healthy", "ok"}, "")
+    if status:
+        result["sidecar_status"] = status
+    _copy_nonnegative_int(result, data, "active_sessions")
+    metrics = _mapping(data.get("metrics"))
+    safe_metrics: dict[str, object] = {}
+    for key in sorted(_CARD_METRICS):
+        _copy_nonnegative_int(safe_metrics, metrics, key)
+    if safe_metrics:
+        result["metrics"] = safe_metrics
+    return result
+
+
+def _card_safe_findings(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    findings: list[dict[str, object]] = []
+    for item in value:
+        data = _mapping(item)
+        code = str(data.get("code") or "")
+        if code not in _CARD_FINDING_CODES:
+            code = "diagnostic_finding"
+        severity = _safe_enum(data.get("severity"), {"error", "info", "warning"}, "warning")
+        findings.append(
+            {
+                "code": code,
+                "severity": severity,
+                "message": "Diagnostic finding requires attention.",
+                "impact": "",
+                "actions": [],
+            }
+        )
+    return findings
+
+
+def _copy_path_hash(
+    result: dict[str, object], data: dict[str, object], key: str
+) -> None:
+    value = data.get(key)
+    if isinstance(value, str) and value:
+        result[f"{key}_hash"] = _short_hash(value)
+
+
+def _copy_bool(result: dict[str, object], data: dict[str, object], key: str) -> None:
+    value = data.get(key)
+    if isinstance(value, bool):
+        result[key] = value
+
+
+def _copy_nonnegative_int(
+    result: dict[str, object], data: dict[str, object], key: str
+) -> None:
+    value = data.get(key)
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        result[key] = value
+
+
+def _safe_enum(value: object, allowed: set[str], default: str) -> str:
+    text = str(value or "")
+    return text if text in allowed else default
+
+
+def _safe_host(value: object) -> str:
+    host = _normalize_host(str(value or ""))
+    if not host or len(host) > 253 or not _SAFE_HOST_RE.fullmatch(host):
+        return ""
+    return host
+
+
+def _safe_port(value: object) -> int | None:
+    port = _integer(value, 0)
+    return port if 1 <= port <= 65535 else None
 
 
 def _is_sensitive_key(key: str) -> bool:
@@ -726,6 +1115,11 @@ def _is_sensitive_key(key: str) -> bool:
 
 def _short_hash(value: str) -> str:
     return sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
+def _state_digest(kind: str, value: str) -> str:
+    material = f"hfc-diagnostic-state-v1\0{kind}\0{value}".encode("utf-8")
+    return sha256(material).hexdigest()
 
 
 def _finding_dict(finding: DiagnosticFinding) -> dict[str, object]:
