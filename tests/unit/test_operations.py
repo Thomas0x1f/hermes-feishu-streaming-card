@@ -872,6 +872,33 @@ def test_begin_recheck_rejects_legacy_predecessor_without_report_snapshot():
     assert previous.successor_operation_id == ""
 
 
+def test_completion_successor_keeps_predecessor_lookup_at_capacity():
+    store = OperationStore(secret=b"store", now=lambda: 100.0, max_records=1)
+    previous = store.create(
+        group=False,
+        transport_secret=b"adapter-process-local-proof",
+        **operation_kwargs(),
+    )
+    old_token = store.token(previous, "confirm_repair")
+
+    successor = store.create_successor(
+        previous.operation_id,
+        report=report(),
+    )
+    _claims, predecessor = store.inspect(
+        old_token,
+        callback_chat_id="oc_group",
+        callback_profile_id="default",
+        callback_profile_scope=store.scope_fingerprint(previous),
+        allow_successor_predecessor=True,
+    )
+
+    assert previous.successor_operation_id == successor.operation_id
+    assert predecessor is previous
+    assert store.current_successor(previous.operation_id) is successor
+    assert set(store._records) == {successor.operation_id}
+
+
 def report(*, executable: bool = True) -> DiagnosticReport:
     return DiagnosticReport(
         status="warning",
@@ -1009,7 +1036,7 @@ def test_operations_confirmation_buttons_are_primary_and_cancel_is_default():
     assert len(rows[0]["columns"]) == 2
 
 
-def test_operations_card_shows_preparing_recheck_without_action_buttons():
+def test_operations_card_shows_preparing_recheck_with_visible_fallback():
     store = OperationStore(secret=b"test", now=lambda: 100.0)
     operation = store.create(group=False, **operation_kwargs())
     operation.state = "preparing"
@@ -1018,7 +1045,18 @@ def test_operations_card_shows_preparing_recheck_without_action_buttons():
 
     summary = card["body"]["elements"][0]["content"]
     assert "正在重新检测" in summary
-    assert operation_buttons(card) == []
+    assert action_labels(card) == ["重新检测"]
+
+
+@pytest.mark.parametrize("state", ("preparing", "executing", "restarting"))
+def test_operations_card_keeps_recheck_fallback_while_mutation_is_inflight(state):
+    store = OperationStore(secret=b"test", now=lambda: 100.0)
+    operation = store.create(group=False, **operation_kwargs())
+    operation.state = state
+
+    card = render_operations_card(report(), operation, "footer", store=store)
+
+    assert action_labels(card) == ["重新检测"]
 
 
 def test_operations_card_keeps_a_single_odd_button_in_the_left_column():

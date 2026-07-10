@@ -32,3 +32,36 @@ DONE
 
 - Cancelling an asyncio diagnostic task cannot forcibly stop a synchronous report-builder thread that is already executing. The callback and operation state remain bounded by the 12-second coroutine timeout, cleanup cancels tracked tasks/futures, and the test fixtures explicitly release their blocked builders. A genuinely uninterruptible third-party report builder could still occupy an executor worker until it returns.
 - No real Feishu smoke run was performed in this task; coverage is HTTP integration plus fake-client PATCH behavior.
+
+## Reliability Follow-up
+
+### Status
+
+DONE
+
+### Scope Delivered
+
+- A successful repair now runs a second bounded `post_repair` diagnosis and creates its completed successor from that post-mutation report. If that diagnosis is unavailable, the card remains truthfully repaired, uses a visible recheckable fallback report, and sets `restart_available` to `false`.
+- Repair and restart now both require the fresh diagnostic fingerprint and recovery fingerprint to match the claimed operation before any mutation can begin.
+- Completion successors are linked from their predecessors in `OperationStore`, including under record-capacity pressure. Delayed callbacks authenticated with an old confirmation or recheck token resolve to the current successor card without moving delivery ownership backward.
+- `preparing`, `executing`, and `restarting` cards retain a `重新检测` fallback. During the in-flight operation it returns the current progress card; after completion the predecessor link resolves to the current successor. This path is covered with all Feishu PATCH attempts failing.
+- Removed the unreachable legacy synchronous repair/restart helpers and migrated their timeout and shutdown coverage to `_run_operations_restart` / `_schedule_operations_restart`.
+
+### RED Evidence
+
+- The three in-flight card states initially rendered no recheck button, and their callback path returned `ok: false` after PATCH failure.
+- Fresh reports with a changed diagnostic fingerprint but unchanged recovery fingerprint initially still invoked recovery and Gateway restart mutations.
+- A successful repair initially called only `confirm_repair` diagnosis and built its successor from the pre-mutation report.
+- The store initially had no completion-successor creation or current-successor lookup API; the new capacity test failed with a missing method.
+
+### GREEN Evidence
+
+- Added targeted unit and integration coverage for the three in-flight fallback states, all-PATCH-failed callback recovery, delayed old confirmation delivery ownership, both fingerprint mismatch paths, post-repair diagnosis success/fallback, and the migrated restart timeout/shutdown paths.
+- `.venv/bin/python -m pytest tests/integration/test_server.py -q -x`: 139 passed in 10.40s.
+- `.venv/bin/python -m pytest tests/unit/test_operations.py -q`: 58 passed in 0.08s.
+- `git diff --check`: passed.
+
+### Concerns
+
+- The bounded diagnostic timeout still cannot interrupt a synchronous report-builder thread already running in its executor; tests release all blocked fixtures in `finally`, and the task/future lifecycle remains bounded from the callback perspective.
+- No real Feishu smoke test was run for this follow-up; coverage is fake-client HTTP integration plus unit state-store behavior.

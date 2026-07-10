@@ -216,6 +216,63 @@ class OperationStore:
                 self._transport_secrets[operation_id] = transport_secret
             return record
 
+    def create_successor(
+        self,
+        previous_operation_id: str,
+        *,
+        report: DiagnosticReport,
+    ) -> OperationRecord:
+        with self._lock:
+            previous = self._records.get(previous_operation_id) or self._recheck_predecessors.get(
+                previous_operation_id
+            )
+            if previous is None:
+                raise OperationRejected("operation expired")
+            if previous.successor_operation_id:
+                successor = self.current_successor(previous.operation_id)
+                if successor is not None:
+                    return successor
+                raise OperationRejected("operation successor unavailable")
+            transport_secret = self._transport_secrets.get(previous.operation_id)
+            if transport_secret is None:
+                raise OperationRejected("operation transport binding expired")
+            self._prune_locked()
+            if previous.operation_id in self._records:
+                self._records.pop(previous.operation_id, None)
+                self._recheck_predecessors[previous.operation_id] = previous
+            self._reserve_capacity_locked()
+            successor = OperationRecord(
+                operation_id=secrets.token_urlsafe(18),
+                chat_id=previous.chat_id,
+                profile_id=previous.profile_id,
+                report_fingerprint=report.fingerprint,
+                recovery_fingerprint=report.recovery_fingerprint,
+                group=previous.group,
+                owner_open_id=previous.owner_open_id,
+                state="diagnosed",
+                expires_at=self._now() + 120.0,
+                report=report,
+            )
+            previous.successor_operation_id = successor.operation_id
+            self._records[successor.operation_id] = successor
+            self._transport_secrets[successor.operation_id] = transport_secret
+            return successor
+
+    def current_successor(self, operation_id: str) -> OperationRecord | None:
+        with self._lock:
+            record = self._records.get(operation_id) or self._recheck_predecessors.get(
+                operation_id
+            )
+            seen: set[str] = set()
+            while record is not None and record.successor_operation_id:
+                if record.operation_id in seen:
+                    return None
+                seen.add(record.operation_id)
+                record = self._records.get(
+                    record.successor_operation_id
+                ) or self._recheck_predecessors.get(record.successor_operation_id)
+            return record
+
     def is_inflight(self, operation_id: str) -> bool:
         with self._lock:
             record = self._records.get(operation_id)
@@ -502,10 +559,13 @@ class OperationStore:
         callback_recovery_fingerprint: str = "",
         allow_expired: bool = False,
         allow_recheck_predecessor: bool = False,
+        allow_successor_predecessor: bool = False,
     ) -> tuple[OperationClaims, OperationRecord]:
         with self._lock:
             claims, record = self._verify_token_locked(
-                token, allow_recheck_predecessor=allow_recheck_predecessor
+                token,
+                allow_recheck_predecessor=allow_recheck_predecessor,
+                allow_successor_predecessor=allow_successor_predecessor,
             )
             self._verify_callback_locked(
                 claims,
@@ -573,6 +633,7 @@ class OperationStore:
         token: str,
         *,
         allow_recheck_predecessor: bool = False,
+        allow_successor_predecessor: bool = False,
     ) -> tuple[OperationClaims, OperationRecord]:
         try:
             if not isinstance(token, str) or not token or len(token) > _TOKEN_MAX_CHARS:
@@ -609,8 +670,10 @@ class OperationStore:
             record = self._records.get(claims.operation_id)
             if (
                 record is None
-                and allow_recheck_predecessor
-                and claims.action == "recheck"
+                and (
+                    allow_successor_predecessor
+                    or (allow_recheck_predecessor and claims.action == "recheck")
+                )
             ):
                 record = self._recheck_predecessors.get(claims.operation_id)
             if record is None:
@@ -818,6 +881,8 @@ def _operation_buttons(
             ("confirm_restart", "确认重启", "primary"),
             ("cancel", "取消", "default"),
         ]
+    elif operation.state in {"preparing", "executing", "restarting"}:
+        actions = [("recheck", "重新检测", "default")]
     elif operation.state in {"expired", "failed", "restart_failed", "restarted"}:
         actions = [("recheck", "重新检测", "default")]
     else:

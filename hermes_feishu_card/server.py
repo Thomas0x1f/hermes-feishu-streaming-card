@@ -452,12 +452,28 @@ async def _operations_action(
             callback_profile_scope=profile_scope,
             allow_expired=True,
             allow_recheck_predecessor=action == "recheck",
+            allow_successor_predecessor=True,
         )
     except OperationRejected:
         return web.json_response({"ok": False, "error": "operation rejected"})
 
     report = _operation_report_snapshot(record)
+    successor = store.current_successor(record.operation_id)
+    if successor is not None and successor.operation_id != record.operation_id:
+        return _operations_response(
+            request.app,
+            _operation_report_snapshot(successor),
+            successor,
+            toast="已更新",
+        )
     if action == "recheck":
+        if record.state in {"preparing", "executing", "restarting"}:
+            return _operations_response(
+                request.app,
+                report,
+                record,
+                toast="操作进行中",
+            )
         try:
             transitioned, created = store.begin_recheck(
                 token,
@@ -900,23 +916,6 @@ async def _bounded_operations_report(
     )
 
 
-async def _fresh_operations_report_or_failed(
-    app: web.Application,
-    *,
-    profile_id: str,
-    profile_source: str,
-) -> tuple[DiagnosticReport, bool]:
-    try:
-        report, _detection = await _bounded_operations_report(
-            app,
-            profile_id=profile_id,
-            profile_source=profile_source,
-        )
-        return report, True
-    except (_OperationsDiagnosticCapacityError, asyncio.TimeoutError):
-        return _failed_operations_report(profile_id), False
-
-
 def _build_operations_report_sync(
     config_path: Path,
     hermes_root: Path,
@@ -1003,15 +1002,7 @@ def _successor_operation(
     result: dict[str, object] | None = None,
 ) -> OperationRecord:
     store: OperationStore = app[OPERATIONS_STORE_KEY]
-    successor = _create_operation(
-        app,
-        report,
-        chat_id=previous.chat_id,
-        profile_id=previous.profile_id,
-        group=previous.group,
-        initiator_open_id=previous.owner_open_id,
-        transport_source_operation_id=previous.operation_id,
-    )
+    successor = store.create_successor(previous.operation_id, report=report)
     if state != "diagnosed" or result is not None:
         successor = store.complete(
             successor.operation_id,
@@ -1097,6 +1088,15 @@ def _operation_report_snapshot(operation: OperationRecord) -> DiagnosticReport:
     return operation.report or _failed_operations_report(operation.profile_id)
 
 
+def _operation_evidence_matches(
+    operation: OperationRecord, report: DiagnosticReport
+) -> bool:
+    return (
+        report.fingerprint == operation.report_fingerprint
+        and report.recovery_fingerprint == operation.recovery_fingerprint
+    )
+
+
 def _schedule_operations_recheck(
     app: web.Application, operation: OperationRecord
 ) -> None:
@@ -1171,7 +1171,7 @@ async def _run_operations_repair(
         )
         return
 
-    if report.recovery_fingerprint != operation.recovery_fingerprint:
+    if not _operation_evidence_matches(operation, report):
         await _finish_operations_repair(
             app,
             operation,
@@ -1201,15 +1201,31 @@ async def _run_operations_repair(
         return
 
     metrics.recovery_successes += 1
+    try:
+        post_repair_report, _post_repair_detection = await _bounded_operations_report(
+            app,
+            profile_id=operation.profile_id,
+            profile_source="post_repair",
+        )
+        post_repair_available = True
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        post_repair_report = _failed_operations_report(operation.profile_id)
+        post_repair_available = False
     await _finish_operations_repair(
         app,
         operation,
-        report,
+        post_repair_report,
         state="repaired",
         result={
             "status": str(getattr(recovery_result, "status", "repaired")),
-            "message": "已完成安全修复并重新检测。",
-            "restart_available": bool(shutil.which("hermes")),
+            "message": (
+                "已完成安全修复并重新检测。"
+                if post_repair_available
+                else "已完成安全修复，但重新检测暂时不可用。"
+            ),
+            "restart_available": post_repair_available and bool(shutil.which("hermes")),
         },
     )
 
@@ -1263,7 +1279,7 @@ async def _run_operations_restart(
         )
         return
 
-    if report.recovery_fingerprint != operation.recovery_fingerprint:
+    if not _operation_evidence_matches(operation, report):
         await _finish_operations_restart(
             app,
             operation,
@@ -1369,189 +1385,6 @@ async def _publish_operations_card(
         result["delivery_error"] = "card update unavailable"
         operation.result = result
     return updated
-
-
-async def _execute_repair_operation(
-    app: web.Application,
-    report: DiagnosticReport,
-    detection: HermesDetection,
-    operation: OperationRecord,
-) -> web.Response:
-    store: OperationStore = app[OPERATIONS_STORE_KEY]
-    metrics: SidecarMetrics = app[METRICS_KEY]
-    metrics.recovery_attempts += 1
-    try:
-        recovery_result = await asyncio.to_thread(
-            execute_recovery,
-            detection,
-            operation.recovery_fingerprint,
-        )
-    except Exception:
-        metrics.recovery_refusals += 1
-        store.complete(
-            operation.operation_id,
-            expected_state="executing",
-            state="failed",
-            result={"message": "安全修复未执行；当前证据不再满足自动修复条件。"},
-        )
-        fresh_report, _diagnostics_available = await _fresh_operations_report_or_failed(
-            app,
-            profile_id=operation.profile_id,
-            profile_source="callback",
-        )
-        failed = _successor_operation(
-            app,
-            operation,
-            fresh_report,
-            state="failed",
-            result={"message": "请重新检测后再决定下一步。"},
-        )
-        return _operations_response(
-            app, fresh_report, failed, ok=False, toast="安全修复未执行"
-        )
-
-    metrics.recovery_successes += 1
-    store.complete(
-        operation.operation_id,
-        expected_state="executing",
-        state="repaired",
-        result={"status": str(getattr(recovery_result, "status", "repaired"))},
-    )
-    fresh_report, diagnostics_available = await _fresh_operations_report_or_failed(
-        app,
-        profile_id=operation.profile_id,
-        profile_source="callback",
-    )
-    repaired = _successor_operation(
-        app,
-        operation,
-        fresh_report,
-        state="repaired",
-        result={
-            "status": str(getattr(recovery_result, "status", "repaired")),
-            "message": (
-                "已完成安全修复并重新检测。"
-                if diagnostics_available
-                else "已完成安全修复，但重新检测暂时不可用。"
-            ),
-            "restart_available": diagnostics_available and bool(shutil.which("hermes")),
-        },
-    )
-    return _operations_response(
-        app,
-        fresh_report,
-        repaired,
-        ok=diagnostics_available,
-        toast="安全修复已完成" if diagnostics_available else "重新检测暂时不可用",
-    )
-
-
-async def _restart_operation_after_callback(
-    app: web.Application,
-    report: DiagnosticReport,
-    detection: HermesDetection,
-    operation: OperationRecord,
-    hermes_binary: str,
-) -> None:
-    try:
-        completed = await asyncio.to_thread(
-            subprocess.run,
-            [hermes_binary, "gateway", "restart"],
-            cwd=detection.root,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        return_code = int(completed.returncode)
-        output_status = _restart_output_status(
-            f"{completed.stdout or ''}\n{completed.stderr or ''}"
-        )
-    except Exception:
-        return_code = -1
-        output_status = "unavailable"
-
-    state = "restarted" if return_code == 0 else "restart_failed"
-    result = {
-        "return_code": return_code,
-        "output_status": output_status,
-        "message": (
-            "Gateway 重启已完成。"
-            if return_code == 0
-            else "安全修复已完成，但 Gateway 重启失败。"
-        ),
-    }
-    store: OperationStore = app[OPERATIONS_STORE_KEY]
-    try:
-        store.complete(
-            operation.operation_id,
-            expected_state="restarting",
-            state=state,
-            result=result,
-        )
-    except OperationRejected:
-        return
-    fresh_report, diagnostics_available = await _fresh_operations_report_or_failed(
-        app,
-        profile_id=operation.profile_id,
-        profile_source="callback",
-    )
-    if not diagnostics_available:
-        result["message"] = f"{result['message']} 重新检测暂时不可用。"
-    completed_operation = _successor_operation(
-        app,
-        operation,
-        fresh_report,
-        state=state,
-        result=result,
-    )
-    delivery = app[OPERATIONS_DELIVERIES_KEY].get(completed_operation.operation_id)
-    if not isinstance(delivery, dict):
-        return
-    message_id = str(delivery.get("message_id") or "")
-    if message_id:
-        await _update_card_for_app(
-            app,
-            message_id,
-            _render_operations_for_app(app, fresh_report, completed_operation),
-            delivery.get("bot_id"),
-        )
-
-
-def _schedule_restart_operation_after_callback(
-    app: web.Application,
-    report: DiagnosticReport,
-    detection: HermesDetection,
-    operation: OperationRecord,
-    hermes_binary: str,
-) -> None:
-    task = asyncio.create_task(
-        _restart_operation_after_grace(
-            app,
-            report,
-            detection,
-            operation,
-            hermes_binary,
-        )
-    )
-    _track_operations_task(app, task)
-
-
-async def _restart_operation_after_grace(
-    app: web.Application,
-    report: DiagnosticReport,
-    detection: HermesDetection,
-    operation: OperationRecord,
-    hermes_binary: str,
-) -> None:
-    await asyncio.sleep(RESTART_CALLBACK_GRACE_SECONDS)
-    await _restart_operation_after_callback(
-        app,
-        report,
-        detection,
-        operation,
-        hermes_binary,
-    )
 
 
 def _restart_output_status(output: str) -> str:
