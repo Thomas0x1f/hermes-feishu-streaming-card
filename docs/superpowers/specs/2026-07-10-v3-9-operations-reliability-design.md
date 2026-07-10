@@ -179,6 +179,36 @@ Action tokens bind to operation id, chat, profile, diagnostic fingerprint, actio
 
 Accepted operations actions are claimed by HFC and must not fall through to gray native unknown-action messages.
 
+#### Callback latency and background execution
+
+Feishu WebSocket card callbacks must not wait for Hermes detection, recovery
+classification, file mutation, or Gateway restart. The callback path performs
+only transport authentication, token/scope/owner verification, an atomic state
+claim, and rendering from the operation's in-memory safe report snapshot. Its
+target latency is below 500 ms; the Gateway-to-sidecar HTTP boundary uses a
+short local timeout rather than extending Feishu's visible wait.
+
+`查看诊断`, the first `安全修复` / `重启 Gateway` click, `取消`, and `暂不处理`
+are completed synchronously from the stored report snapshot. `重新检测`,
+`确认修复`, and `确认重启` atomically claim a tracked background operation and
+immediately return an in-progress card. Repeated clicks reuse the claimed
+operation and never start a second task.
+
+A recheck creates a `preparing` successor, transfers ownership of the existing
+card delivery, then runs fresh diagnosis on the bounded operations executor.
+Repair and restart retain the two-step confirmation and group same-operator
+rules; their background workers revalidate fresh evidence before mutation.
+Every worker checks that its operation still owns the delivery before updating
+the original card. Completion, refusal, timeout, cancellation, and PATCH
+failure all leave a bounded, visible state that offers `重新检测`; no result is
+sent as a second card.
+
+Operation records retain the latest `DiagnosticReport` only in process memory.
+Rendering still uses `card_safe=True`, and cleanup removes snapshots with their
+records. Background diagnosis has its own bounded timeout long enough to cover
+the measured local recovery classification path; callback HTTP timeouts are
+not used as diagnosis timeouts.
+
 ### 5. Profile Setup and Route Validation
 
 PR #84's environment-routing direction is implemented consistently across `install.sh`, `install-docker.sh`, and `install.ps1`.
