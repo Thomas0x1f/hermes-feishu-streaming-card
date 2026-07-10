@@ -122,6 +122,11 @@ class OperationStore:
                 if record is not None and expires_at > self._now():
                     return record, False
                 self._idempotency.pop(idempotency_key, None)
+            if (
+                operation_id in self._records
+                or operation_id in self._recheck_predecessors
+            ):
+                raise OperationRejected("operation id collision")
             self._reserve_capacity_locked()
             record = OperationRecord(
                 operation_id=operation_id,
@@ -153,6 +158,10 @@ class OperationStore:
             record.report_fingerprint = report_fingerprint
             record.recovery_fingerprint = recovery_fingerprint
             record.state = "diagnosed"
+            record.expires_at = self._now() + 120.0
+            for key, (candidate, _expires_at) in self._idempotency.items():
+                if candidate == operation_id:
+                    self._idempotency[key] = (operation_id, record.expires_at)
             return record
 
     def create(
@@ -204,6 +213,12 @@ class OperationStore:
             record = self._records.get(operation_id)
             return record is not None and record.state in _INFLIGHT_STATES
 
+    def is_preparing(self, operation_id: str) -> bool:
+        with self._lock:
+            self._prune_locked()
+            record = self._records.get(operation_id)
+            return record is not None and record.state == "preparing"
+
     def bind_transport_secret(self, operation_id: str, secret: bytes) -> None:
         if not isinstance(secret, bytes) or len(secret) < 16:
             raise ValueError("operation transport secret is invalid")
@@ -216,9 +231,12 @@ class OperationStore:
             self._transport_secrets[operation_id] = secret
 
     def _prune_locked(self) -> None:
-        cutoff = self._now() - 300.0
+        now = self._now()
+        cutoff = now - 300.0
         for operation_id, item in list(self._records.items()):
-            if item.expires_at < cutoff and item.state not in _INFLIGHT_STATES:
+            if item.state == "preparing" and item.expires_at <= now:
+                self._remove_locked(operation_id)
+            elif item.expires_at < cutoff and item.state not in _INFLIGHT_STATES:
                 self._remove_locked(operation_id)
 
     def _reserve_capacity_locked(
@@ -229,7 +247,7 @@ class OperationStore:
                 (
                     operation_id
                     for operation_id, record in self._records.items()
-                    if record.state not in _INFLIGHT_STATES
+                    if not self._capacity_protected_locked(record)
                     and operation_id not in protected_operation_ids
                 ),
                 None,
@@ -239,6 +257,11 @@ class OperationStore:
                     "operation store overloaded: capacity exhausted"
                 )
             self._remove_locked(candidate)
+
+    def _capacity_protected_locked(self, record: OperationRecord) -> bool:
+        return record.state in {"executing", "restarting"} or (
+            record.state == "preparing" and record.expires_at > self._now()
+        )
 
     def recheck_successor(
         self,

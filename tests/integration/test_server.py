@@ -1103,6 +1103,209 @@ async def test_hfc_doctor_marks_background_failure_without_exception_details(
     assert "诊断暂时不可用" in str(feishu_client.sent[0][1])
 
 
+async def test_hfc_doctor_timeout_marks_failed_and_releases_store_capacity(
+    monkeypatch,
+):
+    feishu_client = FakeFeishuClient()
+    report = operations_report()
+    started = threading.Event()
+    release = threading.Event()
+    first_finished = threading.Event()
+    calls = []
+
+    def blocked_report(*args, **kwargs):
+        calls.append(True)
+        if len(calls) == 1:
+            started.set()
+            release.wait(1.0)
+            first_finished.set()
+        return report, SimpleNamespace(root=Path("/private/hermes"))
+
+    monkeypatch.setattr(sidecar_server, "OPERATIONS_DIAGNOSTIC_TIMEOUT_SECONDS", 0.02, raising=False)
+    monkeypatch.setattr(sidecar_server, "_build_operations_report_sync", blocked_report)
+    app = create_app(feishu_client)
+    app[sidecar_server.OPERATIONS_STORE_KEY] = OperationStore(
+        secret=b"store", max_records=1
+    )
+    test_client = TestClient(TestServer(app))
+    await test_client.start_server()
+    try:
+        first = await test_client.post(
+            "/commands",
+            json=signed_operations_command(
+                {
+                    "command": "doctor",
+                    "chat_id": "oc_private",
+                    "message_id": "om_timeout_first",
+                    "chat_type": "private",
+                }
+            ),
+        )
+        first_operation_id = (await first.json())["operation_id"]
+        await asyncio.wait_for(asyncio.to_thread(started.wait), timeout=1.0)
+        await _wait_until(lambda: bool(feishu_client.sent), attempts=40)
+        failed = app[sidecar_server.OPERATIONS_STORE_KEY]._records[first_operation_id]
+        second = await test_client.post(
+            "/commands",
+            json=signed_operations_command(
+                {
+                    "command": "doctor",
+                    "chat_id": "oc_private",
+                    "message_id": "om_timeout_second",
+                    "chat_type": "private",
+                }
+            ),
+        )
+        second_operation_id = (await second.json())["operation_id"]
+        await _wait_until(lambda: len(feishu_client.sent) == 2)
+        release.set()
+        await asyncio.wait_for(asyncio.to_thread(first_finished.wait), timeout=1.0)
+        await _wait_until(
+            lambda: not app[sidecar_server.OPERATIONS_DIAGNOSTIC_TASKS_KEY]
+        )
+    finally:
+        release.set()
+        await test_client.close()
+
+    assert failed.state == "failed"
+    assert "诊断暂时不可用" in str(feishu_client.sent[0][1])
+    assert second.status == 200
+    assert len(feishu_client.sent) == 2
+    assert set(app[sidecar_server.OPERATIONS_STORE_KEY]._records) == {
+        second_operation_id
+    }
+
+
+async def test_hfc_doctor_diagnostics_do_not_queue_beyond_executor_workers(
+    monkeypatch,
+):
+    feishu_client = FakeFeishuClient()
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def blocked_report(*args, **kwargs):
+        calls.append(True)
+        if len(calls) == sidecar_server.MAX_CONCURRENT_OPERATION_DIAGNOSTICS:
+            started.set()
+        release.wait(1.0)
+        return operations_report(), SimpleNamespace(root=Path("/private/hermes"))
+
+    monkeypatch.setattr(sidecar_server, "OPERATIONS_DIAGNOSTIC_TIMEOUT_SECONDS", 0.02)
+    monkeypatch.setattr(sidecar_server, "_build_operations_report_sync", blocked_report)
+    app = create_app(feishu_client)
+    test_client = TestClient(TestServer(app))
+    await test_client.start_server()
+    try:
+        executor = app[sidecar_server.OPERATIONS_DIAGNOSTIC_EXECUTOR_KEY]
+        responses = await asyncio.gather(
+            *[
+                test_client.post(
+                    "/commands",
+                    json=signed_operations_command(
+                        {
+                            "command": "doctor",
+                            "chat_id": "oc_private",
+                            "message_id": f"om_bounded_{index}",
+                            "chat_type": "private",
+                        }
+                    ),
+                )
+                for index in range(
+                    sidecar_server.MAX_CONCURRENT_OPERATION_DIAGNOSTICS + 1
+                )
+            ]
+        )
+        await asyncio.wait_for(asyncio.to_thread(started.wait), timeout=1.0)
+        await _wait_until(
+            lambda: len(feishu_client.sent)
+            == sidecar_server.MAX_CONCURRENT_OPERATION_DIAGNOSTICS + 1,
+            attempts=80,
+        )
+    finally:
+        release.set()
+        await test_client.close()
+
+    assert all(response.status == 200 for response in responses)
+    assert executor._max_workers == sidecar_server.MAX_CONCURRENT_OPERATION_DIAGNOSTICS
+    assert len(calls) == sidecar_server.MAX_CONCURRENT_OPERATION_DIAGNOSTICS
+
+
+async def test_hfc_doctor_timeout_includes_waiting_for_diagnostic_slot(monkeypatch):
+    feishu_client = FakeFeishuClient()
+    monkeypatch.setattr(sidecar_server, "OPERATIONS_DIAGNOSTIC_TIMEOUT_SECONDS", 0.02)
+    app = create_app(feishu_client)
+    semaphore = app[sidecar_server.OPERATIONS_DIAGNOSTIC_SEMAPHORE_KEY]
+    await semaphore.acquire()
+    test_client = TestClient(TestServer(app))
+    await test_client.start_server()
+    try:
+        response = await test_client.post(
+            "/commands",
+            json=signed_operations_command(
+                {
+                    "command": "doctor",
+                    "chat_id": "oc_private",
+                    "message_id": "om_waiting_timeout",
+                    "chat_type": "private",
+                }
+            ),
+        )
+        operation_id = (await response.json())["operation_id"]
+        await _wait_until(lambda: bool(feishu_client.sent), attempts=40)
+        record = app[sidecar_server.OPERATIONS_STORE_KEY]._records[operation_id]
+    finally:
+        semaphore.release()
+        await test_client.close()
+
+    assert response.status == 200
+    assert record.state == "failed"
+
+
+async def test_operations_action_returns_503_when_diagnostic_executor_is_busy(
+    monkeypatch,
+):
+    feishu_client = FakeFeishuClient()
+    report = operations_report()
+    monkeypatch.setattr(
+        sidecar_server,
+        "_build_operations_report_sync",
+        lambda *args, **kwargs: (report, SimpleNamespace(root=Path("/private/hermes"))),
+    )
+    app = create_app(feishu_client)
+    test_client = TestClient(TestServer(app))
+    await test_client.start_server()
+    try:
+        await test_client.post(
+            "/commands",
+            json=signed_operations_command(
+                {
+                    "command": "doctor",
+                    "chat_id": "oc_private",
+                    "message_id": "om_busy_action",
+                    "chat_type": "private",
+                }
+            ),
+        )
+        await _wait_until(lambda: bool(feishu_client.sent))
+        recheck = operations_button(feishu_client.sent[0][1], "重新检测")
+        futures = app[sidecar_server.OPERATIONS_DIAGNOSTIC_FUTURES_KEY]
+        futures.update(
+            range(sidecar_server.MAX_CONCURRENT_OPERATION_DIAGNOSTICS)
+        )
+        response = await test_client.post(
+            "/card/actions",
+            json=operations_action_payload(recheck, chat_id="oc_private"),
+        )
+        body = await response.json()
+    finally:
+        futures.clear()
+        await test_client.close()
+
+    assert response.status == 503
+    assert body == {"ok": False, "error": "operations unavailable"}
+
+
 async def test_hfc_doctor_shutdown_cancels_tracked_diagnosis(monkeypatch):
     feishu_client = FakeFeishuClient()
     started = asyncio.Event()

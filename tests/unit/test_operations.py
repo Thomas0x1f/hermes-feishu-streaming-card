@@ -54,6 +54,86 @@ def transition(
     )
 
 
+def test_expired_preparing_record_is_reclaimed_at_capacity():
+    clock = [100.0]
+    store = OperationStore(secret=b"test", now=lambda: clock[0], max_records=1)
+    stale, created = store.prepare(
+        chat_id="oc_group",
+        profile_id="default",
+        group=False,
+        initiator_open_id="",
+        operation_id="operation-stale",
+        transport_secret=b"adapter-process-local-proof",
+        idempotency_key="doctor-stale",
+    )
+    clock[0] = stale.expires_at + 1.0
+
+    replacement, replacement_created = store.prepare(
+        chat_id="oc_group",
+        profile_id="default",
+        group=False,
+        initiator_open_id="",
+        operation_id="operation-replacement",
+        transport_secret=b"adapter-process-local-proof",
+        idempotency_key="doctor-replacement",
+    )
+
+    assert created is True
+    assert replacement_created is True
+    assert replacement.operation_id == "operation-replacement"
+    assert stale.operation_id not in store._records
+
+
+def test_diagnose_refreshes_operation_expiry_from_completion_time():
+    clock = [100.0]
+    store = OperationStore(secret=b"test", now=lambda: clock[0])
+    record, _created = store.prepare(
+        chat_id="oc_group",
+        profile_id="default",
+        group=False,
+        initiator_open_id="",
+        operation_id="operation-refresh",
+        transport_secret=b"adapter-process-local-proof",
+        idempotency_key="doctor-refresh",
+    )
+    clock[0] = 175.0
+
+    diagnosed = store.diagnose(
+        record.operation_id,
+        report_fingerprint="report-fresh",
+        recovery_fingerprint="recovery-fresh",
+    )
+
+    assert diagnosed.expires_at == 295.0
+
+
+def test_prepare_rejects_existing_operation_id_without_overwriting_record():
+    store = OperationStore(secret=b"test", now=lambda: 100.0)
+    original, _created = store.prepare(
+        chat_id="oc_original",
+        profile_id="default",
+        group=False,
+        initiator_open_id="",
+        operation_id="operation-collision",
+        transport_secret=b"adapter-process-local-proof",
+        idempotency_key="doctor-original",
+    )
+
+    with pytest.raises(OperationRejected, match="operation id collision"):
+        store.prepare(
+            chat_id="oc_replacement",
+            profile_id="default",
+            group=False,
+            initiator_open_id="",
+            operation_id="operation-collision",
+            transport_secret=b"adapter-process-local-proof",
+            idempotency_key="doctor-replacement",
+        )
+
+    assert store._records[original.operation_id] is original
+    assert original.chat_id == "oc_original"
+
+
 def test_group_repair_confirmation_requires_claimed_operator():
     store = OperationStore(secret=b"test", now=lambda: 100.0)
     operation = store.create(

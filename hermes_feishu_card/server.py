@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from contextlib import suppress
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -79,6 +80,10 @@ OPERATIONS_DIAGNOSTIC_TASKS_KEY = web.AppKey("operations_diagnostic_tasks", set)
 OPERATIONS_DIAGNOSTIC_SEMAPHORE_KEY = web.AppKey(
     "operations_diagnostic_semaphore", asyncio.Semaphore
 )
+OPERATIONS_DIAGNOSTIC_EXECUTOR_KEY = web.AppKey(
+    "operations_diagnostic_executor", ThreadPoolExecutor
+)
+OPERATIONS_DIAGNOSTIC_FUTURES_KEY = web.AppKey("operations_diagnostic_futures", set)
 FLUSH_CONTROLLERS_KEY = web.AppKey("flush_controllers", dict)
 CLEANUP_TASK_KEY = web.AppKey("cleanup_task", asyncio.Task)
 UPDATE_MAX_ATTEMPTS = 3
@@ -86,6 +91,7 @@ UPDATE_MIN_INTERVAL_SECONDS = 0.2
 RUNTIME_CLEANUP_INTERVAL_SECONDS = 60.0
 MAX_OPERATION_DELIVERIES = 200
 MAX_CONCURRENT_OPERATION_DIAGNOSTICS = 4
+OPERATIONS_DIAGNOSTIC_TIMEOUT_SECONDS = 5.0
 RESTART_CALLBACK_GRACE_SECONDS = 0.25
 TERMINAL_EVENTS = {"message.completed", "message.failed"}
 SESSION_CREATING_EVENTS = {
@@ -100,6 +106,10 @@ SESSION_CREATING_EVENTS = {
 DIAGNOSTICS_KEY = web.AppKey("diagnostics", dict)
 PROFILE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 logger = logging.getLogger(__name__)
+
+
+class _OperationsDiagnosticCapacityError(RuntimeError):
+    pass
 
 
 class _AfterEofJsonResponse(web.Response):
@@ -159,6 +169,11 @@ def create_app(
     app[OPERATIONS_DIAGNOSTIC_SEMAPHORE_KEY] = asyncio.Semaphore(
         MAX_CONCURRENT_OPERATION_DIAGNOSTICS
     )
+    app[OPERATIONS_DIAGNOSTIC_EXECUTOR_KEY] = ThreadPoolExecutor(
+        max_workers=MAX_CONCURRENT_OPERATION_DIAGNOSTICS,
+        thread_name_prefix="hfc-operations",
+    )
+    app[OPERATIONS_DIAGNOSTIC_FUTURES_KEY] = set()
     operations_config = Path(
         operations_config_path
         or os.environ.get("HFC_CONFIG")
@@ -215,6 +230,12 @@ async def _stop_operations_diagnostics(app: web.Application) -> None:
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
     app[OPERATIONS_DIAGNOSTIC_TASKS_KEY].clear()
+    for future in app[OPERATIONS_DIAGNOSTIC_FUTURES_KEY]:
+        future.cancel()
+    app[OPERATIONS_DIAGNOSTIC_EXECUTOR_KEY].shutdown(
+        wait=False, cancel_futures=True
+    )
+    app[OPERATIONS_DIAGNOSTIC_FUTURES_KEY].clear()
 
 
 async def _runtime_cleanup_loop(app: web.Application) -> None:
@@ -309,7 +330,12 @@ async def _card_actions(request: web.Request) -> web.Response:
 
     value = _extract_action_value(payload)
     if str(value.get("hfc_action") or "").strip() == "operations.select":
-        return await _operations_action(request, payload, value)
+        try:
+            return await _operations_action(request, payload, value)
+        except (_OperationsDiagnosticCapacityError, asyncio.TimeoutError):
+            return web.json_response(
+                {"ok": False, "error": "operations unavailable"}, status=503
+            )
     return await _interaction_action(request, payload, value)
 
 
@@ -719,48 +745,53 @@ async def _run_operations_diagnosis(
     profile_source: str,
 ) -> None:
     store: OperationStore = app[OPERATIONS_STORE_KEY]
-    async with app[OPERATIONS_DIAGNOSTIC_SEMAPHORE_KEY]:
-        try:
-            report, _detection = await _build_operations_report(
+    if not store.is_preparing(operation.operation_id):
+        return
+    try:
+        report, _detection = await asyncio.wait_for(
+            _build_operations_report(
                 app,
                 profile_id=operation.profile_id,
                 profile_source=profile_source,
-            )
-            diagnosed = store.diagnose(
-                operation.operation_id,
-                report_fingerprint=report.fingerprint,
-                recovery_fingerprint=report.recovery_fingerprint,
-            )
-            message_id = await _send_command_card(
-                app,
-                operation.chat_id,
-                _render_operations_for_app(app, report, diagnosed),
-                bot_id,
-                thread_id=thread_id,
-                reply_to_message_id=reply_to_message_id,
-                operation_id=operation.operation_id,
-            )
-            if message_id is not None:
-                return
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            pass
-
-        failed = _mark_operations_diagnosis_failed(store, operation.operation_id)
-        if failed is None:
-            return
-        await _send_command_card(
-            app,
-            failed.chat_id,
-            _render_operations_for_app(
-                app, _failed_operations_report(failed.profile_id), failed
+                preparing_operation_id=operation.operation_id,
             ),
+            timeout=OPERATIONS_DIAGNOSTIC_TIMEOUT_SECONDS,
+        )
+        diagnosed = store.diagnose(
+            operation.operation_id,
+            report_fingerprint=report.fingerprint,
+            recovery_fingerprint=report.recovery_fingerprint,
+        )
+        message_id = await _send_command_card(
+            app,
+            operation.chat_id,
+            _render_operations_for_app(app, report, diagnosed),
             bot_id,
             thread_id=thread_id,
             reply_to_message_id=reply_to_message_id,
-            operation_id=failed.operation_id,
+            operation_id=operation.operation_id,
         )
+        if message_id is not None:
+            return
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        pass
+
+    failed = _mark_operations_diagnosis_failed(store, operation.operation_id)
+    if failed is None:
+        return
+    await _send_command_card(
+        app,
+        failed.chat_id,
+        _render_operations_for_app(
+            app, _failed_operations_report(failed.profile_id), failed
+        ),
+        bot_id,
+        thread_id=thread_id,
+        reply_to_message_id=reply_to_message_id,
+        operation_id=failed.operation_id,
+    )
 
 
 def _mark_operations_diagnosis_failed(
@@ -804,18 +835,31 @@ async def _build_operations_report(
     *,
     profile_id: str,
     profile_source: str,
+    preparing_operation_id: str = "",
 ) -> tuple[DiagnosticReport, HermesDetection]:
     routing = app[ROUTING_DIAGNOSTICS_KEY]
     last_route = routing.get("last_route") if isinstance(routing, dict) else None
     health = {"routing": {"last_route": dict(last_route or {})}}
-    return await asyncio.to_thread(
-        _build_operations_report_sync,
-        app[OPERATIONS_CONFIG_PATH_KEY],
-        app[OPERATIONS_HERMES_ROOT_KEY],
-        profile_id,
-        profile_source,
-        health,
-    )
+    async with app[OPERATIONS_DIAGNOSTIC_SEMAPHORE_KEY]:
+        if preparing_operation_id and not app[OPERATIONS_STORE_KEY].is_preparing(
+            preparing_operation_id
+        ):
+            raise OperationRejected("operation state changed")
+        futures = app[OPERATIONS_DIAGNOSTIC_FUTURES_KEY]
+        if len(futures) >= MAX_CONCURRENT_OPERATION_DIAGNOSTICS:
+            raise _OperationsDiagnosticCapacityError("operations diagnostics busy")
+        future = asyncio.get_running_loop().run_in_executor(
+            app[OPERATIONS_DIAGNOSTIC_EXECUTOR_KEY],
+            _build_operations_report_sync,
+            app[OPERATIONS_CONFIG_PATH_KEY],
+            app[OPERATIONS_HERMES_ROOT_KEY],
+            profile_id,
+            profile_source,
+            health,
+        )
+        futures.add(future)
+        future.add_done_callback(futures.discard)
+        return await asyncio.shield(future)
 
 
 def _build_operations_report_sync(
