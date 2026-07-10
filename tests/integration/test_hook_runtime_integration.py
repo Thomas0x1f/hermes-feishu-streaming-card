@@ -310,6 +310,18 @@ def _operations_report():
 
 def _operations_button(card, label):
     for element in card["body"]["elements"]:
+        if element.get("tag") == "button":
+            text = element.get("text")
+            behaviors = element.get("behaviors")
+            if (
+                isinstance(text, dict)
+                and text.get("content") == label
+                and isinstance(behaviors, list)
+                and behaviors
+                and isinstance(behaviors[0], dict)
+                and isinstance(behaviors[0].get("value"), dict)
+            ):
+                return behaviors[0]["value"]
         for button in element.get("actions", []):
             if button["text"]["content"] == label:
                 return button["value"]
@@ -643,6 +655,18 @@ def _operations_report():
 
 def _operations_button(card, label):
     for element in card["body"]["elements"]:
+        if element.get("tag") == "button":
+            text = element.get("text")
+            behaviors = element.get("behaviors")
+            if (
+                isinstance(text, dict)
+                and text.get("content") == label
+                and isinstance(behaviors, list)
+                and behaviors
+                and isinstance(behaviors[0], dict)
+                and isinstance(behaviors[0].get("value"), dict)
+            ):
+                return behaviors[0]["value"]
         for button in element.get("actions", []):
             if button["text"]["content"] == label:
                 return button["value"]
