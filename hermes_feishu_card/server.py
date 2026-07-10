@@ -91,7 +91,7 @@ UPDATE_MIN_INTERVAL_SECONDS = 0.2
 RUNTIME_CLEANUP_INTERVAL_SECONDS = 60.0
 MAX_OPERATION_DELIVERIES = 200
 MAX_CONCURRENT_OPERATION_DIAGNOSTICS = 4
-OPERATIONS_DIAGNOSTIC_TIMEOUT_SECONDS = 5.0
+OPERATIONS_DIAGNOSTIC_TIMEOUT_SECONDS = 12.0
 RESTART_CALLBACK_GRACE_SECONDS = 0.25
 TERMINAL_EVENTS = {"message.completed", "message.failed"}
 SESSION_CREATING_EVENTS = {
@@ -456,22 +456,16 @@ async def _operations_action(
     except OperationRejected:
         return web.json_response({"ok": False, "error": "operation rejected"})
 
-    report, detection = await _bounded_operations_report(
-        request.app,
-        profile_id=record.profile_id,
-        profile_source="callback",
-    )
+    report = _operation_report_snapshot(record)
     if action == "recheck":
         try:
-            transitioned, created = store.recheck_successor(
+            transitioned, created = store.begin_recheck(
                 token,
                 callback_chat_id=chat_id,
                 callback_profile_id=record.profile_id,
                 callback_profile_scope=profile_scope,
                 callback_report_fingerprint=record.report_fingerprint,
                 callback_recovery_fingerprint=record.recovery_fingerprint,
-                successor_report_fingerprint=report.fingerprint,
-                successor_recovery_fingerprint=report.recovery_fingerprint,
             )
         except OperationRejected:
             return _operations_response(
@@ -481,7 +475,18 @@ async def _operations_action(
             _transfer_operation_delivery(
                 request.app, record.operation_id, transitioned.operation_id
             )
-        return _operations_response(request.app, report, transitioned)
+        return _operations_response(
+            request.app,
+            report,
+            transitioned,
+            after_eof=(
+                lambda: _schedule_operations_recheck(
+                    request.app, transitioned
+                )
+                if created
+                else None
+            ),
+        )
     try:
         transitioned = store.transition(
             token,
@@ -489,8 +494,8 @@ async def _operations_action(
             operator_open_id=operator_open_id,
             callback_chat_id=chat_id,
             callback_profile_id=record.profile_id,
-            callback_report_fingerprint=report.fingerprint,
-            callback_recovery_fingerprint=report.recovery_fingerprint,
+            callback_report_fingerprint=record.report_fingerprint,
+            callback_recovery_fingerprint=record.recovery_fingerprint,
         )
     except OperationRejected as exc:
         if str(exc) in {
@@ -516,8 +521,14 @@ async def _operations_action(
             request.app,
             report,
             record,
-            ok=False,
-            toast="操作不可用",
+            ok=action in {"confirm_repair", "confirm_restart"}
+            and record.state in {"executing", "restarting"},
+            toast=(
+                "操作进行中"
+                if action in {"confirm_repair", "confirm_restart"}
+                and record.state in {"executing", "restarting"}
+                else "操作不可用"
+            ),
         )
 
     if action == "details":
@@ -528,31 +539,21 @@ async def _operations_action(
             result={"show_details": True},
         )
     elif action == "confirm_repair":
-        return await _execute_repair_operation(
-            request.app, report, detection, transitioned
-        )
-    elif action == "confirm_restart":
-        hermes_binary = shutil.which("hermes")
-        if not hermes_binary:
-            failed = store.complete(
-                transitioned.operation_id,
-                expected_state="restarting",
-                state="restart_failed",
-                result={"message": "未找到可用的 Hermes Gateway 重启命令。"},
-            )
-            return _operations_response(
-                request.app, report, failed, ok=False, toast="重启不可用"
-            )
         return _operations_response(
             request.app,
             report,
             transitioned,
-            after_eof=lambda: _schedule_restart_operation_after_callback(
-                request.app,
-                report,
-                detection,
-                transitioned,
-                hermes_binary,
+            after_eof=lambda: _schedule_operations_repair(
+                request.app, transitioned
+            ),
+        )
+    elif action == "confirm_restart":
+        return _operations_response(
+            request.app,
+            report,
+            transitioned,
+            after_eof=lambda: _schedule_operations_restart(
+                request.app, transitioned
             ),
         )
     return _operations_response(request.app, report, transitioned)
@@ -769,11 +770,7 @@ async def _run_operations_diagnosis(
             profile_source=profile_source,
             preparing_operation_id=operation.operation_id,
         )
-        diagnosed = store.diagnose(
-            operation.operation_id,
-            report_fingerprint=report.fingerprint,
-            recovery_fingerprint=report.recovery_fingerprint,
-        )
+        diagnosed = store.diagnose(operation.operation_id, report=report)
         message_id = await _send_command_card(
             app,
             operation.chat_id,
@@ -790,14 +787,17 @@ async def _run_operations_diagnosis(
     except Exception:
         pass
 
-    failed = _mark_operations_diagnosis_failed(store, operation.operation_id)
+    failed_report = _failed_operations_report(operation.profile_id)
+    failed = _mark_operations_diagnosis_failed(
+        store, operation.operation_id, report=failed_report
+    )
     if failed is None:
         return
     await _send_command_card(
         app,
         failed.chat_id,
         _render_operations_for_app(
-            app, _failed_operations_report(failed.profile_id), failed
+            app, failed_report, failed
         ),
         bot_id,
         thread_id=thread_id,
@@ -807,16 +807,24 @@ async def _run_operations_diagnosis(
 
 
 def _mark_operations_diagnosis_failed(
-    store: OperationStore, operation_id: str
+    store: OperationStore,
+    operation_id: str,
+    *,
+    report: DiagnosticReport | None = None,
 ) -> OperationRecord | None:
     for expected_state in ("preparing", "diagnosed"):
         try:
-            return store.complete(
+            failed = store.complete(
                 operation_id,
                 expected_state=expected_state,
                 state="failed",
                 result={"message": "诊断暂时不可用，请稍后重新检测。"},
             )
+            if report is not None:
+                failed.report = report
+                failed.report_fingerprint = report.fingerprint
+                failed.recovery_fingerprint = report.recovery_fingerprint
+            return failed
         except OperationRejected:
             continue
     return None
@@ -972,7 +980,7 @@ def _create_operation(
     transport_source_operation_id: str = "",
 ) -> OperationRecord:
     store: OperationStore = app[OPERATIONS_STORE_KEY]
-    return store.create(
+    operation = store.create(
         chat_id=chat_id,
         profile_id=profile_id,
         report_fingerprint=report.fingerprint,
@@ -982,6 +990,8 @@ def _create_operation(
         transport_secret=transport_secret,
         transport_source_operation_id=transport_source_operation_id,
     )
+    operation.report = report
+    return operation
 
 
 def _successor_operation(
@@ -1081,6 +1091,284 @@ def _operations_response(
     if after_eof is not None:
         return _AfterEofJsonResponse(data, after_eof)
     return web.json_response(data)
+
+
+def _operation_report_snapshot(operation: OperationRecord) -> DiagnosticReport:
+    return operation.report or _failed_operations_report(operation.profile_id)
+
+
+def _schedule_operations_recheck(
+    app: web.Application, operation: OperationRecord
+) -> None:
+    _track_operations_task(
+        app, asyncio.create_task(_run_operations_recheck(app, operation))
+    )
+
+
+def _schedule_operations_repair(
+    app: web.Application, operation: OperationRecord
+) -> None:
+    _track_operations_task(
+        app, asyncio.create_task(_run_operations_repair(app, operation))
+    )
+
+
+def _schedule_operations_restart(
+    app: web.Application, operation: OperationRecord
+) -> None:
+    _track_operations_task(
+        app, asyncio.create_task(_run_operations_restart(app, operation))
+    )
+
+
+async def _run_operations_recheck(
+    app: web.Application, operation: OperationRecord
+) -> None:
+    store: OperationStore = app[OPERATIONS_STORE_KEY]
+    if not store.is_preparing(operation.operation_id):
+        return
+    try:
+        report, _detection = await _bounded_operations_report(
+            app,
+            profile_id=operation.profile_id,
+            profile_source="recheck",
+            preparing_operation_id=operation.operation_id,
+        )
+        diagnosed = store.diagnose(operation.operation_id, report=report)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        failed_report = _failed_operations_report(operation.profile_id)
+        failed = _mark_operations_diagnosis_failed(
+            store, operation.operation_id, report=failed_report
+        )
+        if failed is not None:
+            await _publish_operations_card(app, failed_report, failed)
+        return
+    await _publish_operations_card(app, report, diagnosed)
+
+
+async def _run_operations_repair(
+    app: web.Application, operation: OperationRecord
+) -> None:
+    if operation.state != "executing":
+        return
+    try:
+        report, detection = await _bounded_operations_report(
+            app,
+            profile_id=operation.profile_id,
+            profile_source="confirm_repair",
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        await _finish_operations_repair(
+            app,
+            operation,
+            _failed_operations_report(operation.profile_id),
+            state="failed",
+            result={"message": "诊断暂时不可用，请重新检测后再决定下一步。"},
+        )
+        return
+
+    if report.recovery_fingerprint != operation.recovery_fingerprint:
+        await _finish_operations_repair(
+            app,
+            operation,
+            report,
+            state="failed",
+            result={"message": "诊断状态已变化，请重新检测后再决定下一步。"},
+        )
+        return
+
+    metrics: SidecarMetrics = app[METRICS_KEY]
+    metrics.recovery_attempts += 1
+    try:
+        recovery_result = await asyncio.to_thread(
+            execute_recovery, detection, operation.recovery_fingerprint
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        metrics.recovery_refusals += 1
+        await _finish_operations_repair(
+            app,
+            operation,
+            report,
+            state="failed",
+            result={"message": "安全修复未执行；当前证据不再满足自动修复条件。"},
+        )
+        return
+
+    metrics.recovery_successes += 1
+    await _finish_operations_repair(
+        app,
+        operation,
+        report,
+        state="repaired",
+        result={
+            "status": str(getattr(recovery_result, "status", "repaired")),
+            "message": "已完成安全修复并重新检测。",
+            "restart_available": bool(shutil.which("hermes")),
+        },
+    )
+
+
+async def _finish_operations_repair(
+    app: web.Application,
+    operation: OperationRecord,
+    report: DiagnosticReport,
+    *,
+    state: str,
+    result: dict[str, object],
+) -> None:
+    if operation.state != "executing":
+        return
+    store: OperationStore = app[OPERATIONS_STORE_KEY]
+    try:
+        store.complete(
+            operation.operation_id,
+            expected_state="executing",
+            state=state,
+            result=result,
+        )
+        completed = _successor_operation(
+            app, operation, report, state=state, result=result
+        )
+    except OperationRejected:
+        return
+    await _publish_operations_card(app, report, completed)
+
+
+async def _run_operations_restart(
+    app: web.Application, operation: OperationRecord
+) -> None:
+    if operation.state != "restarting":
+        return
+    try:
+        report, detection = await _bounded_operations_report(
+            app,
+            profile_id=operation.profile_id,
+            profile_source="confirm_restart",
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        await _finish_operations_restart(
+            app,
+            operation,
+            _failed_operations_report(operation.profile_id),
+            state="restart_failed",
+            result={"message": "Gateway 重启前的诊断暂时不可用，请重新检测。"},
+        )
+        return
+
+    if report.recovery_fingerprint != operation.recovery_fingerprint:
+        await _finish_operations_restart(
+            app,
+            operation,
+            report,
+            state="restart_failed",
+            result={"message": "诊断状态已变化，请重新检测后再决定下一步。"},
+        )
+        return
+
+    hermes_binary = shutil.which("hermes")
+    if not hermes_binary:
+        await _finish_operations_restart(
+            app,
+            operation,
+            report,
+            state="restart_failed",
+            result={"message": "未找到可用的 Hermes Gateway 重启命令。"},
+        )
+        return
+
+    await asyncio.sleep(RESTART_CALLBACK_GRACE_SECONDS)
+    try:
+        completed = await asyncio.to_thread(
+            subprocess.run,
+            [hermes_binary, "gateway", "restart"],
+            cwd=detection.root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return_code = int(completed.returncode)
+        output_status = _restart_output_status(
+            f"{completed.stdout or ''}\n{completed.stderr or ''}"
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return_code = -1
+        output_status = "unavailable"
+    await _finish_operations_restart(
+        app,
+        operation,
+        report,
+        state="restarted" if return_code == 0 else "restart_failed",
+        result={
+            "return_code": return_code,
+            "output_status": output_status,
+            "message": (
+                "Gateway 重启已完成。"
+                if return_code == 0
+                else "安全修复已完成，但 Gateway 重启失败。"
+            ),
+        },
+    )
+
+
+async def _finish_operations_restart(
+    app: web.Application,
+    operation: OperationRecord,
+    report: DiagnosticReport,
+    *,
+    state: str,
+    result: dict[str, object],
+) -> None:
+    if operation.state != "restarting":
+        return
+    store: OperationStore = app[OPERATIONS_STORE_KEY]
+    try:
+        store.complete(
+            operation.operation_id,
+            expected_state="restarting",
+            state=state,
+            result=result,
+        )
+        completed = _successor_operation(
+            app, operation, report, state=state, result=result
+        )
+    except OperationRejected:
+        return
+    await _publish_operations_card(app, report, completed)
+
+
+async def _publish_operations_card(
+    app: web.Application,
+    report: DiagnosticReport,
+    operation: OperationRecord,
+) -> bool:
+    delivery = app[OPERATIONS_DELIVERIES_KEY].get(operation.operation_id)
+    if not isinstance(delivery, dict):
+        return False
+    message_id = str(delivery.get("message_id") or "")
+    if not message_id:
+        return False
+    updated = await _update_card_for_app(
+        app,
+        message_id,
+        _render_operations_for_app(app, report, operation),
+        delivery.get("bot_id"),
+    )
+    if not updated:
+        result = dict(operation.result or {})
+        result["delivery_error"] = "card update unavailable"
+        operation.result = result
+    return updated
 
 
 async def _execute_repair_operation(
