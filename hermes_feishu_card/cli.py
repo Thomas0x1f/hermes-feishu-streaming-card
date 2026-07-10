@@ -188,6 +188,7 @@ def _run_setup(args: argparse.Namespace) -> int:
             {
                 "HERMES_FEISHU_CARD_PROFILE_ID": route_settings["profile_id"],
                 "HERMES_FEISHU_CARD_EVENT_URL": route_settings["event_url"],
+                "HERMES_DIR": str(Path(args.hermes_dir).expanduser()),
             },
         )
         created = _ensure_setup_config(config_path)
@@ -412,7 +413,7 @@ def _run_doctor(args: argparse.Namespace) -> int:
 
 
 def _doctor_json_output_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    output = dict(payload)
+    output = _redact_doctor_json_paths(payload)
     routing = payload.get("routing")
     if not isinstance(routing, dict):
         return output
@@ -422,6 +423,35 @@ def _doctor_json_output_payload(payload: dict[str, Any]) -> dict[str, Any]:
         output_routing["event_endpoint"] = safe_event_endpoint_for_output(endpoint)
     output["routing"] = output_routing
     return output
+
+
+_DOCTOR_JSON_PATH_KEYS = frozenset(
+    {
+        "backup_path",
+        "config_path",
+        "cron_backup_path",
+        "cron_py",
+        "manifest_path",
+        "path",
+        "python",
+        "root",
+        "run_py",
+        "suggested_root",
+    }
+)
+
+
+def _redact_doctor_json_paths(value: Any, key: str = "") -> Any:
+    if key in _DOCTOR_JSON_PATH_KEYS and isinstance(value, str):
+        return "[redacted]"
+    if isinstance(value, dict):
+        return {
+            child_key: _redact_doctor_json_paths(child_value, str(child_key))
+            for child_key, child_value in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_doctor_json_paths(item) for item in value]
+    return value
 
 
 def _doctor_error_report(config_path: Path, exc: Exception) -> dict[str, Any]:

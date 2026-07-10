@@ -11,6 +11,7 @@ HFC_ENV_KEYS = frozenset(
     {
         "HERMES_FEISHU_CARD_PROFILE_ID",
         "HERMES_FEISHU_CARD_EVENT_URL",
+        "HERMES_DIR",
     }
 )
 
@@ -21,7 +22,7 @@ _UNQUOTED_VALUE_RE = re.compile(r"^[A-Za-z0-9_./:@%+,-]+$")
 
 
 def update_hfc_env(path: Path, updates: dict[str, str]) -> None:
-    """Atomically update only HFC-owned routing keys in a dotenv file."""
+    """Atomically update HFC routing and Hermes-root values in a dotenv file."""
     normalized = _validate_updates(updates)
     env_path = Path(path).expanduser()
     original = _read_text_preserve_newlines(env_path) if env_path.exists() else ""
@@ -54,7 +55,7 @@ def update_hfc_env(path: Path, updates: dict[str, str]) -> None:
 
 
 def read_hfc_env(path: Path) -> dict[str, str]:
-    """Read only HFC-owned routing values from a dotenv file."""
+    """Read HFC routing and Hermes-root values from a dotenv file."""
     env_path = Path(path).expanduser()
     try:
         contents = _read_text_preserve_newlines(env_path)

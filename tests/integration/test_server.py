@@ -414,6 +414,53 @@ def test_cleanup_runtime_state_removes_related_state_and_counts_once():
     assert app[METRICS_KEY].flush_controllers_collected == 1
 
 
+async def test_cleanup_reassigned_alias_keeps_new_session_routable():
+    app = create_app(FakeFeishuClient())
+    old_key = "om_old"
+    new_key = "om_new"
+    old = CardSession("conversation-1", old_key, "oc_abc")
+    old.status = "completed"
+    old.updated_at = 100.0
+    active = CardSession("conversation-1", new_key, "oc_abc")
+    active.updated_at = 3700.0
+    active.answer_text = "active"
+    app[SESSIONS_KEY][old_key] = old
+    app[SESSIONS_KEY][new_key] = active
+
+    class ReassignedAliases(dict):
+        def __init__(self):
+            super().__init__({"om_reply": new_key})
+            self._first_items_call = True
+
+        def items(self):
+            if self._first_items_call:
+                self._first_items_call = False
+                return (("om_reply", old_key),)
+            return super().items()
+
+    app[SESSION_ALIASES_KEY] = ReassignedAliases()
+    cleanup_runtime_state(app, now=3700.0)
+
+    test_client = TestClient(TestServer(app))
+    await test_client.start_server()
+    try:
+        response = await test_client.post(
+            "/events",
+            json=event_payload(
+                "answer.delta",
+                1,
+                {"text": "fresh", "reply_to_message_id": "om_reply"},
+                message_id="om_followup",
+            ),
+        )
+        body = await response.json()
+    finally:
+        await test_client.close()
+
+    assert body == {"ok": True, "applied": True}
+    assert app[SESSIONS_KEY][new_key].answer_text == "activefresh"
+
+
 async def test_cleanup_runtime_state_keeps_active_interactions_and_inflight_aliases():
     app = create_app(FakeFeishuClient())
     interaction_key = "om_interaction"
@@ -1085,6 +1132,63 @@ async def test_concurrent_recheck_returns_one_successor_and_moves_delivery_once(
     assert original_id not in deliveries
     assert set(deliveries) == successor_ids
     assert all(body["ok"] is True for body in bodies)
+
+
+async def test_changed_recheck_creates_one_fresh_successor_and_moves_delivery_once(
+    monkeypatch,
+):
+    feishu_client = FakeFeishuClient()
+    reports = [
+        operations_report(report_marker="report-a", recovery_fingerprint="recovery-a"),
+        operations_report(report_marker="report-b", recovery_fingerprint="recovery-b"),
+    ]
+    detection = SimpleNamespace(root=Path("/private/hermes"))
+    monkeypatch.setattr(
+        sidecar_server,
+        "_build_operations_report_sync",
+        lambda *args, **kwargs: (reports.pop(0) if reports else operations_report(
+            report_marker="report-b", recovery_fingerprint="recovery-b"
+        ), detection),
+    )
+    app = create_app(feishu_client)
+    test_client = TestClient(TestServer(app))
+    await test_client.start_server()
+    try:
+        await test_client.post(
+            "/commands",
+            json=signed_operations_command({
+                "command": "doctor",
+                "chat_id": "oc_private",
+                "message_id": "om_doctor",
+                "chat_type": "private",
+                "adapter_transport_secret": TRANSPORT_SECRET,
+            }),
+        )
+        await _wait_until(lambda: bool(feishu_client.sent))
+        recheck = operations_button(feishu_client.sent[0][1], "重新检测")
+        original_id = next(iter(app[sidecar_server.OPERATIONS_DELIVERIES_KEY]))
+        payload = operations_action_payload(
+            recheck, chat_id="oc_private", operator="ou_owner"
+        )
+        first = await test_client.post("/card/actions", json=payload)
+        second = await test_client.post("/card/actions", json=payload)
+        first_body = await first.json()
+        second_body = await second.json()
+    finally:
+        await test_client.close()
+
+    assert first_body["ok"] is True
+    assert second_body["ok"] is True
+    assert first_body["operation_id"] == second_body["operation_id"]
+    assert first_body["operation_id"] != original_id
+    successor = app[sidecar_server.OPERATIONS_STORE_KEY]._records[
+        first_body["operation_id"]
+    ]
+    assert successor.recovery_fingerprint == "recovery-b"
+    assert original_id not in app[sidecar_server.OPERATIONS_DELIVERIES_KEY]
+    assert set(app[sidecar_server.OPERATIONS_DELIVERIES_KEY]) == {
+        first_body["operation_id"]
+    }
 
 
 async def test_full_capacity_repeated_recheck_returns_same_successor_and_moves_delivery_once(

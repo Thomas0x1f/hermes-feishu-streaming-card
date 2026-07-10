@@ -232,6 +232,9 @@ def test_setup_creates_config_installs_hook_and_starts_sidecar(tmp_path, monkeyp
     assert started["config"]["feishu"]["app_id"] == "cli_setup_test"
     assert started["config"]["feishu"]["app_secret"] == "setup-secret"
     assert started["config"]["server"]["port"] == 8765
+    assert f"HERMES_DIR={hermes_dir}" in (config_path.parent / ".env").read_text(
+        encoding="utf-8"
+    )
     assert "HERMES_FEISHU_CARD_PATCH_BEGIN" in run_py(hermes_dir).read_text(
         encoding="utf-8"
     )
@@ -303,6 +306,7 @@ profiles:
         "UNKNOWN_KEY=keep\n"
         "HERMES_FEISHU_CARD_PROFILE_ID=child\n"
         "HERMES_FEISHU_CARD_EVENT_URL=http://127.0.0.1:8765/events\n"
+        f"HERMES_DIR={hermes_dir}\n"
     )
     assert "Route Chain" in captured.out
     assert "profile_id: child" in captured.out
@@ -676,7 +680,7 @@ def test_install_and_restore_latest_layout_patches_scheduler_cron(tmp_path):
     gateway_dir = hermes_dir / "gateway"
     cron_dir = hermes_dir / "cron"
     gateway_dir.mkdir(parents=True)
-    cron_dir.mkdir()
+    cron_dir.mkdir(exist_ok=True)
     (hermes_dir / "VERSION").write_text("v0.13.0\n", encoding="utf-8")
     run_original = '''
 class GatewayRunner:
@@ -725,6 +729,19 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None):
     assert (gateway_dir / "run.py").read_text(encoding="utf-8") == run_original
     assert (cron_dir / "scheduler.py").read_text(encoding="utf-8") == cron_original
     assert not (cron_dir / "scheduler.py.hermes_feishu_card.bak").exists()
+
+
+def test_repeat_install_ignores_unchanged_optional_cron_evidence(tmp_path):
+    hermes_dir = copy_hermes(tmp_path)
+    cron_dir = hermes_dir / "cron"
+    cron_dir.mkdir(exist_ok=True)
+    (cron_dir / "scheduler.py").write_text("def unrelated():\n    return None\n", encoding="utf-8")
+
+    first = run_cli("install", "--hermes-dir", str(hermes_dir), "--yes")
+    second = run_cli("install", "--hermes-dir", str(hermes_dir), "--yes")
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
 
 
 def test_restore_accepts_phase_one_placeholder_install(tmp_path):

@@ -150,13 +150,14 @@ def create_app(
     app[PROFILE_DIAGNOSTICS_KEY] = {}
     app[BASE_CARD_CONFIG_KEY] = dict(card_config)
     app[OPERATIONS_STORE_KEY] = OperationStore(secret=secrets.token_bytes(32))
-    app[OPERATIONS_CONFIG_PATH_KEY] = Path(
+    operations_config = Path(
         operations_config_path
         or os.environ.get("HFC_CONFIG")
         or Path.home() / ".hermes_feishu_card" / "config.yaml"
     ).expanduser()
+    app[OPERATIONS_CONFIG_PATH_KEY] = operations_config
     app[OPERATIONS_HERMES_ROOT_KEY] = resolve_operations_hermes_root(
-        operations_hermes_root
+        operations_hermes_root, config_path=operations_config
     )
     app[OPERATIONS_DELIVERIES_KEY] = {}
     if (
@@ -411,14 +412,10 @@ async def _operations_action(
                 callback_chat_id=chat_id,
                 callback_profile_id=record.profile_id,
                 callback_profile_scope=profile_scope,
-                callback_report_fingerprint=report.fingerprint,
-                callback_recovery_fingerprint=str(
-                    report.install_state.get("recovery_fingerprint") or ""
-                ),
+                callback_report_fingerprint=record.report_fingerprint,
+                callback_recovery_fingerprint=record.recovery_fingerprint,
                 successor_report_fingerprint=report.fingerprint,
-                successor_recovery_fingerprint=str(
-                    report.install_state.get("recovery_fingerprint") or ""
-                ),
+                successor_recovery_fingerprint=report.recovery_fingerprint,
             )
         except OperationRejected:
             return _operations_response(
@@ -738,9 +735,7 @@ def _create_operation(
         chat_id=chat_id,
         profile_id=profile_id,
         report_fingerprint=report.fingerprint,
-        recovery_fingerprint=str(
-            report.install_state.get("recovery_fingerprint") or ""
-        ),
+        recovery_fingerprint=report.recovery_fingerprint,
         group=group,
         initiator_open_id=initiator_open_id,
         transport_secret=transport_secret,

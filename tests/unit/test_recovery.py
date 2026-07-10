@@ -679,6 +679,42 @@ def test_plan_recovery_preserves_verified_stale_unpatched_state_without_cron(
     assert plan.actions == ("clear_stale_install_state",)
 
 
+def test_plan_recovery_accepts_verified_optional_cron_noop(installed_state):
+    detection, _original, _patched, manifest_path = installed_state
+    assert detection.cron_py is not None
+    cron_source = "def unrelated():\n    return None\n"
+    cron_backup = detection.cron_py.with_name("scheduler.py.hermes_feishu_card.bak")
+    detection.cron_py.write_text(cron_source, encoding="utf-8")
+    cron_backup.write_text(cron_source, encoding="utf-8")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["cron_patched_sha256"] = sha256(cron_source.encode("utf-8")).hexdigest()
+    manifest["cron_backup_sha256"] = sha256(cron_source.encode("utf-8")).hexdigest()
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
+
+    plan = plan_recovery(detection)
+
+    assert plan.state == "installed"
+    assert plan.actions == ()
+
+
+def test_plan_recovery_refuses_edited_optional_cron_noop(installed_state):
+    detection, _original, _patched, manifest_path = installed_state
+    assert detection.cron_py is not None
+    cron_source = "def unrelated():\n    return None\n"
+    cron_backup = detection.cron_py.with_name("scheduler.py.hermes_feishu_card.bak")
+    detection.cron_py.write_text(cron_source + "# user edit\n", encoding="utf-8")
+    cron_backup.write_text(cron_source, encoding="utf-8")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["cron_patched_sha256"] = sha256(cron_source.encode("utf-8")).hexdigest()
+    manifest["cron_backup_sha256"] = sha256(cron_source.encode("utf-8")).hexdigest()
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
+
+    plan = plan_recovery(detection)
+
+    assert plan.state == "stale_unpatched"
+    assert plan.executable is False
+
+
 def test_plan_recovery_restores_installed_cron_before_clearing_gateway_stale_state(
     installed_state,
 ):

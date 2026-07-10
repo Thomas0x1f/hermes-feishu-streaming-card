@@ -94,7 +94,8 @@ def cleanup_runtime_state(app: Any, now: float) -> CleanupResult:
 
         sessions.pop(session_key, None)
         for alias_key in alias_keys:
-            aliases.pop(alias_key, None)
+            if aliases.get(alias_key) == session_key:
+                aliases.pop(alias_key, None)
         aliases.pop(session_key, None)
         for key in related_keys:
             message_locks.pop(key, None)

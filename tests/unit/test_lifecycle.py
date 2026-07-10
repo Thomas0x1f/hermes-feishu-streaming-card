@@ -1,7 +1,8 @@
 import pytest
 
 from hermes_feishu_card.events import SidecarEvent
-from hermes_feishu_card.lifecycle import CleanupPolicy, session_cleanup_reason
+from hermes_feishu_card.lifecycle import CleanupPolicy, cleanup_runtime_state, session_cleanup_reason
+from hermes_feishu_card import server
 from hermes_feishu_card import session as session_module
 from hermes_feishu_card.session import CardSession, InteractionState, ToolState
 
@@ -137,3 +138,34 @@ def test_card_session_timestamps_only_advance_for_accepted_events(monkeypatch):
     assert session.updated_at == 20.0
     assert not session.apply(_event("thinking.delta", 1))
     assert session.updated_at == 20.0
+
+
+def test_cleanup_preserves_alias_reassigned_to_new_active_session():
+    app = server.create_app(object())
+    old_key = "om_old"
+    new_key = "om_new"
+    old = _session(status="completed")
+    old.updated_at = 100.0
+    new = _session()
+    new.updated_at = 3700.0
+    new.answer_text = "active"
+    app[server.SESSIONS_KEY][old_key] = old
+    app[server.SESSIONS_KEY][new_key] = new
+    class ReassignedAliases(dict):
+        def __init__(self):
+            super().__init__({"om_reply": new_key})
+            self._first_items_call = True
+
+        def items(self):
+            if self._first_items_call:
+                self._first_items_call = False
+                return (("om_reply", old_key),)
+            return super().items()
+
+    app[server.SESSION_ALIASES_KEY] = ReassignedAliases()
+    assert app[server.SESSION_ALIASES_KEY]["om_reply"] == new_key
+
+    cleanup_runtime_state(app, now=3700.0)
+
+    assert old_key not in app[server.SESSIONS_KEY]
+    assert app[server.SESSION_ALIASES_KEY]["om_reply"] == new_key

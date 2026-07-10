@@ -55,6 +55,17 @@ def test_hook_refuses_missing_or_insecure_root_secret(tmp_path):
     assert read_transport_root_secret(state_dir) is None
 
 
+def test_windows_transport_uses_regular_secret_without_posix_mode_checks(monkeypatch, tmp_path):
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr("hermes_feishu_card.operations_transport._is_windows", lambda: True)
+
+    secret = ensure_transport_root_secret(state_dir)
+    state_dir.chmod(0o755)
+    (state_dir / "operations.transport.key").chmod(0o644)
+
+    assert read_transport_root_secret(state_dir) == secret
+
+
 def test_command_proof_binds_body_scope_operator_and_rejects_replay():
     secret = b"r" * 32
     payload = command_payload()

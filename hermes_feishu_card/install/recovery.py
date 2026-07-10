@@ -1053,6 +1053,20 @@ def _classify_cron_evidence(
         if not source_valid:
             findings.append(_finding("cron_unsupported_anchors", "error"))
         reapply_error = _validate_cron_reapplication(current)
+        optional_unsupported = bool(
+            reapply_error == "unsupported_anchors"
+            and source_valid
+            and source_matches
+            and manifest_has_cron
+            and manifest_checks.valid
+            and manifest_checks.current_matches
+            and manifest_checks.backup_matches
+            and backup_checks.valid
+            and not manifest_invalid
+            and not backup_status_error
+        )
+        if optional_unsupported:
+            return _classification("clean", False, (), findings, parts)
         if reapply_error == "unsupported_anchors":
             findings.append(_finding("cron_unsupported_anchors", "error"))
         elif reapply_error:

@@ -27,10 +27,12 @@ class TransportAuthenticationError(ValueError):
 def ensure_transport_root_secret(directory: str | Path | None = None) -> bytes:
     root = Path(directory).expanduser() if directory is not None else state_dir()
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    root.chmod(0o700)
+    if not _is_windows():
+        root.chmod(0o700)
     path = root / TRANSPORT_ROOT_SECRET_NAME
     if path.exists():
-        path.chmod(0o600)
+        if not _is_windows():
+            path.chmod(0o600)
         secret = _read_secret_bytes(path)
         if secret is None:
             raise OSError("operations transport root is invalid")
@@ -48,7 +50,8 @@ def ensure_transport_root_secret(directory: str | Path | None = None) -> bytes:
             handle.write(secret)
             handle.flush()
             os.fsync(handle.fileno())
-        temp_path.chmod(0o600)
+        if not _is_windows():
+            temp_path.chmod(0o600)
         try:
             os.link(temp_path, path)
         except FileExistsError:
@@ -56,7 +59,8 @@ def ensure_transport_root_secret(directory: str | Path | None = None) -> bytes:
     finally:
         temp_path.unlink(missing_ok=True)
 
-    path.chmod(0o600)
+    if not _is_windows():
+        path.chmod(0o600)
     persisted = _read_secret_bytes(path)
     if persisted is None:
         raise OSError("operations transport root could not be created")
@@ -67,9 +71,12 @@ def read_transport_root_secret(directory: str | Path | None = None) -> bytes | N
     root = Path(directory).expanduser() if directory is not None else state_dir()
     path = root / TRANSPORT_ROOT_SECRET_NAME
     try:
-        if stat.S_IMODE(root.stat().st_mode) != 0o700:
+        if root.is_symlink() or not root.is_dir() or path.is_symlink() or not path.is_file():
             return None
-        if stat.S_IMODE(path.stat().st_mode) != 0o600:
+        if not _is_windows() and (
+            stat.S_IMODE(root.stat().st_mode) != 0o700
+            or stat.S_IMODE(path.stat().st_mode) != 0o600
+        ):
             return None
     except OSError:
         return None
@@ -82,6 +89,10 @@ def _read_secret_bytes(path: Path) -> bytes | None:
     except OSError:
         return None
     return secret if len(secret) == _ROOT_SECRET_BYTES else None
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
 
 
 def sign_command_transport_proof(

@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import base64
 import json
+from hashlib import sha256
+from pathlib import Path
+import shutil
 import threading
 from dataclasses import replace
 
 import pytest
 
 from hermes_feishu_card.diagnostics import DiagnosticFinding, DiagnosticReport
+from hermes_feishu_card.diagnostics import build_diagnostic_report
+from hermes_feishu_card.install.detect import detect_hermes
+from hermes_feishu_card.install.patcher import apply_patch
+from hermes_feishu_card.install.recovery import execute_recovery, plan_recovery
 from hermes_feishu_card.operations import (
     OperationRejected,
     OperationStore,
@@ -56,6 +63,52 @@ def test_group_repair_confirmation_requires_claimed_operator():
 
     with pytest.raises(OperationRejected, match="different operator"):
         transition(store, confirm, "confirm_repair", operator="ou_other")
+
+
+def test_full_recovery_fingerprint_flows_from_plan_to_operation_to_executor(tmp_path):
+    fixture = Path(__file__).parents[1] / "fixtures" / "hermes_v2026_4_23"
+    root = tmp_path / "hermes"
+    shutil.copytree(fixture, root)
+    detection = detect_hermes(root)
+    original = detection.run_py.read_text(encoding="utf-8")
+    patched = apply_patch(original, strategy=detection.hook_strategy)
+    backup = detection.run_py.with_name("run.py.hermes_feishu_card.bak")
+    backup.write_text(original, encoding="utf-8")
+    corrupt = patched.replace("# HERMES_FEISHU_CARD_COMPLETE_PATCH_END\n", "")
+    detection.run_py.write_text(corrupt, encoding="utf-8")
+    (root / ".hermes_feishu_card_manifest").write_text(
+        json.dumps(
+            {
+                "run_py": "gateway/run.py",
+                "patched_sha256": sha256(corrupt.encode("utf-8")).hexdigest(),
+                "backup": "gateway/run.py.hermes_feishu_card.bak",
+                "backup_sha256": sha256(original.encode("utf-8")).hexdigest(),
+            },
+            sort_keys=True,
+        ) + "\n",
+        encoding="utf-8",
+    )
+
+    plan = plan_recovery(detection)
+    report = build_diagnostic_report(
+        tmp_path / "config.yaml",
+        {"server": {"host": "127.0.0.1", "port": 8765}},
+        detection,
+        plan,
+    )
+    operation = OperationStore(secret=b"test").create(
+        chat_id="oc_group",
+        profile_id="default",
+        report_fingerprint=report.fingerprint,
+        recovery_fingerprint=report.recovery_fingerprint,
+        group=False,
+    )
+
+    result = execute_recovery(detection, operation.recovery_fingerprint)
+
+    assert len(operation.recovery_fingerprint) == 64
+    assert operation.recovery_fingerprint == plan.fingerprint
+    assert result.status == "repaired"
 
 
 def test_private_repair_confirmation_does_not_compare_operators():

@@ -9,7 +9,7 @@ from aiohttp import web
 
 from .bots import BotRegistry, FeishuClientFactory, RoutingContext
 from .bots import resolve_card_config as _resolve_card_config
-from .config import load_config
+from .config import load_config, resolve_operations_hermes_root
 from .feishu_client import FeishuClient, FeishuClientConfig
 from .server import create_app
 from .operations_transport import ensure_transport_root_secret
@@ -225,6 +225,9 @@ def main(argv: list[str] | None = None) -> int:
             card_config=_card_config_for_server(config),
             bot_router=boundary.router,
             operations_config_path=args.config,
+            operations_hermes_root=resolve_operations_hermes_root(
+                config_path=args.config
+            ),
             operations_transport_root_secret=operations_transport_root_secret,
         ),
         host=server["host"],

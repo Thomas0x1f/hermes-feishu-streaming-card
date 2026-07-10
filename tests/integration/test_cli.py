@@ -198,7 +198,8 @@ def test_module_doctor_json_reports_skipped_hermes(tmp_path):
     report = json.loads(result.stdout)
     assert report["schema_version"] == "1"
     assert report["status"] == "ok"
-    assert report["config"]["path"] == str(config_path)
+    assert report["config"]["path"] == "[redacted]"
+    assert str(config_path) not in result.stdout
     assert report["config"]["loaded"] is True
     assert report["config"]["server"] == {"host": "0.0.0.0", "port": 9012}
     assert report["sidecar"]["address"] == "0.0.0.0:9012"
@@ -239,6 +240,8 @@ def test_module_doctor_json_reports_supported_hermes_and_clean_install_state(tmp
     assert report["install_state"]["status"] == "clean"
     assert report["streaming"]["status"] == "enabled"
     assert any(item["code"] == "hermes_compatibility_partial" for item in report["recommendations"])
+    assert str(config_path) not in result.stdout
+    assert str(hermes_dir) not in result.stdout
 
 
 def test_module_doctor_json_is_read_only_and_has_stable_fingerprint(tmp_path):
@@ -304,7 +307,8 @@ exit 0
     assert report["status"] == "warning"
     assert report["runtime_import"]["checked"] is True
     assert report["runtime_import"]["status"] == "failed"
-    assert report["runtime_import"]["python"] == str(runtime_python)
+    assert report["runtime_import"]["python"] == "[redacted]"
+    assert str(runtime_python) not in result.stdout
     assert "hook_runtime" in report["runtime_import"]["message"]
     assert any(item["code"] == "runtime_import_failed" for item in report["recommendations"])
 

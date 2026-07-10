@@ -200,10 +200,18 @@ class DiagnosticReport:
     routing: dict[str, object]
     runtime: dict[str, object]
     findings: tuple[DiagnosticFinding, ...]
+    internal_recovery_fingerprint: str = ""
 
     @property
     def fingerprint(self) -> str:
         return diagnostic_fingerprint(self)
+
+    @property
+    def recovery_fingerprint(self) -> str:
+        """Return the process-local recovery evidence fingerprint."""
+        return self.internal_recovery_fingerprint or str(
+            self.install_state.get("recovery_fingerprint") or ""
+        )
 
     def to_dict(self, card_safe: bool = False) -> dict[str, object]:
         data = _report_dict(self)
@@ -297,6 +305,7 @@ def build_diagnostic_report(
         routing=routing,
         runtime=runtime,
         findings=findings,
+        internal_recovery_fingerprint=recovery_plan.fingerprint,
     )
 
 
@@ -359,7 +368,7 @@ def diagnostic_fingerprint(report: DiagnosticReport) -> str:
         ),
         "recovery_evidence": _state_digest(
             "recovery_evidence",
-            str(report.install_state.get("recovery_fingerprint") or ""),
+            report.recovery_fingerprint,
         ),
     }
     encoded = json.dumps(

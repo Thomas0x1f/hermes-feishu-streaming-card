@@ -76,6 +76,21 @@ def test_card_safe_report_redacts_paths_and_route_ids(tmp_path):
     assert payload["routing"]["chat_id_hash"]
 
 
+def test_report_keeps_full_recovery_fingerprint_internal_and_redacts_output(tmp_path):
+    plan = _recovery_plan(tmp_path, state="owned_incomplete")
+    report = build_diagnostic_report(
+        tmp_path / "config.yaml",
+        {"server": {"host": "127.0.0.1", "port": 8765}},
+        _detection(tmp_path),
+        plan,
+    )
+
+    assert report.recovery_fingerprint == plan.fingerprint
+    assert report.install_state["recovery_fingerprint"] == plan.fingerprint[:12]
+    assert plan.fingerprint not in json.dumps(report.to_dict(), sort_keys=True)
+    assert plan.fingerprint not in json.dumps(report.to_dict(card_safe=True), sort_keys=True)
+
+
 def test_card_safe_report_redacts_secrets_source_text_and_raw_hashes(tmp_path):
     raw_hash = "b" * 64
     report = _report(
