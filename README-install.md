@@ -104,15 +104,15 @@ non-Feishu origins are ignored.
 From V3.9.0, setup accepts explicit `--profile-id`, `--event-url`, and
 `--env-file` routing inputs. For profile and event URL, precedence is explicit
 argument, process environment, selected env file, then the safe default.
-`status` and `doctor` print the redacted route chain to diagnose profile/env
-mismatches. Install/setup automatically repair only known-safe hook state;
+Only `doctor` prints the complete redacted identity/profile/event-endpoint route
+chain; `status` summarizes runtime routing and profile events, while `/health`
+reports routing health. Install/setup automatically repair only known-safe hook state;
 pass `--no-repair` to opt out, and unverifiable user edits are never replaced.
 Feishu/Lark operations cards are an optional UI for diagnosis, recheck, safe
 repair, and restart: private chats do not compare operators, while group
 confirmation stays with the initiating operator. If the card is unavailable,
 use the corresponding CLI command. This does not alter normal card layout or
-footer behavior. PR #84 / @Zanetach contributed the profile env/status routing
-foundation. The transport root is created with private permissions in the
+footer behavior. PR #84 / @Zanetach contributed card progress-status routing and `.env` allowlist expansion for profile environment support. The transport root is created with private permissions in the
 sidecar state directory, so no secret needs to be configured.
 
 Current installers default `PIP_ROOT_USER_ACTION=ignore` so Debian/Ubuntu root

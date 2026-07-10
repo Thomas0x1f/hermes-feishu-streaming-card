@@ -2,7 +2,7 @@
 
 [中文](release-readiness.md) | [English](release-readiness.en.md)
 
-当前包版本为 `3.9.0`。这一版在既有 sidecar-only、V3.8.2 timeline、群聊诊断、话题/cron 路由、Hermes 兼容和 WebSocket 交互基础上加入运维与可靠性基础：profile env/status route-chain（PR #84，贡献者 @Zanetach）、受控运维卡、安全 repair、restart 确认和 lifecycle cleanup。普通流式卡的 footer/layout 不变。
+当前包版本为 `3.9.0`，处于待发布、待验收状态。这一版在既有 sidecar-only、V3.8.2 timeline、群聊诊断、话题/cron 路由、Hermes 兼容和 WebSocket 交互基础上加入运维与可靠性基础：PR #84 / @Zanetach 的卡片 progress-status 路由与 `.env` 白名单扩展的 profile 环境支持、受控运维卡、安全 repair、restart 确认和 lifecycle cleanup。普通流式卡的 footer/layout 不变。
 
 ## 已具备
 
@@ -59,7 +59,7 @@
 - Release assets workflow 会为 tag 生成 macOS/Linux/Windows 安装包和 checksum。
 - V3.9.0 运维卡支持诊断、重新检测、两步安全修复和重启确认；私聊不比较操作者，群聊只允许发起者完成 repair/restart 确认。卡片不可用时使用 CLI fallback。
 - state-dir transport root 会自动创建权限私有的 transport secret，不需要配置 secret，也不在诊断或卡片中输出。
-- setup 的 profile/event URL 优先级为显式参数、进程环境、选定 env file、默认值；`status`、`doctor` 和 `/health` 输出脱敏 route chain/profile diagnostics。
+- setup 的 profile/event URL 优先级为显式参数、进程环境、选定 env file、默认值；仅 `doctor` 输出完整脱敏 identity/profile/event endpoint route chain，`status` 摘要运行时路由/profile 事件，`/health` 报告实际 routing health 字段。
 - install/setup 可自动修复已知安全状态，`--no-repair` 可关闭；无法验证的用户编辑继续拒绝覆盖。cleanup history 和 metrics 保持有界且 hash 化。
 - Task 7 自动化 release gate：`1061 passed, 3 skipped`。
 

@@ -14,10 +14,10 @@ See also: [docs/release-notes-v3.9.0.md](docs/release-notes-v3.9.0.md)
 ### Added
 - Added the operations and reliability foundation: Feishu/Lark operations cards guide diagnosis, two-step safe repair, recheck, and Gateway restart while retaining CLI fallback when operations cards are unavailable.
 - Operations cards preserve ownership boundaries: private chats do not compare operators; group cards require the initiating operator for repair/restart confirmation. Transport authentication uses a zero-configuration secret rooted in the private sidecar state directory.
-- Added profile-aware setup, environment/status route-chain diagnostics, lifecycle cleanup metrics, automatic known-safe repair (with `--no-repair` opt-out), and Hermes/Docker compatibility coverage.
+- Added profile-aware setup, environment diagnostics, lifecycle cleanup metrics, automatic known-safe repair (with `--no-repair` opt-out), and Hermes/Docker compatibility coverage. `doctor` shows the full redacted identity/profile/event-endpoint route chain; `status` summarizes runtime routing/profile events and `/health` reports routing health.
 
 ### Credits
-- PR #84 by @Zanetach contributed the profile environment/status routing foundation used by this release.
+- PR #84 by @Zanetach contributed card progress-status routing and `.env` allowlist expansion for profile environment support.
 
 ### Validation
 - Task 7 automated release gate: `1061 passed, 3 skipped`.

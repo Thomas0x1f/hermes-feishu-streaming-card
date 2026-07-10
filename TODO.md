@@ -10,7 +10,7 @@
 
 - [x] 运维卡覆盖诊断、重新检测、两步安全修复和重启确认；私聊不比较操作者，群聊修复/重启仅允许发起者确认；卡片不可用时保留 CLI fallback。
 - [x] 运输认证零配置：secret 位于权限为私有的 sidecar state-dir transport root，不写入 config 或环境变量。
-- [x] profile setup、环境变量和 `status` route-chain 诊断完成；PR #84 / @Zanetach 提供 profile env/status routing 能力。
+- [x] PR #84 / @Zanetach 随 V3.9.0 完成：卡片 progress-status 路由与 `.env` 白名单扩展的 profile 环境支持。
 - [x] 已知安全的 manifest/backup 状态支持自动 repair，可用 `--no-repair` 关闭；不可验证的用户编辑继续拒绝覆盖。
 - [x] lifecycle cleanup 与有界 metrics 覆盖 runtime state；Hermes/Docker 兼容由自动化回归覆盖。
 - [x] Task 7 release gate 证据：`1061 passed, 3 skipped`；普通卡片 footer/layout 不变。
@@ -176,7 +176,6 @@
 - [ ] 评估卡片 timeline/metrics 的长期兼容边界，并补发布回归清单。
 - [ ] 完全兜住极端 Markdown table 边界：当结构化拆分失败时输出安全折叠提示，避免回退 plain split。
 - [ ] 清理 terminal 后的 closed `FlushController`，并评估更有诊断价值的 queue depth / coalesced backlog 指标。
-- [ ] 下次版本候选：整理 PR #84（贡献者 @Zanetach）的 Feishu card progress status routing 方向，和更多同类状态/安装路由需求一起评估；当前不单独发版。候选范围包括“完成态但内容仍是中间进度时显示 `进行中`”以及 `.env` 白名单读取 `HERMES_FEISHU_CARD_EVENT_URL` / `HERMES_FEISHU_CARD_PROFILE_ID`。
 - [ ] V3.8.x 候选：按真实使用反馈补充更多 Hermes 原生 notice 分类、去重策略和中英文文案微调。
 - [ ] V3.9 候选：Docker 完整运维体验（镜像内安装、外部 Hermes 目录挂载、doctor 一键诊断、升级流程）。
 - [ ] V3.9 候选：群聊体验后续（可视化配置向导、更多真实 E2E fixture、跨群会话迁移策略）。

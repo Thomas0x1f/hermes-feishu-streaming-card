@@ -165,7 +165,7 @@ bash install-docker.sh
 
 | 版本 | 重点 |
 |---|---|
-| [v3.9.0](docs/release-notes-v3.9.0.md) | 运维与可靠性基础：profile env/status 路由（PR #84，贡献者 @Zanetach）、安全修复/重启运维卡与 CLI fallback；普通 footer/layout 不变 |
+| [v3.9.0](docs/release-notes-v3.9.0.md) | 运维与可靠性基础：PR #84 / @Zanetach 的卡片 progress-status 路由与 `.env` 白名单扩展的 profile 环境支持、安全修复/重启运维卡与 CLI fallback；普通流式卡的 footer/layout 保持不变 |
 | [v3.8.18](docs/release-notes-v3.8.18.md) | cron 卡片携带 `thread_id` 回到飞书话题原线程（PR #91，贡献者 @colinaaa） |
 | [v3.8.17](docs/release-notes-v3.8.17.md) | cron `deliver=origin/all` 等路由意图会解析到飞书目标并发送卡片 |
 | [v3.8.16](docs/release-notes-v3.8.16.md) | 话题群连续消息复用 `message_id` 时，第二条及后续消息会重新发送卡片 |
@@ -220,7 +220,7 @@ Hermes Gateway
 - [colinaaa](https://github.com/colinaaa) - [PR #88](https://github.com/baileyh8/hermes-feishu-streaming-card/pull/88) 话题群 `message_id` 复用下第二轮消息新卡片修复
 - [colinaaa](https://github.com/colinaaa) - [PR #91](https://github.com/baileyh8/hermes-feishu-streaming-card/pull/91) cron 结果回到飞书话题群原线程的 `thread_id` 路由修复
 - [zayn-0101](https://github.com/zayn-0101) - [PR #77](https://github.com/baileyh8/hermes-feishu-streaming-card/pull/77) cron `deliver=origin/all` 路由意图卡片投递修复
-- [Zanetach](https://github.com/Zanetach) - [PR #84](https://github.com/baileyh8/hermes-feishu-streaming-card/pull/84) profile 环境变量与 `status` 路由链路能力（V3.9.0）
+- [Zanetach](https://github.com/Zanetach) - [PR #84](https://github.com/baileyh8/hermes-feishu-streaming-card/pull/84) 卡片 progress-status 路由与 `.env` 白名单扩展的 profile 环境支持（V3.9.0）
 
 ## 安全说明
 

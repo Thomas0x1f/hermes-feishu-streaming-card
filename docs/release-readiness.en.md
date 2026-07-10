@@ -2,7 +2,7 @@
 
 [中文](release-readiness.md) | [English](release-readiness.en.md)
 
-Current package version: `3.9.0`. Building on the sidecar-only, V3.8.2 timeline, group diagnostics, topic/cron routing, Hermes compatibility, and WebSocket interaction work, this release adds an operations/reliability foundation: profile env/status route chains (PR #84, contributed by @Zanetach), bounded operations cards, safe repair, restart confirmation, and lifecycle cleanup. Normal streaming-card footer/layout is unchanged.
+Current package version: `3.9.0`; it is pending release and acceptance. Building on the sidecar-only, V3.8.2 timeline, group diagnostics, topic/cron routing, Hermes compatibility, and WebSocket interaction work, this release candidate adds an operations/reliability foundation: card progress-status routing and `.env` allowlist expansion for profile environment support (PR #84, contributed by @Zanetach), bounded operations cards, safe repair, restart confirmation, and lifecycle cleanup. Normal streaming-card footer/layout is unchanged.
 
 ## Ready
 
@@ -59,7 +59,7 @@ Current package version: `3.9.0`. Building on the sidecar-only, V3.8.2 timeline,
 - Release assets workflow packages macOS/Linux/Windows installers and checksums for tags.
 - V3.9.0 operations cards support diagnosis, recheck, two-step safe repair, and restart confirmation; private chats do not compare operators, while group repair/restart confirmation stays with the initiator. Use CLI fallback when the card is unavailable.
 - The state-dir transport root automatically creates a private-permission transport secret. No secret configuration is required, and diagnostics/cards never output it.
-- Setup resolves profile/event URL by explicit argument, process environment, selected env file, then default; `status`, `doctor`, and `/health` emit redacted route-chain/profile diagnostics.
+- Setup resolves profile/event URL by explicit argument, process environment, selected env file, then default; only `doctor` shows the complete redacted identity/profile/event-endpoint route chain, `status` summarizes runtime routing/profile events, and `/health` reports actual routing-health fields.
 - Install/setup can automatically repair known-safe state; `--no-repair` opts out, and unverifiable user edits remain refused. Cleanup history and metrics are bounded and hashed.
 - Task 7 automated release gate: `1061 passed, 3 skipped`.
 
