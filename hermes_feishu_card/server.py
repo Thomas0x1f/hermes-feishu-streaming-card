@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from contextlib import suppress
 import hashlib
 import os
 import time
@@ -14,6 +15,7 @@ from aiohttp import web
 from .bots import RouteResult
 from .events import EventValidationError, SidecarEvent
 from .flush import FlushController
+from .lifecycle import cleanup_closed_controller, cleanup_runtime_state
 from .metrics import SidecarMetrics
 from .render import render_card
 from .session import CardSession
@@ -36,8 +38,10 @@ FOOTER_FIELDS_KEY = web.AppKey("footer_fields", Any)
 CARD_TITLE_KEY = web.AppKey("card_title", str)
 BASE_CARD_CONFIG_KEY = web.AppKey("base_card_config", dict)
 FLUSH_CONTROLLERS_KEY = web.AppKey("flush_controllers", dict)
+CLEANUP_TASK_KEY = web.AppKey("cleanup_task", asyncio.Task)
 UPDATE_MAX_ATTEMPTS = 3
 UPDATE_MIN_INTERVAL_SECONDS = 0.2
+RUNTIME_CLEANUP_INTERVAL_SECONDS = 60.0
 TERMINAL_EVENTS = {"message.completed", "message.failed"}
 SESSION_CREATING_EVENTS = {
     "thinking.delta",
@@ -93,7 +97,34 @@ def create_app(
     app.router.add_post("/card/actions", _card_actions)
     app.router.add_post("/commands", _commands)
     app.router.add_post("/events", _events)
+    app.on_startup.append(_start_runtime_cleanup)
+    app.on_cleanup.append(_stop_runtime_cleanup)
     return app
+
+
+async def _start_runtime_cleanup(app: web.Application) -> None:
+    task = app.get(CLEANUP_TASK_KEY)
+    if task is None or task.done():
+        app[CLEANUP_TASK_KEY] = asyncio.create_task(_runtime_cleanup_loop(app))
+
+
+async def _stop_runtime_cleanup(app: web.Application) -> None:
+    task = app.get(CLEANUP_TASK_KEY)
+    if task is None:
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
+async def _runtime_cleanup_loop(app: web.Application) -> None:
+    while True:
+        await _cleanup_sleep(RUNTIME_CLEANUP_INTERVAL_SECONDS)
+        cleanup_runtime_state(app, time.time())
+
+
+async def _cleanup_sleep(delay: float) -> None:
+    await asyncio.sleep(delay)
 
 
 async def _health(request: web.Request) -> web.Response:
@@ -327,6 +358,8 @@ async def _events(request: web.Request) -> web.Response:
         response, post_lock_task = await _apply_event_locked(request, event)
     if post_lock_task is not None and _should_await_card_update(event):
         await post_lock_task
+    if event.event in TERMINAL_EVENTS and post_lock_task is None:
+        cleanup_runtime_state(request.app, time.time())
     return response
 
 
@@ -837,6 +870,14 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
             await controller.drain(_final_drain_timeout_seconds(request.app, session_key))
             current_task = controller.schedule(_render_and_update, terminal=True)
             controller.close()
+            current_task.add_done_callback(
+                lambda task: _post_terminal_cleanup(
+                    request.app,
+                    session_key,
+                    controller,
+                    task,
+                )
+            )
         else:
             current_task = controller.schedule(_render_and_update, terminal=False)
         post_lock_task = current_task
@@ -851,6 +892,26 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
             _session_key(event),
         )
     return web.json_response(response_payload), post_lock_task
+
+
+def _post_terminal_cleanup(
+    app: web.Application,
+    session_key: str,
+    controller: FlushController,
+    task: asyncio.Task[None],
+) -> None:
+    if task.cancelled():
+        return
+    try:
+        error = task.exception()
+    except asyncio.CancelledError:
+        return
+    if error is not None:
+        logger.warning("terminal card update task failed", exc_info=error)
+        return
+    now = time.time()
+    cleanup_closed_controller(app, session_key, controller, now=now)
+    cleanup_runtime_state(app, now)
 
 
 def _store_interaction_result(app: web.Application, session: CardSession) -> None:

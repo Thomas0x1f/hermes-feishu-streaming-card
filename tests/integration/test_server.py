@@ -6,7 +6,26 @@ from aiohttp.test_utils import TestClient, TestServer
 from hermes_feishu_card.bots import RouteResult
 from hermes_feishu_card import flush as flush_module
 from hermes_feishu_card import server as sidecar_server
-from hermes_feishu_card.server import FEISHU_MESSAGE_IDS_KEY, create_app
+from hermes_feishu_card.flush import FlushController
+from hermes_feishu_card.lifecycle import (
+    cleanup_closed_controller,
+    cleanup_runtime_state,
+)
+from hermes_feishu_card.session import CardSession, InteractionState
+from hermes_feishu_card.server import (
+    CLEANUP_TASK_KEY,
+    DIAGNOSTICS_KEY,
+    FEISHU_MESSAGE_IDS_KEY,
+    FLUSH_CONTROLLERS_KEY,
+    MESSAGE_BOT_IDS_KEY,
+    MESSAGE_LOCKS_KEY,
+    METRICS_KEY,
+    RUNTIME_CLEANUP_INTERVAL_SECONDS,
+    SESSION_ALIASES_KEY,
+    SESSION_CARD_CONFIGS_KEY,
+    SESSIONS_KEY,
+    create_app,
+)
 
 
 _REAL_ASYNCIO_SLEEP = asyncio.sleep
@@ -185,6 +204,171 @@ async def test_health_reports_healthy_status_and_active_sessions(client):
     assert body["reply_index"] == {"entries": 0, "last_lookup": {}}
     assert body["cron"] == {"cards_sent": 0, "fallbacks": 0}
     assert body["profile_diagnostics"] == {}
+
+
+def test_cleanup_runtime_state_removes_related_state_and_counts_once():
+    app = create_app(FakeFeishuClient())
+    session_key = "profile:om_terminal"
+    alias_key = "profile:om_reply"
+    session = CardSession("oc_1", "om_terminal", "oc_1")
+    session.status = "completed"
+    session.updated_at = 100.0
+    controller = FlushController(interval_seconds=0.2, metrics=app[METRICS_KEY])
+    controller.close()
+    app[SESSIONS_KEY][session_key] = session
+    app[SESSION_ALIASES_KEY][alias_key] = session_key
+    app[MESSAGE_LOCKS_KEY][session_key] = asyncio.Lock()
+    app[MESSAGE_LOCKS_KEY][alias_key] = asyncio.Lock()
+    app[FEISHU_MESSAGE_IDS_KEY][session_key] = "om_card"
+    app[MESSAGE_BOT_IDS_KEY][session_key] = "profile:default"
+    app[SESSION_CARD_CONFIGS_KEY][session_key] = {"title": "Card"}
+    app[FLUSH_CONTROLLERS_KEY][session_key] = controller
+
+    result = cleanup_runtime_state(app, now=3700.0)
+
+    assert result.session_keys == (session_key,)
+    assert result.reasons == ("terminal_retention_expired",)
+    assert result.controllers_collected == 1
+    for state in (
+        app[SESSIONS_KEY],
+        app[SESSION_ALIASES_KEY],
+        app[MESSAGE_LOCKS_KEY],
+        app[FEISHU_MESSAGE_IDS_KEY],
+        app[MESSAGE_BOT_IDS_KEY],
+        app[SESSION_CARD_CONFIGS_KEY],
+        app[FLUSH_CONTROLLERS_KEY],
+    ):
+        assert session_key not in state
+        assert alias_key not in state
+    assert app[METRICS_KEY].sessions_collected == 1
+    assert app[METRICS_KEY].zombie_sessions_collected == 0
+    assert app[METRICS_KEY].flush_controllers_collected == 1
+    assert session_key not in str(app[DIAGNOSTICS_KEY]["cleanup_history"])
+    assert app[DIAGNOSTICS_KEY]["cleanup_history"][-1]["session_key_hash"]
+
+    assert cleanup_runtime_state(app, now=9999.0).session_keys == ()
+    assert app[METRICS_KEY].sessions_collected == 1
+    assert app[METRICS_KEY].flush_controllers_collected == 1
+
+
+async def test_cleanup_runtime_state_keeps_active_interactions_and_inflight_aliases():
+    app = create_app(FakeFeishuClient())
+    interaction_key = "om_interaction"
+    inflight_key = "om_inflight"
+    inflight_alias = "om_inflight_reply"
+    interaction = CardSession("oc_1", interaction_key, "oc_1")
+    interaction.updated_at = 0.0
+    interaction.active_interaction = InteractionState(
+        interaction_id="approval-1",
+        kind="approval",
+        prompt="允许吗？",
+    )
+    inflight = CardSession("oc_1", inflight_key, "oc_1")
+    inflight.status = "failed"
+    inflight.updated_at = 0.0
+    alias_lock = asyncio.Lock()
+    await alias_lock.acquire()
+    app[SESSIONS_KEY].update(
+        {interaction_key: interaction, inflight_key: inflight}
+    )
+    app[SESSION_ALIASES_KEY][inflight_alias] = inflight_key
+    app[MESSAGE_LOCKS_KEY][inflight_alias] = alias_lock
+
+    try:
+        result = cleanup_runtime_state(app, now=5000.0)
+    finally:
+        alias_lock.release()
+
+    assert result.session_keys == ()
+    assert set(app[SESSIONS_KEY]) == {interaction_key, inflight_key}
+    assert app[METRICS_KEY].sessions_collected == 0
+
+
+def test_cleanup_history_is_hashed_and_bounded_to_fifty_entries():
+    app = create_app(FakeFeishuClient())
+    raw_keys = []
+    for index in range(55):
+        session_key = f"private-session-{index}"
+        raw_keys.append(session_key)
+        session = CardSession("oc_1", session_key, "oc_1")
+        session.status = "failed"
+        session.updated_at = 0.0
+        app[SESSIONS_KEY][session_key] = session
+
+    result = cleanup_runtime_state(app, now=3600.0)
+
+    history = app[DIAGNOSTICS_KEY]["cleanup_history"]
+    assert len(result.session_keys) == 55
+    assert len(history) == 50
+    assert app[METRICS_KEY].sessions_collected == 55
+    assert not any(raw_key in str(history) for raw_key in raw_keys)
+
+
+def test_closed_controller_cleanup_requires_same_instance():
+    app = create_app(FakeFeishuClient())
+    session_key = "om_reused"
+    old = FlushController(interval_seconds=0.2, metrics=app[METRICS_KEY])
+    replacement = FlushController(interval_seconds=0.2, metrics=app[METRICS_KEY])
+    old.close()
+    app[FLUSH_CONTROLLERS_KEY][session_key] = replacement
+
+    assert not cleanup_closed_controller(app, session_key, old, now=100.0)
+    assert app[FLUSH_CONTROLLERS_KEY][session_key] is replacement
+    assert app[METRICS_KEY].flush_controllers_collected == 0
+
+
+async def test_terminal_update_removes_its_closed_controller(client):
+    test_client, feishu_client = client
+
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    await test_client.post(
+        "/events",
+        json=event_payload("message.completed", 1, {"answer": "最终答案"}),
+    )
+    await wait_for_card_update(feishu_client, "最终答案")
+    for _ in range(20):
+        if "hermes-message-1" not in test_client.app[FLUSH_CONTROLLERS_KEY]:
+            break
+        await _REAL_ASYNCIO_SLEEP(0)
+
+    assert "hermes-message-1" not in test_client.app[FLUSH_CONTROLLERS_KEY]
+    assert test_client.app[METRICS_KEY].flush_controllers_collected == 1
+
+
+async def test_runtime_cleanup_starts_one_sixty_second_task_and_cancels_it(monkeypatch):
+    delays = []
+    second_sleep_started = asyncio.Event()
+
+    async def fake_cleanup_sleep(delay):
+        delays.append(delay)
+        if len(delays) == 1:
+            return
+        second_sleep_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(sidecar_server, "_cleanup_sleep", fake_cleanup_sleep)
+    app = create_app(FakeFeishuClient())
+    zombie = CardSession("oc_1", "om_zombie", "oc_1")
+    zombie.updated_at = 0.0
+    app[SESSIONS_KEY]["om_zombie"] = zombie
+    test_client = TestClient(TestServer(app))
+
+    await test_client.start_server()
+    task = app[CLEANUP_TASK_KEY]
+    await asyncio.wait_for(second_sleep_started.wait(), timeout=1.0)
+    try:
+        assert delays == [
+            RUNTIME_CLEANUP_INTERVAL_SECONDS,
+            RUNTIME_CLEANUP_INTERVAL_SECONDS,
+        ]
+        assert RUNTIME_CLEANUP_INTERVAL_SECONDS == 60.0
+        assert "om_zombie" not in app[SESSIONS_KEY]
+        assert app[METRICS_KEY].zombie_sessions_collected == 1
+        assert not task.done()
+    finally:
+        await test_client.close()
+
+    assert task.cancelled()
 
 
 async def test_hfc_help_command_sends_read_only_diagnostic_card(client):
