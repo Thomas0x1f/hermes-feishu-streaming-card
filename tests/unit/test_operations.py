@@ -787,9 +787,10 @@ def test_operations_card_places_actions_before_existing_divider_and_footer():
         "operations_row_1",
     ]
     assert all(row["flex_mode"] == "none" for row in rows)
+    assert all(row["horizontal_spacing"] == "8px" for row in rows)
     assert all(len(row["columns"]) == 2 for row in rows)
     assert all(
-        column["width"] == "weighted" and column["weight"] == 1
+        column["width"] == "auto" and "weight" not in column
         for row in rows
         for column in row["columns"]
     )

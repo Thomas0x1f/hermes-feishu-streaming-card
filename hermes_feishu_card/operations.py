@@ -772,8 +772,7 @@ def _operation_button_rows(
                 "columns": [
                     {
                         "tag": "column",
-                        "width": "weighted",
-                        "weight": 1,
+                        "width": "auto",
                         "vertical_align": "top",
                         "elements": [button],
                     }
