@@ -1364,6 +1364,10 @@ async def _hfc_try_resume_picker(
         source = getattr(event, "source", None)
         if source is None or _platform_name({}, source) != "feishu":
             return False
+        chat_type = str(getattr(source, "chat_type", "") or "").strip().lower()
+        if chat_type not in {"", "dm", "p2p", "private"}:
+            if not _hfc_resume_operator_open_id(event):
+                return False
         session_db = getattr(runner, "_session_db", None)
         list_sessions = getattr(session_db, "list_sessions_rich", None)
         if not callable(list_sessions):

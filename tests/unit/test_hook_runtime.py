@@ -2063,15 +2063,15 @@ def test_resume_picker_fails_open_to_original_handler():
             self.original_calls.append(event.text)
             return "native resume fallback"
 
-    async def exercise(text, platform, rows):
+    async def exercise(text, platform, rows, *, chat_type="dm", user_id="ou_user"):
         runner = DummyRunner(rows)
         event = SimpleNamespace(
             text=text,
             source=SimpleNamespace(
                 platform=platform,
                 chat_id="oc_abc",
-                chat_type="dm",
-                user_id="ou_user",
+                chat_type=chat_type,
+                user_id=user_id,
             ),
             get_command_args=lambda: text.partition(" ")[2],
         )
@@ -2089,6 +2089,18 @@ def test_resume_picker_fails_open_to_original_handler():
         runner, result = asyncio.run(exercise(text, platform, rows))
         assert result == "native resume fallback"
         assert runner.original_calls == [text]
+
+    runner, result = asyncio.run(
+        exercise(
+            "/resume",
+            "feishu",
+            [{"id": "session-1", "title": "One"}],
+            chat_type="group",
+            user_id="tenant_user_without_open_id",
+        )
+    )
+    assert result == "native resume fallback"
+    assert runner.original_calls == ["/resume"]
 
 
 def test_resume_picker_callback_acks_then_uses_original_security_path(monkeypatch):
