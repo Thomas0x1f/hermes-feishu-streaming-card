@@ -12,10 +12,12 @@ import pytest
 
 from hermes_feishu_card.diagnostics import DiagnosticFinding, DiagnosticReport
 from hermes_feishu_card.diagnostics import build_diagnostic_report
+from hermes_feishu_card.diagnostics import _CARD_FINDING_CODES
 from hermes_feishu_card.install.detect import detect_hermes
 from hermes_feishu_card.install.patcher import apply_patch
 from hermes_feishu_card.install.recovery import execute_recovery, plan_recovery
 from hermes_feishu_card.operations import (
+    _FINDING_COPY,
     _operation_buttons,
     OperationRejected,
     OperationStore,
@@ -1039,6 +1041,18 @@ def test_operations_card_uses_static_safe_finding_copy_and_details_state():
     assert "查看诊断" not in action_labels(details)
     for sensitive in ("TOKEN=", "/private/token", "/private/route", "/private/key", "secret impact"):
         assert sensitive not in details_text
+
+
+def test_operations_finding_copy_covers_every_card_safe_diagnostic_code():
+    assert _CARD_FINDING_CODES <= set(_FINDING_COPY)
+    for code in _CARD_FINDING_CODES:
+        summary, detail = _FINDING_COPY[code]
+        assert summary.strip()
+        assert detail.strip()
+        assert not any(
+            sensitive in f"{summary}\n{detail}".lower()
+            for sensitive in ("/private/", "token", "manifest.json", "gateway/run.py")
+        )
 
 
 def test_operations_card_places_actions_before_existing_divider_and_footer():
