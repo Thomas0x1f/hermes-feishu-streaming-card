@@ -12,6 +12,10 @@ from .status import StatusConfig, resolve_display_status
 from .text import StreamingTextNormalizer, normalize_stream_text
 
 
+MIN_COMPLETED_SUFFIX_CHARS = 20
+MIN_COMPLETED_SUFFIX_RATIO_DENOMINATOR = 5
+
+
 def _now() -> float:
     return time.time()
 
@@ -259,7 +263,8 @@ class CardSession:
             # trailing punctuation), the preface IS the answer — don't
             # archive it into reasoning.  (#96)
             if final.startswith(preface) and (
-                stripped == final or len(stripped) <= max(20, len(final) // 5)
+                stripped == final
+                or not _has_substantial_completed_suffix(final, stripped)
             ):
                 self._answer_archive_index = None
                 return final
@@ -272,7 +277,9 @@ class CardSession:
             # substantial — i.e. the preface was a short intro and the real
             # answer follows.  If stripped is tiny relative to final, the
             # "preface" IS the answer and should not be archived.  (#96)
-            if stripped != final and len(stripped) > max(20, len(final) // 5):
+            if stripped != final and _has_substantial_completed_suffix(
+                final, stripped
+            ):
                 self._archive_current_answer_to_reasoning()
                 return stripped
             return final
@@ -421,6 +428,14 @@ def _notice_level(value: Any) -> str:
     if level in {"ok", "done", "green"}:
         return "success"
     return "info"
+
+
+def _has_substantial_completed_suffix(final: str, stripped: str) -> bool:
+    threshold = max(
+        MIN_COMPLETED_SUFFIX_CHARS,
+        len(final) // MIN_COMPLETED_SUFFIX_RATIO_DENOMINATOR,
+    )
+    return len(stripped) > threshold
 
 
 def _strip_preface_prefix(final: str, preface: str) -> str:

@@ -167,10 +167,7 @@ class TestThresholdBoundary:
         session.apply(_event("message.completed", 3, {"answer": final_text}))
 
         assert session.status == "completed"
-        # At exactly threshold (25 == 25), condition is NOT satisfied (need >)
-        # so it should NOT archive via this path — falls through to the
-        # unconditional tool archive below
-        # The key point: it doesn't incorrectly strip to just the 25-char suffix
+        assert session.answer_text == final_text
 
     def test_stripped_one_above_threshold_archives(self):
         """len(stripped) == max(20, len(final)//5) + 1 → should archive."""
