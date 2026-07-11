@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import logging
 from pathlib import Path
 import secrets
 import threading
@@ -463,6 +464,85 @@ async def test_new_turn_abandons_interrupted_session_in_same_conversation(client
 
     assert test_client.app[SESSIONS_KEY]["message-interrupted"].status == "completed"
     assert test_client.app[SESSIONS_KEY]["message-follow-up"].status == "thinking"
+
+
+async def test_interrupted_terminal_update_cannot_be_overwritten_by_stale_delta():
+    feishu_client = ReorderingFeishuClient()
+    app = create_app(feishu_client, card_config={"flush_interval_ms": 0})
+    test_client = TestClient(TestServer(app))
+    await test_client.start_server()
+    first = {
+        "conversation_id": "conversation-race",
+        "message_id": "message-race-old",
+    }
+    second = {
+        "conversation_id": "conversation-race",
+        "message_id": "message-race-new",
+    }
+    try:
+        await test_client.post(
+            "/events",
+            json=event_payload("message.started", 0, **first),
+        )
+        await test_client.post(
+            "/events",
+            json=event_payload("answer.delta", 1, {"text": "stale delta"}, **first),
+        )
+        await _wait_until(lambda: feishu_client.update_calls == 1)
+
+        await test_client.post(
+            "/events",
+            json=event_payload("message.started", 0, **second),
+        )
+        await _wait_until(
+            lambda: len(
+                [
+                    card
+                    for message_id, card in feishu_client.updated
+                    if message_id == "feishu-message-1"
+                ]
+            )
+            >= 2
+        )
+    finally:
+        await test_client.close()
+
+    old_card_updates = [
+        card
+        for message_id, card in feishu_client.updated
+        if message_id == "feishu-message-1"
+    ]
+    assert "已完成" in str(old_card_updates[-1])
+
+
+async def test_interrupted_session_log_does_not_expose_chat_id(client, caplog):
+    test_client, _feishu_client = client
+    chat_id = "oc_sensitive_interrupt_chat"
+
+    with caplog.at_level(logging.INFO, logger=sidecar_server.__name__):
+        await test_client.post(
+            "/events",
+            json=event_payload(
+                "message.started",
+                0,
+                conversation_id="conversation-log",
+                message_id="message-log-old",
+                chat_id=chat_id,
+            ),
+        )
+        await test_client.post(
+            "/events",
+            json=event_payload(
+                "message.started",
+                0,
+                conversation_id="conversation-log",
+                message_id="message-log-new",
+                chat_id=chat_id,
+            ),
+        )
+
+    assert chat_id not in caplog.text
+    assert sidecar_server._diagnostic_id_hash(chat_id) in caplog.text
 
 
 async def _wait_until(predicate, attempts=80):
@@ -5811,6 +5891,14 @@ async def test_terminal_event_on_abandoned_session_returns_applied_true(client):
         "/events",
         json=event_payload("answer.delta", 0, {"text": "新回答"}, **msg2),
     )
+    await wait_for_card_update(feishu_client, "已完成")
+    old_updates_before_late_terminal = len(
+        [
+            card
+            for message_id, card in feishu_client.updated
+            if message_id == "feishu-message-1"
+        ]
+    )
 
     # Now send message.completed for the OLD session — should report applied=True
     response = await test_client.post(
@@ -5818,8 +5906,17 @@ async def test_terminal_event_on_abandoned_session_returns_applied_true(client):
         json=event_payload("message.completed", 2, {"answer": "最终答案"}, **msg1),
     )
     result = await response.json()
+    await asyncio.sleep(0.05)
     assert result["ok"] is True
     assert result["applied"] is True
+    old_updates_after_late_terminal = len(
+        [
+            card
+            for message_id, card in feishu_client.updated
+            if message_id == "feishu-message-1"
+        ]
+    )
+    assert old_updates_after_late_terminal == old_updates_before_late_terminal
 
 
 async def test_interrupt_abandon_does_not_affect_completed_sessions(client):
