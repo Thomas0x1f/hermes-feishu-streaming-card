@@ -82,4 +82,5 @@
 - [x] Send `/hfc doctor`; verify no gray Unknown command.
 - [x] Click `重新检测`; verify no timeout toast, an immediate in-progress card, and one later same-card update.
 - [x] Verify `安全修复` first-step confirmation remains immediate; execute repair only against an isolated Hermes sandbox and cancel before actual Gateway restart.
+- [x] Execute the confirmed Gateway restart from the sandbox-backed card; verify an immediate progress card and a later same-card completion result.
 - [x] Record private-chat acceptance and leave group same/different-operator smoke as a separate explicit gate when no safe test group is available.
