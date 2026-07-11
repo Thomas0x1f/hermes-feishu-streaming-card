@@ -99,6 +99,9 @@ MAX_STALE_OPERATIONS_REPUBLISHES = 1
 MAX_CONCURRENT_OPERATION_DIAGNOSTICS = 4
 OPERATIONS_DIAGNOSTIC_TIMEOUT_SECONDS = 12.0
 RESTART_CALLBACK_GRACE_SECONDS = 0.25
+_STABLE_PROFILE_SOURCES = frozenset(
+    {"env", "fallback_default", "hermes_home", "locals", "sanitized_env"}
+)
 TERMINAL_EVENTS = {"message.completed", "message.failed"}
 SESSION_CREATING_EVENTS = {
     "thinking.delta",
@@ -253,6 +256,9 @@ async def _stop_operations_diagnostics(app: web.Application) -> None:
     for future in mutation_futures:
         future.cancel()
     tasks = list(app[OPERATIONS_DIAGNOSTIC_TASKS_KEY])
+    if not mutation_futures:
+        for task in tasks:
+            task.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
     app[OPERATIONS_DIAGNOSTIC_TASKS_KEY].clear()
@@ -1117,6 +1123,12 @@ def _operation_report_snapshot(operation: OperationRecord) -> DiagnosticReport:
     return operation.report or _failed_operations_report(operation.profile_id)
 
 
+def _operation_profile_source(operation: OperationRecord) -> str:
+    routing = operation.report.routing if operation.report is not None else {}
+    source = str(routing.get("profile_source") or "") if isinstance(routing, dict) else ""
+    return source if source in _STABLE_PROFILE_SOURCES else "fallback_default"
+
+
 def _operation_evidence_matches(
     operation: OperationRecord, report: DiagnosticReport
 ) -> bool:
@@ -1173,7 +1185,7 @@ async def _run_operations_recheck(
         report, _detection = await _bounded_operations_report(
             app,
             profile_id=operation.profile_id,
-            profile_source="recheck",
+            profile_source=_operation_profile_source(operation),
             preparing_operation_id=operation.operation_id,
         )
     except asyncio.CancelledError:
@@ -1227,7 +1239,7 @@ async def _run_operations_repair(
         report, detection = await _bounded_operations_report(
             app,
             profile_id=operation.profile_id,
-            profile_source="confirm_repair",
+            profile_source=_operation_profile_source(operation),
         )
     except asyncio.CancelledError:
         raise
@@ -1275,7 +1287,7 @@ async def _run_operations_repair(
         post_repair_report, _post_repair_detection = await _bounded_operations_report(
             app,
             profile_id=operation.profile_id,
-            profile_source="post_repair",
+            profile_source=_operation_profile_source(operation),
         )
         post_repair_available = _operations_report_available(post_repair_report)
     except asyncio.CancelledError:
@@ -1335,7 +1347,7 @@ async def _run_operations_restart(
         report, detection = await _bounded_operations_report(
             app,
             profile_id=operation.profile_id,
-            profile_source="confirm_restart",
+            profile_source=_operation_profile_source(operation),
         )
     except asyncio.CancelledError:
         raise

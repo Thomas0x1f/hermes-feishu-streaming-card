@@ -206,6 +206,7 @@ def operations_report(
     report_marker="report-a",
     recovery_fingerprint="recovery-a",
     executable=True,
+    profile_source="",
 ):
     return DiagnosticReport(
         status="warning",
@@ -218,7 +219,7 @@ def operations_report(
             "recovery_executable": executable,
             "recovery_fingerprint": recovery_fingerprint,
         },
-        routing={"profile_id": "default"},
+        routing={"profile_id": "default", "profile_source": profile_source},
         runtime={},
         findings=(
             DiagnosticFinding(
@@ -1393,7 +1394,7 @@ async def test_recheck_callback_returns_preparing_card_before_blocked_report_and
 
     def blocked_report(*args, **kwargs):
         calls.append(args[3])
-        if args[3] == "recheck":
+        if args[3] == "fallback_default":
             recheck_started.set()
             release_recheck.wait(2.0)
         return report, SimpleNamespace(root=Path("/private/hermes"))
@@ -1443,7 +1444,7 @@ async def test_recheck_callback_returns_preparing_card_before_blocked_report_and
     assert "正在重新检测" in str(first_body["card"])
     assert first_body["operation_id"] == repeated_body["operation_id"]
     assert first_body["operation_id"] != original_id
-    assert calls == ["", "recheck"]
+    assert calls == ["", "fallback_default"]
     assert len(feishu_client.sent) == 1
     assert len(feishu_client.updated) == 1
 
@@ -1460,7 +1461,7 @@ async def test_same_fingerprint_slow_recheck_patch_keeps_one_worker_and_links_ol
     def build_report(*args, **_kwargs):
         profile_source = args[3]
         calls.append(profile_source)
-        if profile_source == "recheck" and calls.count("recheck") > 1:
+        if profile_source == "fallback_default" and calls.count("fallback_default") > 1:
             unexpected_second_recheck.set()
         return report, SimpleNamespace(root=Path("/private/hermes"))
 
@@ -1526,7 +1527,7 @@ async def test_same_fingerprint_slow_recheck_patch_keeps_one_worker_and_links_ol
     assert first.status == 200
     assert repeated.status == 200
     assert after_failure.status == 200
-    assert calls == ["", "recheck"]
+    assert calls == ["", "fallback_default"]
     assert repeated_body["operation_id"] != preparing_id
     assert after_failure_body["operation_id"] == repeated_body["operation_id"]
     assert "诊断摘要" in str(after_failure_body["card"])
@@ -1605,7 +1606,7 @@ async def test_confirm_repair_returns_executing_card_before_fresh_evidence_and_r
 
     def blocked_report(*args, **kwargs):
         calls.append(args[3])
-        if args[3] == "confirm_repair":
+        if args[3] == "fallback_default":
             fresh_started.set()
             release_fresh.wait(2.0)
         return report, SimpleNamespace(root=Path("/private/hermes"))
@@ -1664,7 +1665,7 @@ async def test_confirm_repair_returns_executing_card_before_fresh_evidence_and_r
     assert elapsed < 0.5
     assert "正在安全修复" in str(first_body["card"])
     assert first_body["operation_id"] == repeated_body["operation_id"]
-    assert calls == ["", "confirm_repair", "post_repair"]
+    assert calls == ["", "fallback_default", "fallback_default"]
     assert len(executions) == 1
     assert len(feishu_client.sent) == 1
     assert len(feishu_client.updated) == 1
@@ -2016,7 +2017,7 @@ async def test_repair_timeout_renders_failed_diagnostic_successor(monkeypatch):
     diagnostic_release = threading.Event()
 
     def blocked_report(*args, **kwargs):
-        if args[3] == "confirm_repair":
+        if args[3] == "fallback_default":
             diagnostic_started.set()
             diagnostic_release.wait(0.5)
         return report, SimpleNamespace(root=Path("/private/hermes"))
@@ -2830,11 +2831,106 @@ async def test_successful_repair_builds_successor_from_post_mutation_report(monk
     await sidecar_server._run_operations_repair(app, operation)
 
     successor = next(iter(store._records.values()))
-    assert calls == ["confirm_repair", "post_repair"]
+    assert calls == ["fallback_default", "fallback_default"]
     assert successor.report is repaired
     assert successor.report_fingerprint == repaired.fingerprint
     assert successor.recovery_fingerprint == repaired.recovery_fingerprint
     assert successor.result["restart_available"] is True
+
+
+async def test_background_operations_reuse_snapshot_profile_source_for_fingerprint(monkeypatch):
+    feishu_client = FakeFeishuClient()
+    claimed = operations_report(profile_source="fallback_default")
+    app = create_app(feishu_client)
+    store = app[sidecar_server.OPERATIONS_STORE_KEY]
+    operation = store.create(
+        chat_id="oc_private", profile_id="default",
+        report_fingerprint=claimed.fingerprint,
+        recovery_fingerprint=claimed.recovery_fingerprint,
+        group=False, transport_secret=b"r" * 32,
+    )
+    operation.report = claimed
+    operation.state = "executing"
+    sidecar_server._store_operation_delivery(
+        app, operation.operation_id, {"message_id": "feishu-message", "bot_id": None}
+    )
+    sources = []
+    executed = []
+
+    async def reports(_app, *, profile_source, **_kwargs):
+        sources.append(profile_source)
+        return claimed, SimpleNamespace(root=Path("/private/hermes"))
+
+    monkeypatch.setattr(sidecar_server, "_bounded_operations_report", reports)
+    monkeypatch.setattr(
+        sidecar_server, "execute_recovery",
+        lambda *args: executed.append(args) or SimpleNamespace(status="repaired"),
+    )
+    monkeypatch.setattr(sidecar_server.shutil, "which", lambda _command: None)
+
+    await sidecar_server._run_operations_repair(app, operation)
+
+    recheck = store.create(
+        chat_id="oc_private", profile_id="default",
+        report_fingerprint=claimed.fingerprint,
+        recovery_fingerprint=claimed.recovery_fingerprint,
+        group=False, transport_secret=b"s" * 32,
+    )
+    recheck.report = claimed
+    recheck.state = "preparing"
+    sidecar_server._store_operation_delivery(
+        app, recheck.operation_id, {"message_id": "recheck-message", "bot_id": None}
+    )
+    await sidecar_server._run_operations_recheck(app, recheck)
+
+    restart = store.create(
+        chat_id="oc_private", profile_id="default",
+        report_fingerprint=claimed.fingerprint,
+        recovery_fingerprint=claimed.recovery_fingerprint,
+        group=False, transport_secret=b"t" * 32,
+    )
+    restart.report = claimed
+    restart.state = "restarting"
+    sidecar_server._store_operation_delivery(
+        app, restart.operation_id, {"message_id": "restart-message", "bot_id": None}
+    )
+    await sidecar_server._run_operations_restart(app, restart)
+
+    assert sources == ["fallback_default"] * 4
+    assert len(executed) == 1
+    assert next(iter(store._records.values())).state == "repaired"
+
+
+async def test_repair_rejects_actual_profile_source_change(monkeypatch):
+    feishu_client = FakeFeishuClient()
+    claimed = operations_report(profile_source="fallback_default")
+    changed = operations_report(profile_source="env")
+    assert changed.fingerprint != claimed.fingerprint
+    app = create_app(feishu_client)
+    store = app[sidecar_server.OPERATIONS_STORE_KEY]
+    operation = store.create(
+        chat_id="oc_private", profile_id="default",
+        report_fingerprint=claimed.fingerprint,
+        recovery_fingerprint=claimed.recovery_fingerprint,
+        group=False, transport_secret=b"u" * 32,
+    )
+    operation.report = claimed
+    operation.state = "executing"
+    sidecar_server._store_operation_delivery(
+        app, operation.operation_id, {"message_id": "source-message", "bot_id": None}
+    )
+    executed = []
+
+    async def reports(*_args, **_kwargs):
+        return changed, SimpleNamespace(root=Path("/private/hermes"))
+
+    monkeypatch.setattr(sidecar_server, "_bounded_operations_report", reports)
+    monkeypatch.setattr(sidecar_server, "execute_recovery", lambda *args: executed.append(args))
+
+    await sidecar_server._run_operations_repair(app, operation)
+
+    assert executed == []
+    assert next(iter(store._records.values())).state == "failed"
 
 
 async def test_successful_repair_without_post_diagnosis_keeps_recheckable_fallback(
@@ -2863,7 +2959,7 @@ async def test_successful_repair_without_post_diagnosis_keeps_recheckable_fallba
 
     async def reports(_app, *, profile_id, profile_source, **_kwargs):
         calls.append(profile_source)
-        if profile_source == "post_repair":
+        if len(calls) > 1:
             raise asyncio.TimeoutError
         return claimed, SimpleNamespace(root=Path("/private/hermes"))
 
@@ -2878,7 +2974,7 @@ async def test_successful_repair_without_post_diagnosis_keeps_recheckable_fallba
     await sidecar_server._run_operations_repair(app, operation)
 
     successor = next(iter(store._records.values()))
-    assert calls == ["confirm_repair", "post_repair"]
+    assert calls == ["fallback_default", "fallback_default"]
     assert successor.state == "repaired"
     assert successor.report.status == "error"
     assert successor.result["restart_available"] is False
@@ -2914,7 +3010,7 @@ async def test_repair_rejects_synthetic_post_repair_failure_report(monkeypatch):
         calls.append(profile_source)
         report = (
             sidecar_server._failed_operations_report("default")
-            if profile_source == "post_repair"
+            if len(calls) > 1
             else claimed
         )
         return report, SimpleNamespace(root=Path("/private/hermes"))
@@ -2932,7 +3028,7 @@ async def test_repair_rejects_synthetic_post_repair_failure_report(monkeypatch):
     await sidecar_server._run_operations_repair(app, operation)
 
     successor = next(iter(store._records.values()))
-    assert calls == ["confirm_repair", "post_repair"]
+    assert calls == ["fallback_default", "fallback_default"]
     assert successor.report.status == "error"
     assert successor.result["restart_available"] is False
     assert "重新检测暂时不可用" in str(successor.result)
