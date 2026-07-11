@@ -1322,7 +1322,13 @@ async def test_hfc_doctor_timeout_includes_waiting_for_diagnostic_slot(monkeypat
             ),
         )
         operation_id = (await response.json())["operation_id"]
-        await _wait_until(lambda: bool(feishu_client.sent), attempts=40)
+        await _wait_until(
+            lambda: app[sidecar_server.OPERATIONS_STORE_KEY]
+            ._records[operation_id]
+            .state
+            == "failed",
+            attempts=40,
+        )
         record = app[sidecar_server.OPERATIONS_STORE_KEY]._records[operation_id]
     finally:
         semaphore.release()
@@ -1530,8 +1536,21 @@ async def test_same_fingerprint_slow_recheck_patch_keeps_one_worker_and_links_ol
     assert repeated.status == 200
     assert after_failure.status == 200
     assert calls == ["", "fallback_default"]
-    assert repeated_body["operation_id"] != preparing_id
-    assert after_failure_body["operation_id"] == repeated_body["operation_id"]
+    store = app[sidecar_server.OPERATIONS_STORE_KEY]
+
+    def record_for(operation_id):
+        return store._records.get(operation_id) or store._recheck_predecessors.get(
+            operation_id
+        )
+
+    preparing = record_for(preparing_id)
+    repeated_record = record_for(repeated_body["operation_id"])
+    after_failure_record = record_for(after_failure_body["operation_id"])
+    assert preparing is not None
+    assert repeated_record is not None
+    assert after_failure_record is not None
+    assert repeated_record.transport_lineage_id == preparing.transport_lineage_id
+    assert after_failure_record.transport_lineage_id == preparing.transport_lineage_id
     assert "诊断摘要" in str(after_failure_body["card"])
 
 
