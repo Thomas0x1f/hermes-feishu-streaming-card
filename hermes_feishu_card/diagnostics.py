@@ -11,6 +11,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from .install.detect import HermesDetection
 from .install.recovery import RecoveryPlan, sanitize_recovery_plan
+from .profile_sources import PROFILE_SOURCES
 
 
 _IDENTIFIER_KEYS = {
@@ -60,13 +61,7 @@ _RAW_HASH_KEYS = {
 }
 _SAFE_VERSION_RE = re.compile(r"^(?:v?\d+(?:\.\d+)+|unknown)$")
 _SAFE_HOST_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
-_CARD_PROFILE_SOURCES = {
-    "env",
-    "fallback_default",
-    "hermes_home",
-    "locals",
-    "sanitized_env",
-}
+_CARD_PROFILE_SOURCES = PROFILE_SOURCES
 _CARD_ROUTE_REASONS = {
     "bindings.chats",
     "bindings.fallback_bot",

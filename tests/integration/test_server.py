@@ -2838,9 +2838,10 @@ async def test_successful_repair_builds_successor_from_post_mutation_report(monk
     assert successor.result["restart_available"] is True
 
 
-async def test_background_operations_reuse_snapshot_profile_source_for_fingerprint(monkeypatch):
+@pytest.mark.parametrize("profile_source", ["fallback_default", "sanitized_locals", "sanitized_hermes_home"])
+async def test_background_operations_reuse_snapshot_profile_source_for_fingerprint(monkeypatch, profile_source):
     feishu_client = FakeFeishuClient()
-    claimed = operations_report(profile_source="fallback_default")
+    claimed = operations_report(profile_source=profile_source)
     app = create_app(feishu_client)
     store = app[sidecar_server.OPERATIONS_STORE_KEY]
     operation = store.create(
@@ -2896,7 +2897,7 @@ async def test_background_operations_reuse_snapshot_profile_source_for_fingerpri
     )
     await sidecar_server._run_operations_restart(app, restart)
 
-    assert sources == ["fallback_default"] * 4
+    assert sources == [profile_source] * 4
     assert len(executed) == 1
     assert next(iter(store._records.values())).state == "repaired"
 

@@ -40,6 +40,7 @@ from .operations_transport import (
     TransportAuthenticationError,
     derive_operation_transport_secret,
 )
+from .profile_sources import PROFILE_SOURCE_FALLBACK, PROFILE_SOURCES
 from .render import render_card
 from .session import CardSession
 from .status import StatusConfig
@@ -99,9 +100,7 @@ MAX_STALE_OPERATIONS_REPUBLISHES = 1
 MAX_CONCURRENT_OPERATION_DIAGNOSTICS = 4
 OPERATIONS_DIAGNOSTIC_TIMEOUT_SECONDS = 12.0
 RESTART_CALLBACK_GRACE_SECONDS = 0.25
-_STABLE_PROFILE_SOURCES = frozenset(
-    {"env", "fallback_default", "hermes_home", "locals", "sanitized_env"}
-)
+_STABLE_PROFILE_SOURCES = PROFILE_SOURCES
 TERMINAL_EVENTS = {"message.completed", "message.failed"}
 SESSION_CREATING_EVENTS = {
     "thinking.delta",
@@ -1126,7 +1125,7 @@ def _operation_report_snapshot(operation: OperationRecord) -> DiagnosticReport:
 def _operation_profile_source(operation: OperationRecord) -> str:
     routing = operation.report.routing if operation.report is not None else {}
     source = str(routing.get("profile_source") or "") if isinstance(routing, dict) else ""
-    return source if source in _STABLE_PROFILE_SOURCES else "fallback_default"
+    return source if source in _STABLE_PROFILE_SOURCES else PROFILE_SOURCE_FALLBACK
 
 
 def _operation_evidence_matches(

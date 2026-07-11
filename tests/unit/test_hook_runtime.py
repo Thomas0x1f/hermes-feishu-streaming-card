@@ -4291,6 +4291,27 @@ def test_build_event_profile_id_sanitizes_env(monkeypatch):
     assert payload["data"]["profile_source"] == "sanitized_env"
 
 
+def test_build_event_profile_id_sanitizes_locals(monkeypatch):
+    payload = hook_runtime.build_event(
+        "message.started",
+        {"chat_id": "oc_1", "message_id": "m_1", "profile_id": "bad:profile"},
+    )
+
+    assert payload["data"]["profile_id"] == "default"
+    assert payload["data"]["profile_source"] == "sanitized_locals"
+
+
+def test_build_event_profile_id_sanitizes_hermes_home(monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", "/home/user/.hermes/profiles/bad:profile")
+
+    payload = hook_runtime.build_event(
+        "message.started", {"chat_id": "oc_1", "message_id": "m_1"}
+    )
+
+    assert payload["data"]["profile_id"] == "default"
+    assert payload["data"]["profile_source"] == "sanitized_hermes_home"
+
+
 def test_build_event_profile_id_ignores_unrelated_profiles_path(monkeypatch):
     monkeypatch.setenv("HERMES_HOME", "/tmp/profiles/not-hermes")
 

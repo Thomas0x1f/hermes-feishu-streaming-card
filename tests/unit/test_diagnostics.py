@@ -190,6 +190,16 @@ def test_card_safe_report_allowlists_nested_data_and_scrubs_finding_text(tmp_pat
     assert payload["routing"]["event_endpoint"] == "http://127.0.0.1:8765/events"
 
 
+@pytest.mark.parametrize("profile_source", ["sanitized_locals", "sanitized_hermes_home"])
+def test_card_safe_report_keeps_sanitized_profile_sources(tmp_path, profile_source):
+    report = _report(
+        tmp_path,
+        routing={"profile_id": "default", "profile_source": profile_source},
+    )
+
+    assert report.to_dict(card_safe=True)["routing"]["profile_source"] == profile_source
+
+
 def test_cli_report_keeps_existing_top_level_doctor_contract(tmp_path):
     payload = _report(tmp_path, status="ok").to_dict()
 
