@@ -1942,6 +1942,7 @@ def test_feishu_command_card_action_resolves_native_model_picker(monkeypatch):
             )
             self._loop = object()
             self.updated = None
+            self.submitted = []
 
         def _loop_accepts_callbacks(self, loop):
             return loop is self._loop
@@ -1951,7 +1952,7 @@ def test_feishu_command_card_action_resolves_native_model_picker(monkeypatch):
 
         def _submit_on_loop(self, loop, coro):
             assert loop is self._loop
-            asyncio.run(coro)
+            self.submitted.append(coro)
             return True
 
         def _build_update_message_body(self, *, msg_type, content):
@@ -1978,13 +1979,6 @@ def test_feishu_command_card_action_resolves_native_model_picker(monkeypatch):
     async def on_model_selected(chat_id, model_id, provider_slug):
         selected.append((chat_id, model_id, provider_slug))
         return f"Switched to {provider_slug}/{model_id}"
-
-    def fake_run_coroutine_threadsafe(coro, loop):
-        assert loop is adapter._loop
-        result = asyncio.run(coro)
-        return SimpleNamespace(result=lambda timeout=None: result)
-
-    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", fake_run_coroutine_threadsafe)
 
     adapter = DummyFeishuAdapter()
     adapter._hfc_model_picker_state = {
@@ -2017,14 +2011,24 @@ def test_feishu_command_card_action_resolves_native_model_picker(monkeypatch):
 
     response = adapter._on_card_action_trigger(data)
 
-    assert selected == [("oc_abc", "deepseek/deepseek-v4-pro", "openrouter")]
-    assert "model-1" not in adapter._hfc_model_picker_state
+    assert selected == []
+    assert "model-1" in adapter._hfc_model_picker_state
     assert adapter.updated is None
     assert response.card.type == "raw"
     card = response.card.data
-    assert card["header"]["template"] == "green"
-    assert card["header"]["title"]["content"] == "模型已更新"
-    assert "Switched to openrouter/deepseek/deepseek-v4-pro" in card["elements"][0]["content"]
+    assert card["header"]["template"] == "blue"
+    assert card["header"]["title"]["content"] == "模型切换中"
+    assert "openrouter/deepseek/deepseek-v4-pro" in card["elements"][0]["content"]
+    assert len(adapter.submitted) == 1
+
+    asyncio.run(adapter.submitted.pop())
+
+    assert selected == [("oc_abc", "deepseek/deepseek-v4-pro", "openrouter")]
+    assert "model-1" not in adapter._hfc_model_picker_state
+    assert adapter.updated.message_id == "om_model_card"
+    updated_card = json.loads(adapter.updated.request_body.content)
+    assert updated_card["header"]["template"] == "green"
+    assert updated_card["header"]["title"]["content"] == "模型已更新"
 
 
 def test_stale_feishu_card_action_handler_updates_native_model_picker(monkeypatch):
