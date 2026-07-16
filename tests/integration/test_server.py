@@ -2627,6 +2627,7 @@ async def test_group_operations_first_claim_missing_identity_and_read_only_matri
             json=operations_action_payload(confirm, operator="ou_claimant"),
         )
         completed_body = await completed.json()
+        await _wait_until(lambda: len(calls) == 1)
     finally:
         await test_client.close()
 
