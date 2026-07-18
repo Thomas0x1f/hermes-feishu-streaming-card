@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.2.0.html).
 
+## V4.0.12 — 2026-07-18
+
+See also: [docs/release-notes-v4.0.12.md](docs/release-notes-v4.0.12.md)
+
+### Added
+- Fixed Issue #133's silent context-compaction gap by forwarding Hermes' exact `Compacting context` status callback into a `context-compaction` card phase. Existing cards stay visible, and a missing primary card is created without timeout inference or fabricated progress.
+- Added closed-schema `card.text_sizes` configuration for `body`, `reasoning`, `tool`, `notice`, and `footer`, with scalar values or deterministic `default` / `pc` / `mobile` mappings. Physical card dimensions remain controlled by Feishu/Lark clients.
+
+### Fixed
+- Fixed Issue #136: `setup` / `start --env-file` credentials now reach the sidecar runner and operations diagnostics with precedence YAML < sibling `.env` < selected env file < process environment; no implicit global env fallback was added.
+- Credential-free Noop mode now logs a warning, reports `degraded` health with `noop_mode: true`, returns `not_sent`, and records `feishu_noop_attempts` / failures instead of fake message IDs and successes.
+
+### Credits
+- Thanks to @tianxia3111 for Issue #133's production compaction and mobile-readability report, @Jasonsun77 for reinforcing the configurable-font request, and @nasvip for Issue #136's complete Linux/systemd credential-chain diagnosis and health evidence.
+
 ## V4.0.11 — 2026-07-18
 
 See also: [docs/release-notes-v4.0.11.md](docs/release-notes-v4.0.11.md)

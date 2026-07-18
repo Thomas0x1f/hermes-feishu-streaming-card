@@ -459,7 +459,7 @@ Example:
 ```bash
 export FEISHU_APP_ID=cli_xxx
 export FEISHU_APP_SECRET=xxx
-export HFC_VERSION=v4.0.11
+export HFC_VERSION=v4.0.12
 bash install-docker.sh --profile-id child --event-url http://hfc-sidecar:8765/events
 ```
 
@@ -701,6 +701,7 @@ The Hermes hook converts `message.started` / `thinking.delta` / `answer.delta` /
 
 | Version | Date | Highlights |
 |---------|------|-----------|
+| [v4.0.12](release-notes-v4.0.12.en.md) | 2026-07-18 | Issues #133/#136: visible context-compaction phases, five text-size roles with PC/mobile mappings, selected-env credentials, and degraded Noop health/failure metrics |
 | [v4.0.9](release-notes-v4.0.9.en.md) | 2026-07-16 | Issue #130: preserve the live Lark WebSocket event-handler identity and update only the card callback on the WS thread; thanks to @Jasonsun77 for the complete crash-loop evidence |
 | [v4.0.8](release-notes-v4.0.8.en.md) | 2026-07-16 | Issue #127: cron cards retain the text while Hermes native `media_files` delivery uploads the actual attachment; thanks to @zyq2552899783-lgtm for the report |
 | [v4.0.7](release-notes-v4.0.7.en.md) | 2026-07-16 | Restartable Linux/systemd user-service lifecycle, Hermes venv Python preference, and PR #124 self-improvement notice isolation |
