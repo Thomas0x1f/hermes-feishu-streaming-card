@@ -1519,6 +1519,230 @@ def test_native_feishu_update_command_result_uses_card():
     assert card["elements"][0]["content"] == "Update started."
 
 
+@pytest.mark.parametrize(
+    "terminal_feedback",
+    [
+        "🗜️ Compressed: 57 → 13 messages\nApprox request size: ~47,319 → ~12,910 tokens",
+        "No changes from compression.\nApprox request size: ~12,910 tokens (unchanged)",
+        "⚠️ Compression aborted. No messages were dropped.",
+    ],
+)
+def test_manual_compress_updates_running_card_with_original_result(
+    monkeypatch,
+    terminal_feedback,
+):
+    class DummyFeishuAdapter:
+        name = "feishu"
+
+        def __init__(self):
+            self._client = object()
+            self.created = []
+            self.updated = []
+            self.text_sent = []
+
+        async def send(self, chat_id, content, reply_to=None, metadata=None):
+            self.text_sent.append(content)
+            return SimpleNamespace(success=True, message_id="om_native")
+
+        async def _feishu_send_with_retry(self, **kwargs):
+            self.created.append(kwargs)
+            return SimpleNamespace(
+                success=lambda: True,
+                data=SimpleNamespace(message_id="om_compress_card"),
+            )
+
+    class DummyRunner:
+        def __init__(self, adapter):
+            self.adapters = {"feishu": adapter}
+            self.original_calls = 0
+
+        async def _handle_compress_command(self, event):
+            self.original_calls += 1
+            return terminal_feedback
+
+    adapter = DummyFeishuAdapter()
+
+    async def update_card(_adapter, message_id, card):
+        adapter.updated.append((message_id, card))
+        return True
+
+    monkeypatch.setattr(hook_runtime, "_hfc_update_native_command_card", update_card)
+    runner = DummyRunner(adapter)
+    event = SimpleNamespace(
+        source=SimpleNamespace(
+            platform="feishu",
+            chat_id="oc_abc",
+            thread_id="omt_topic",
+        ),
+        text="/compress",
+        message_id="om_user_compress",
+        get_command=lambda: "compress",
+    )
+
+    assert hook_runtime.install_feishu_command_card_adapter_methods(runner, event=event)
+    result = asyncio.run(runner._handle_compress_command(event))
+
+    assert result is None
+    assert runner.original_calls == 1
+    assert len(adapter.created) == 1
+    created_card = json.loads(adapter.created[0]["payload"])
+    assert created_card["header"]["title"]["content"] == "上下文压缩"
+    assert created_card["header"]["template"] == "blue"
+    assert created_card["elements"][0]["content"] == "⏳ 正在压缩上下文…"
+    assert adapter.created[0]["reply_to"] == "om_user_compress"
+    assert adapter.created[0]["metadata"] == {"thread_id": "omt_topic"}
+    assert adapter.updated[0][0] == "om_compress_card"
+    updated_card = adapter.updated[0][1]
+    assert "".join(element["content"] for element in updated_card["elements"]) == terminal_feedback
+    assert adapter.text_sent == []
+
+
+def test_manual_compress_begin_failure_returns_original_feedback():
+    class DummyFeishuAdapter:
+        name = "feishu"
+
+        def __init__(self):
+            self._client = object()
+
+        async def send(self, chat_id, content, reply_to=None, metadata=None):
+            return SimpleNamespace(success=True, message_id="om_native")
+
+        async def _feishu_send_with_retry(self, **kwargs):
+            return SimpleNamespace(success=False, error="create failed")
+
+    class DummyRunner:
+        def __init__(self):
+            self.adapters = {"feishu": DummyFeishuAdapter()}
+            self.original_calls = 0
+
+        async def _handle_compress_command(self, event):
+            self.original_calls += 1
+            return "original compression feedback"
+
+    runner = DummyRunner()
+    event = SimpleNamespace(
+        source=SimpleNamespace(platform="feishu", chat_id="oc_abc"),
+        text="/compress",
+        message_id="om_user_compress",
+        get_command=lambda: "compress",
+    )
+    hook_runtime.install_feishu_command_card_adapter_methods(runner, event=event)
+
+    result = asyncio.run(runner._handle_compress_command(event))
+
+    assert result == "original compression feedback"
+    assert runner.original_calls == 1
+
+
+def test_manual_compress_terminal_patch_failure_returns_original_feedback(monkeypatch):
+    class DummyFeishuAdapter:
+        name = "feishu"
+
+        def __init__(self):
+            self._client = object()
+
+        async def send(self, chat_id, content, reply_to=None, metadata=None):
+            return SimpleNamespace(success=True, message_id="om_native")
+
+        async def _feishu_send_with_retry(self, **kwargs):
+            return SimpleNamespace(
+                success=lambda: True,
+                data=SimpleNamespace(message_id="om_compress_card"),
+            )
+
+    class DummyRunner:
+        def __init__(self):
+            self.adapters = {"feishu": DummyFeishuAdapter()}
+
+        async def _handle_compress_command(self, event):
+            return "terminal compression feedback"
+
+    async def failed_update(_adapter, _message_id, _card):
+        return False
+
+    monkeypatch.setattr(hook_runtime, "_hfc_update_native_command_card", failed_update)
+    runner = DummyRunner()
+    event = SimpleNamespace(
+        source=SimpleNamespace(platform="feishu", chat_id="oc_abc"),
+        text="/compact",
+        message_id="om_user_compact",
+        get_command=lambda: "compact",
+    )
+    hook_runtime.install_feishu_command_card_adapter_methods(runner, event=event)
+
+    result = asyncio.run(runner._handle_compress_command(event))
+
+    assert result == "terminal compression feedback"
+
+
+def test_compress_handler_wrapper_is_idempotent_and_non_feishu_bypasses_card():
+    class DummyTelegramAdapter:
+        name = "telegram"
+
+        async def send(self, chat_id, content, reply_to=None, metadata=None):
+            return SimpleNamespace(success=True, message_id="tg_native")
+
+    class DummyRunner:
+        def __init__(self):
+            self.adapters = {"telegram": DummyTelegramAdapter()}
+            self.original_calls = 0
+
+        async def _handle_compress_command(self, event):
+            self.original_calls += 1
+            return "telegram compression feedback"
+
+    runner = DummyRunner()
+    event = SimpleNamespace(
+        source=SimpleNamespace(platform="telegram", chat_id="tg_abc"),
+        text="/compress",
+        message_id="tg_user",
+        get_command=lambda: "compress",
+    )
+
+    assert hook_runtime.install_feishu_command_card_adapter_methods(runner, event=event) is False
+    assert hook_runtime.install_feishu_command_card_adapter_methods(runner, event=event) is False
+    result = asyncio.run(runner._handle_compress_command(event))
+
+    assert result == "telegram compression feedback"
+    assert runner.original_calls == 1
+
+
+def test_manual_compress_original_exception_is_not_swallowed():
+    class DummyFeishuAdapter:
+        name = "feishu"
+
+        def __init__(self):
+            self._client = object()
+
+        async def send(self, chat_id, content, reply_to=None, metadata=None):
+            return SimpleNamespace(success=True, message_id="om_native")
+
+        async def _feishu_send_with_retry(self, **kwargs):
+            return SimpleNamespace(
+                success=lambda: True,
+                data=SimpleNamespace(message_id="om_compress_card"),
+            )
+
+    class DummyRunner:
+        def __init__(self):
+            self.adapters = {"feishu": DummyFeishuAdapter()}
+
+        async def _handle_compress_command(self, event):
+            raise RuntimeError("compress exploded")
+
+    runner = DummyRunner()
+    event = SimpleNamespace(
+        source=SimpleNamespace(platform="feishu", chat_id="oc_abc"),
+        text="/compress",
+        message_id="om_user_compress",
+        get_command=lambda: "compress",
+    )
+    hook_runtime.install_feishu_command_card_adapter_methods(runner, event=event)
+
+    with pytest.raises(RuntimeError, match="compress exploded"):
+        asyncio.run(runner._handle_compress_command(event))
+
+
 def test_native_feishu_system_notice_send_posts_sidecar_and_suppresses_text(monkeypatch):
     posted = []
 

@@ -1856,6 +1856,81 @@ def _hfc_install_resume_picker_handler(runner_type: type[Any]) -> bool:
     return True
 
 
+async def _hfc_handle_compress_command_with_card(runner: Any, event: Any) -> Any:
+    original = getattr(type(runner), "_hfc_original_handle_compress_command", None)
+    if not callable(original):
+        return None
+    source = getattr(event, "source", None)
+    if source is None or _platform_name({}, source) != "feishu":
+        return await original(runner, event)
+
+    context = _HFC_FEISHU_COMMAND_RESULT_CONTEXT.get()
+    if not isinstance(context, dict):
+        context = _hfc_command_result_context_from_event(event)
+        if context is not None:
+            _HFC_FEISHU_COMMAND_RESULT_CONTEXT.set(context)
+    if not isinstance(context, dict):
+        return await original(runner, event)
+    command = str(context.get("command") or "").strip().lower()
+    raw_command = str(context.get("raw_command") or "").strip().lower()
+    if command not in {"compress", "compact"} and raw_command not in {
+        "compress",
+        "compact",
+    }:
+        return await original(runner, event)
+    context["command"] = "compress"
+
+    adapter = _hfc_feishu_adapter_from_runner(runner, source)
+    chat_id = str(getattr(source, "chat_id", "") or "").strip()
+    if adapter is None or not chat_id:
+        return await original(runner, event)
+
+    started = await _hfc_send_native_command_result_card(
+        adapter,
+        chat_id=chat_id,
+        content="⏳ 正在压缩上下文…",
+        reply_to=str(context.get("reply_to_message_id") or "").strip() or None,
+        metadata=None,
+        context=context,
+    )
+    result = await original(runner, event)
+    if not getattr(started, "success", False):
+        return result
+
+    terminal_content = str(result or "").strip() or "上下文压缩已完成。"
+    completed = await _hfc_send_native_command_result_card(
+        adapter,
+        chat_id=chat_id,
+        content=terminal_content,
+        reply_to=str(context.get("reply_to_message_id") or "").strip() or None,
+        metadata=None,
+        context=context,
+    )
+    if getattr(completed, "success", False):
+        return None
+    return result
+
+
+def _hfc_install_compress_command_handler(runner_type: type[Any]) -> bool:
+    current = runner_type.__dict__.get("_handle_compress_command")
+    if current is _hfc_handle_compress_command_with_card:
+        setattr(runner_type, "_hfc_compress_command_wrapped", True)
+        return True
+    if getattr(runner_type, "_hfc_compress_command_wrapped", False):
+        return callable(getattr(runner_type, "_handle_compress_command", None))
+    original = current or getattr(runner_type, "_handle_compress_command", None)
+    if not callable(original):
+        return False
+    setattr(runner_type, "_hfc_original_handle_compress_command", original)
+    setattr(
+        runner_type,
+        "_handle_compress_command",
+        _hfc_handle_compress_command_with_card,
+    )
+    setattr(runner_type, "_hfc_compress_command_wrapped", True)
+    return True
+
+
 def _parse_model_picker_choice(choice: str) -> tuple[str, str] | None:
     try:
         data = json.loads(choice)
@@ -4353,6 +4428,7 @@ def install_feishu_command_card_adapter_methods(runner: Any, event: Any = None) 
             return False
         runner_type = type(runner)
         _hfc_install_resume_picker_handler(runner_type)
+        _hfc_install_compress_command_handler(runner_type)
         current_notice_delivery = runner_type.__dict__.get("_deliver_platform_notice")
         if current_notice_delivery is _hfc_deliver_platform_notice_with_card:
             setattr(runner_type, "_hfc_platform_notice_wrapped", True)
