@@ -340,6 +340,51 @@ def test_bot_registry_preserves_bot_card_title():
     assert registry.get("sales").card == {"title": "Sales Bot"}
 
 
+def test_bot_registry_normalizes_bot_card_text_sizes():
+    registry = BotRegistry.from_config(
+        {
+            "bots": {
+                "default": "sales",
+                "items": {
+                    "sales": {
+                        "app_id": "cli_sales",
+                        "app_secret": "secret",
+                        "card": {
+                            "text_sizes": {
+                                "footer": {"mobile": "notation"},
+                            }
+                        },
+                    }
+                },
+            }
+        }
+    )
+
+    assert registry.get("sales").card["text_sizes"]["footer"] == {
+        "default": "x-small",
+        "pc": "x-small",
+        "mobile": "notation",
+    }
+
+
+def test_bot_registry_rejects_invalid_bot_card_text_size_with_path():
+    with pytest.raises(ValueError, match=r"bots\.items\.sales\.card\.text_sizes\.body"):
+        BotRegistry.from_config(
+            {
+                "bots": {
+                    "default": "sales",
+                    "items": {
+                        "sales": {
+                            "app_id": "cli_sales",
+                            "app_secret": "secret",
+                            "card": {"text_sizes": {"body": "normal_v2"}},
+                        }
+                    },
+                }
+            }
+        )
+
+
 def test_safe_diagnostics_exposes_only_card_title():
     registry = BotRegistry.from_config(
         {

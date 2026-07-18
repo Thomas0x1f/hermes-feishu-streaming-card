@@ -45,6 +45,77 @@ DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
     },
 }
 KNOWN_SECTIONS = frozenset(DEFAULT_CONFIG)
+CARD_TEXT_SIZE_VALUES = frozenset(
+    {
+        "heading-0",
+        "heading-1",
+        "heading-2",
+        "heading-3",
+        "heading-4",
+        "heading",
+        "normal",
+        "notation",
+        "xxxx-large",
+        "xxx-large",
+        "xx-large",
+        "x-large",
+        "large",
+        "medium",
+        "small",
+        "x-small",
+    }
+)
+CARD_TEXT_SIZE_DEFAULTS = {
+    "body": "normal",
+    "reasoning": "small",
+    "tool": "x-small",
+    "notice": "x-small",
+    "footer": "x-small",
+}
+CARD_TEXT_SIZE_DEVICE_KEYS = frozenset({"default", "pc", "mobile"})
+
+
+def normalize_text_sizes(
+    value: object, *, path: str = "card.text_sizes"
+) -> dict[str, str | dict[str, str]]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{path} must be a mapping")
+    normalized: dict[str, str | dict[str, str]] = {}
+    for raw_role, raw_size in value.items():
+        role = str(raw_role)
+        role_path = f"{path}.{role}"
+        if role not in CARD_TEXT_SIZE_DEFAULTS:
+            raise ValueError(f"{role_path} is not a supported text size role")
+        if isinstance(raw_size, str):
+            normalized[role] = _normalize_text_size_value(raw_size, role_path)
+            continue
+        if not isinstance(raw_size, Mapping) or not raw_size:
+            raise ValueError(f"{role_path} must be a text size or non-empty mapping")
+        device_values: dict[str, str] = {}
+        for raw_device, raw_device_size in raw_size.items():
+            device = str(raw_device)
+            device_path = f"{role_path}.{device}"
+            if device not in CARD_TEXT_SIZE_DEVICE_KEYS:
+                raise ValueError(f"{device_path} is not a supported device field")
+            device_values[device] = _normalize_text_size_value(
+                raw_device_size, device_path
+            )
+        fallback = device_values.get("default", CARD_TEXT_SIZE_DEFAULTS[role])
+        normalized[role] = {
+            "default": fallback,
+            "pc": device_values.get("pc", fallback),
+            "mobile": device_values.get("mobile", fallback),
+        }
+    return normalized
+
+
+def _normalize_text_size_value(value: object, path: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{path} must be a supported text size")
+    normalized = value.strip()
+    if normalized not in CARD_TEXT_SIZE_VALUES:
+        raise ValueError(f"{path} must be a supported text size")
+    return normalized
 
 
 def resolve_operations_hermes_root(
@@ -112,8 +183,45 @@ def load_config(path: str | Path) -> dict[str, dict[str, Any]]:
 
     _apply_env_file_overrides(config, config_path)
     _apply_env_overrides(config)
+    _normalize_config_text_sizes(config)
     config["server"]["port"] = _normalize_port(config["server"]["port"], "server.port")
     return config
+
+
+def _normalize_config_text_sizes(config: dict[str, Any]) -> None:
+    _normalize_card_text_sizes(config.get("card"), path="card")
+    _normalize_bot_text_sizes(config.get("bots"), path="bots")
+    profiles = config.get("profiles")
+    if not isinstance(profiles, Mapping):
+        return
+    for profile_id, profile in profiles.items():
+        if not isinstance(profile, Mapping):
+            continue
+        profile_path = f"profiles.{profile_id}"
+        _normalize_card_text_sizes(profile.get("card"), path=f"{profile_path}.card")
+        _normalize_bot_text_sizes(profile.get("bots"), path=f"{profile_path}.bots")
+
+
+def _normalize_bot_text_sizes(value: object, *, path: str) -> None:
+    if not isinstance(value, Mapping):
+        return
+    items = value.get("items")
+    if not isinstance(items, Mapping):
+        return
+    for bot_id, bot in items.items():
+        if not isinstance(bot, Mapping):
+            continue
+        _normalize_card_text_sizes(
+            bot.get("card"), path=f"{path}.items.{bot_id}.card"
+        )
+
+
+def _normalize_card_text_sizes(value: object, *, path: str) -> None:
+    if not isinstance(value, dict) or "text_sizes" not in value:
+        return
+    value["text_sizes"] = normalize_text_sizes(
+        value["text_sizes"], path=f"{path}.text_sizes"
+    )
 
 
 def _merge_sections(config: dict[str, dict[str, Any]], loaded: dict[str, Any]) -> None:

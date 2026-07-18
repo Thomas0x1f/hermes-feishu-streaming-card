@@ -3,7 +3,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hermes_feishu_card.config import load_config, resolve_operations_hermes_root
+from hermes_feishu_card.config import (
+    load_config,
+    normalize_text_sizes,
+    resolve_operations_hermes_root,
+)
 
 
 CONFIG_ENV_VARS = (
@@ -158,6 +162,112 @@ card:
             "context",
         ],
     }
+
+
+def test_load_config_normalizes_card_text_sizes(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+card:
+  text_sizes:
+    body: large
+    footer:
+      default: x-small
+      mobile: notation
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config["card"]["text_sizes"] == {
+        "body": "large",
+        "footer": {
+            "default": "x-small",
+            "pc": "x-small",
+            "mobile": "notation",
+        },
+    }
+
+
+def test_normalize_text_sizes_uses_role_default_for_pc_only_mapping():
+    assert normalize_text_sizes({"reasoning": {"pc": "large"}}) == {
+        "reasoning": {
+            "default": "small",
+            "pc": "large",
+            "mobile": "small",
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    ("value", "expected_path"),
+    [
+        ({"unknown": "small"}, "card.text_sizes.unknown"),
+        ({"footer": {"tablet": "small"}}, "card.text_sizes.footer.tablet"),
+        ({"body": ""}, "card.text_sizes.body"),
+        ({"body": "normal_v2"}, "card.text_sizes.body"),
+        ({"body": 12}, "card.text_sizes.body"),
+        ({"footer": []}, "card.text_sizes.footer"),
+        ({"footer": {}}, "card.text_sizes.footer"),
+        ({"footer": {"mobile": 12}}, "card.text_sizes.footer.mobile"),
+    ],
+)
+def test_normalize_text_sizes_rejects_invalid_values_with_exact_path(
+    value, expected_path
+):
+    with pytest.raises(ValueError) as exc_info:
+        normalize_text_sizes(value)
+
+    message = str(exc_info.value)
+    assert expected_path in message
+    assert "private-sibling-secret" not in message
+
+
+def test_load_config_normalizes_profile_and_bot_text_sizes(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+bots:
+  items:
+    sales:
+      app_id: app
+      app_secret: secret
+      card:
+        text_sizes:
+          footer:
+            mobile: notation
+profiles:
+  work:
+    card:
+      text_sizes:
+        body: large
+    bots:
+      items:
+        support:
+          app_id: app
+          app_secret: secret
+          card:
+            text_sizes:
+              tool: small
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config["bots"]["items"]["sales"]["card"]["text_sizes"]["footer"] == {
+        "default": "x-small",
+        "pc": "x-small",
+        "mobile": "notation",
+    }
+    assert config["profiles"]["work"]["card"]["text_sizes"]["body"] == "large"
+    assert (
+        config["profiles"]["work"]["bots"]["items"]["support"]["card"][
+            "text_sizes"
+        ]["tool"]
+        == "small"
+    )
 
 
 def test_load_config_defaults_include_multi_bot_sections(tmp_path):
