@@ -621,6 +621,21 @@ card:
 
 In multi-profile mode, `FEISHU_APP_ID`/`FEISHU_APP_SECRET` env vars are ignored. `footer_fields` accepts: `duration`, `model`, `input_tokens`, `output_tokens`, `context`, `subscription_usage`. `subscription_usage` is disabled by default; when explicitly included, completed cards use Hermes runtime `fetch_account_usage("openai-codex")` and render remaining quota in the `5h 26% · weekly 89%` style. Older Hermes versions, missing login, network errors, and timeouts silently omit it.
 
+`card.text_sizes` configures `body`, `reasoning`, `tool`, `notice`, and `footer`. Base, profile, and bot settings merge by role, with bot settings taking precedence:
+
+```yaml
+card:
+  text_sizes:
+    body: large
+    reasoning: small
+    footer:
+      default: x-small
+      pc: x-small
+      mobile: notation
+```
+
+Mappings accept only `default`, `pc`, and `mobile`. Allowed sizes are `heading-0`, `heading-1`, `heading-2`, `heading-3`, `heading-4`, `heading`, `normal`, `notation`, `xxxx-large`, `xxx-large`, `xx-large`, `x-large`, `large`, `medium`, `small`, and `x-small`; `normal_v2` is a custom alias in platform examples and is rejected. With no setting, the existing Card JSON is unchanged. Physical card width/height are controlled by the Feishu/Lark client.
+
 ## Feishu App Setup
 
 ```bash

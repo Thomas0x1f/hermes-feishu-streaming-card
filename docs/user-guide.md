@@ -672,6 +672,21 @@ card:
 
 多 Profile 模式下，`FEISHU_APP_ID` / `FEISHU_APP_SECRET` 不会覆盖 profile 内的 `feishu` 配置。`footer_fields` 支持 `duration`、`model`、`input_tokens`、`output_tokens`、`context`、`subscription_usage`。其中 `subscription_usage` 默认关闭；显式加入后，完成态会通过 Hermes runtime 的 `fetch_account_usage("openai-codex")` 显示 `5h 26% · weekly 89%` 风格的剩余额度。旧 Hermes、未登录、网络错误或超时会静默跳过。
 
+`card.text_sizes` 可配置 `body`、`reasoning`、`tool`、`notice`、`footer`。base、profile、bot 按角色合并，bot 优先级最高：
+
+```yaml
+card:
+  text_sizes:
+    body: large
+    reasoning: small
+    footer:
+      default: x-small
+      pc: x-small
+      mobile: notation
+```
+
+映射字段只允许 `default`、`pc`、`mobile`。字号只允许 `heading-0`、`heading-1`、`heading-2`、`heading-3`、`heading-4`、`heading`、`normal`、`notation`、`xxxx-large`、`xxx-large`、`xx-large`、`x-large`、`large`、`medium`、`small`、`x-small`；`normal_v2` 是平台示例里的自定义 alias，不接受。未配置时保持原 Card JSON。卡片物理 width/height 由 Feishu/Lark 客户端控制。
+
 ## 飞书应用配置
 
 ```bash

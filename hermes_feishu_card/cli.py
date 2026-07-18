@@ -365,6 +365,14 @@ card:
   title: Hermes Agent
   max_wait_ms: 800
   max_chars: 240
+  # Optional roles: body, reasoning, tool, notice, footer.
+  # card width/height are controlled by the Feishu/Lark client.
+  # text_sizes:
+  #   body: normal
+  #   footer:
+  #     default: x-small
+  #     pc: x-small
+  #     mobile: notation
   footer_fields:
     - duration
     - model

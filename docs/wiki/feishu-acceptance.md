@@ -2,6 +2,15 @@
 
 自动化测试不能完全证明 Feishu/Lark 客户端体验。涉及卡片 UX、topic、系统提示、命令卡片的版本，发布前需要真实飞书 smoke。
 
+## V4.0.12 上下文压缩与字号（发布候选验收）
+
+- 使用官方 installer/patcher 更新真实 Hermes；确认 `doctor` 的 `status_callback=true`，不得手工编辑 `gateway/run.py`。
+- 真实长会话触发 Hermes 原生 `Compacting context`：压缩开始时同一张 primary card 的 Header 显示“正在压缩上下文”，后续 answer/tool 清除阶段并继续更新原卡；完成后仅剩一张终态卡，无灰色原生压缩提示。
+- 以压缩为首个可见事件时，确认 `create_session=true` 只创建一张卡，私聊与 topic reply anchor 不变。
+- 不接受静默 watchdog 或百分比作为验收证据；必须观察真实 callback 和后续事件。
+- 桌面端与移动端分别检查 `body`、`reasoning`、`tool`、`notice`、`footer` 的 scalar 和 `pc`/`mobile` 映射，覆盖长中文、代码块、表格、深色模式与 streaming-to-terminal；不得出现 `hfc_*` 可见文本或跨 bot 字号污染。
+- 卡片物理 width/height 不在验收范围，由 Feishu/Lark 客户端控制。
+
 ## V4.0.11 system.notice 可靠投递（发布候选验收）
 
 - 私聊触发一条独立 `system.notice`，确认 create 请求携带稳定 `delivery_uuid`，正常路径只有一张卡和 0 条灰色原文。

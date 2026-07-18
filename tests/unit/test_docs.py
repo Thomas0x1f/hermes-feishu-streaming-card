@@ -912,6 +912,55 @@ def test_config_example_documents_profile_and_bot_card_titles():
     assert "explicitly render numbered text choices" in config
 
 
+def test_docs_describe_card_text_sizes_and_client_controlled_dimensions():
+    from hermes_feishu_card.cli import _default_setup_config_text
+
+    config = read_doc("config.yaml.example")
+    setup_template = _default_setup_config_text()
+    readme = read_doc("README.md")
+    readme_en = read_doc("README.en.md")
+    install = read_doc("README-install.md")
+    event_flow = read_doc("docs/wiki/event-flow.md")
+
+    for example in (config, setup_template):
+        for marker in ("text_sizes:", "body: normal", "footer:", "mobile: notation"):
+            assert marker in example
+    for doc in (readme, readme_en, install):
+        assert "card.text_sizes" in doc
+        assert "body" in doc
+        assert "footer" in doc
+        assert "mobile" in doc
+        assert "width/height" in doc
+    for marker in (
+        "reasoning",
+        "tool",
+        "notice",
+        "heading-0",
+        "xxxx-large",
+        "normal_v2",
+    ):
+        assert marker in event_flow
+
+
+def test_maintainer_docs_define_compaction_visibility_contract():
+    event_flow = read_doc("docs/wiki/event-flow.md")
+    maintenance = read_doc("docs/wiki/maintenance-guide.md")
+    acceptance = read_doc("docs/wiki/feishu-acceptance.md")
+    combined = "\n".join((event_flow, maintenance, acceptance))
+
+    for marker in (
+        "_status_callback_sync",
+        "Compacting context",
+        "context-compaction",
+        "create_session",
+        "status_callback",
+    ):
+        assert marker in combined
+    assert "静默 watchdog" in combined
+    assert "百分比" in combined
+    assert "真实长会话" in acceptance
+
+
 def test_testing_docs_describe_v340_doctor_output_without_stale_counts():
     zh = read_doc("docs/testing.md")
     en = read_doc("docs/testing.en.md")
