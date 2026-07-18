@@ -459,7 +459,7 @@ Example:
 ```bash
 export FEISHU_APP_ID=cli_xxx
 export FEISHU_APP_SECRET=xxx
-export HFC_VERSION=v4.0.11
+export HFC_VERSION=v4.0.12
 bash install-docker.sh --profile-id child --event-url http://hfc-sidecar:8765/events
 ```
 
@@ -621,6 +621,21 @@ card:
 
 In multi-profile mode, `FEISHU_APP_ID`/`FEISHU_APP_SECRET` env vars are ignored. `footer_fields` accepts: `duration`, `model`, `input_tokens`, `output_tokens`, `context`, `subscription_usage`. `subscription_usage` is disabled by default; when explicitly included, completed cards use Hermes runtime `fetch_account_usage("openai-codex")` and render remaining quota in the `5h 26% · weekly 89%` style. Older Hermes versions, missing login, network errors, and timeouts silently omit it.
 
+`card.text_sizes` configures `body`, `reasoning`, `tool`, `notice`, and `footer`. Base, profile, and bot settings merge by role, with bot settings taking precedence:
+
+```yaml
+card:
+  text_sizes:
+    body: large
+    reasoning: small
+    footer:
+      default: x-small
+      pc: x-small
+      mobile: notation
+```
+
+Mappings accept only `default`, `pc`, and `mobile`. Allowed sizes are `heading-0`, `heading-1`, `heading-2`, `heading-3`, `heading-4`, `heading`, `normal`, `notation`, `xxxx-large`, `xxx-large`, `xx-large`, `x-large`, `large`, `medium`, `small`, and `x-small`; `normal_v2` is a custom alias in platform examples and is rejected. With no setting, the existing Card JSON is unchanged. Physical card width/height are controlled by the Feishu/Lark client.
+
 ## Feishu App Setup
 
 ```bash
@@ -686,6 +701,7 @@ The Hermes hook converts `message.started` / `thinking.delta` / `answer.delta` /
 
 | Version | Date | Highlights |
 |---------|------|-----------|
+| [v4.0.12](release-notes-v4.0.12.en.md) | 2026-07-18 | Issues #133/#136: visible context-compaction phases, five text-size roles with PC/mobile mappings, selected-env credentials, and degraded Noop health/failure metrics |
 | [v4.0.9](release-notes-v4.0.9.en.md) | 2026-07-16 | Issue #130: preserve the live Lark WebSocket event-handler identity and update only the card callback on the WS thread; thanks to @Jasonsun77 for the complete crash-loop evidence |
 | [v4.0.8](release-notes-v4.0.8.en.md) | 2026-07-16 | Issue #127: cron cards retain the text while Hermes native `media_files` delivery uploads the actual attachment; thanks to @zyq2552899783-lgtm for the report |
 | [v4.0.7](release-notes-v4.0.7.en.md) | 2026-07-16 | Restartable Linux/systemd user-service lifecycle, Hermes venv Python preference, and PR #124 self-improvement notice isolation |

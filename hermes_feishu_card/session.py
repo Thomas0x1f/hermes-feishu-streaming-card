@@ -72,6 +72,7 @@ class CardSession:
     thinking_text: str = ""
     answer_text: str = ""
     latest_tool_preview: str = ""
+    runtime_phase_text: str = ""
     tools: Dict[str, ToolState] = field(default_factory=dict)
     tokens: Dict[str, Any] = field(default_factory=dict)
     model: str = "Unknown"
@@ -103,6 +104,8 @@ class CardSession:
             return normalize_stream_text(interaction.prompt).strip()
         if self.status == "completed":
             return ""
+        if self.runtime_phase_text:
+            return self.runtime_phase_text
         return self.latest_tool_preview
 
     @property
@@ -135,6 +138,14 @@ class CardSession:
 
         self.display_status = event.display_status
         self.display_status_source = "explicit" if event.display_status else "session"
+        if event.event in {
+            "thinking.delta",
+            "answer.delta",
+            "tool.updated",
+            "message.completed",
+            "message.failed",
+        }:
+            self.runtime_phase_text = ""
 
         if event.event == "thinking.delta":
             mode = str(event.data.get("mode") or "delta").strip().lower()
@@ -205,6 +216,12 @@ class CardSession:
             self._fail_interaction(event.data)
         elif event.event == "system.notice":
             title = str(event.data.get("title") or "运行提示").strip() or "运行提示"
+            is_runtime_phase = (
+                str(event.data.get("notice_kind") or "") == "context-compaction"
+                and str(event.data.get("phase") or "") == "started"
+            )
+            if is_runtime_phase:
+                self.runtime_phase_text = title
             content = normalize_stream_text(
                 str(event.data.get("content") or event.data.get("text") or "")
             ).strip()
@@ -230,7 +247,8 @@ class CardSession:
                 self.updated_at = time.time()
                 self.refresh_display_status_source()
                 return True
-            self.timeline.record_notice(notice_id, title, level, content)
+            if not is_runtime_phase:
+                self.timeline.record_notice(notice_id, title, level, content)
         elif event.event == "message.completed":
             completed_answer = normalize_stream_text(str(event.data.get("answer") or ""))
             if completed_answer.strip():

@@ -2,7 +2,7 @@
 
 [中文](release-readiness.md) | [English](release-readiness.en.md)
 
-当前候选包版本为 `4.0.3`。它修复只升级 runtime 并重启、仍保留 V4.0.0 completion hook 时的 #106 灰色原生正文重复，同时保留原生媒体与 fail-open 边界。V3.9.1 已于 2026-07-11 发布；V4.0.0、V4.0.1 与 V4.0.2 已发布。
+当前候选包版本为 `4.0.12`。它修复 Issues #133/#136：上下文压缩阶段保持卡片可见，五类文本支持 PC/mobile 字号映射，并让 selected-env 凭据和 Noop 降级状态可验证、可诊断。V3.9.1 已于 2026-07-11 发布，V4.0.11 及更早版本也已发布。
 
 ## 已具备
 
@@ -144,6 +144,14 @@ python3 -m hermes_feishu_card.cli restore --hermes-dir ~/.hermes/hermes-agent --
 - tag 后验证 macOS、Linux、Windows 与 checksums 四个 assets。
 
 `v3.9.0` tag 的 release-assets workflow 会发布 4 个 assets：macOS tarball、Linux tarball、Windows zip 和 checksums 文件，分别为 `hermes-feishu-card-v3.9.0-macos.tar.gz`、`hermes-feishu-card-v3.9.0-linux.tar.gz`、`hermes-feishu-card-v3.9.0-windows.zip`、`hermes-feishu-card-v3.9.0-checksums.txt`。
+
+## V4.0.12 发布门禁
+
+- compaction hook/session/render/server 与字号 schema/merge/render/device 聚焦矩阵：**已通过**。
+- selected env 真实子进程启动为 `healthy/live`；缺凭据子进程为 `degraded/noop`，发送 `not_sent` 且 success 不增加：**已通过**。
+- 自动压缩长会话 smoke 与桌面/移动端最终视觉确认：**按发布决定未执行，不写成已通过**。
+- 最终全量自动化：**已通过（`1460 passed, 4 skipped`）**；`git diff --check`、sdist/wheel 和干净 Python 3.12 import `4.0.12` 均通过。
+- annotated tag、Release assets/checksums 和公共 tagged installer：**待 tag 后验证**。
 
 ## 当前边界
 

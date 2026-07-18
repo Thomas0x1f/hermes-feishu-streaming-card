@@ -27,6 +27,7 @@
 - 字段名必须贴合 Hermes 变量：`source`、`event`、`response`、`agent_result`、`event_message_id` 等。
 - Feishu topic 场景必须保留 `source.message_id` 和 `reply_to_message_id`。
 - 已识别 `system.notice` 必须按 sidecar 结果分流：`delivered` 抑制原生文本，`not_sent` 回退原始通知文本，`unknown` 只尝试固定通用提示且不重复原始通知文本；不可解析响应一律视为 `unknown`。
+- 上下文压缩只从 `_status_callback_sync` 的固定 `Compacting context` 标记产生 `context-compaction`；不得用静默 watchdog、普通 compression 文本或虚构百分比推断。
 - cron completion hook 必须位于 `extract_media` / `media_files` 过滤之后：`native_delivery=required` 时清空原生正文但继续文件上传，不能在媒体提取前提前返回。
 - `/update` 不进入命令卡片，保持 Hermes 后台升级。
 - 已连接 Lark WebSocket 的 live `EventDispatcherHandler` identity 不得被重建或替换；只可通过 `_ws_thread_loop.call_soon_threadsafe(...)` 更新现有 `p2.card.action.trigger` processor callback，不兼容内部结构必须 fail-open。
@@ -49,6 +50,7 @@
 - 卡片已完成时不能让 Hermes 原生 resend 泄漏成灰色消息。
 - 初始 create/reply 只能在 Feishu API 边界用稳定 `delivery_uuid` 重试，最多 3 次；不重试 `/events`，也不把这套策略套到 PATCH。
 - `feishu_send_retries`、`feishu_send_unknown_outcomes`、`notice_native_fallbacks`、`notice_uncertain_warnings` 与 `last_send_error` 必须保持脱敏；不得记录 UUID、响应正文、URL 或原始标识符。
+- 无凭据的 Noop 模式必须在 `/health` 中标记 `degraded` / `noop_mode`，发送计入 `feishu_noop_attempts` 和 failure；不得生成假 message id 或计入 success。
 - 群聊 `/hfc status` 只做路由诊断和 binding 提示；@机器人触发、白名单和群消息准入属于 Hermes Gateway。
 
 ### `hermes_feishu_card/install/patcher.py`
@@ -64,6 +66,7 @@
 - patch 必须幂等、可移除、可检测 corrupt markers。
 - Hermes source-stripped Docker 目录缺少 `VERSION`，或版本 metadata 可读但格式不可解析时，只能在 gateway anchors 可验证时兜底。
 - 新 hook block 必须有 patcher 单测和 remove/restore 覆盖。
+- `_status_callback_sync` 是 optional `status_callback` capability；缺失时保持其他安装路径可用并由 doctor 报 partial compatibility。
 
 ### `hermes_feishu_card/install/recovery.py` and operations execution
 
@@ -91,6 +94,7 @@
 
 - `start_new_session=True` 不能脱离 systemd cgroup，不能作为 Linux Gateway 重启隔离方案。
 - systemd 可重启 sidecar 并改变 PID；status/stop 必须以 token 和记录的 unit 为稳定身份，不能只比较旧 PID。
+- runner 必须真正读取 `setup` / `start` 显式传入的 `--env-file`。配置优先级保持 YAML < 同目录 `.env` < 显式 env file < process env；禁止为了修复 systemd 环境而隐式读取全局 `~/.hermes/.env`。
 - 升级迁移只能停止 PID/token/health 三者一致的旧进程，未知进程保持 fail-closed。
 - 调整 lifecycle 时运行 `tests/unit/test_process.py`、`tests/integration/test_cli_process.py` 和 `tests/unit/test_install_scripts.py`。
 

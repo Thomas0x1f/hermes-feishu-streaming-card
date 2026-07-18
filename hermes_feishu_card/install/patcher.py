@@ -17,6 +17,8 @@ CLARIFY_PATCH_BEGIN = "# HERMES_FEISHU_CARD_CLARIFY_PATCH_BEGIN"
 CLARIFY_PATCH_END = "# HERMES_FEISHU_CARD_CLARIFY_PATCH_END"
 APPROVAL_PATCH_BEGIN = "# HERMES_FEISHU_CARD_APPROVAL_PATCH_BEGIN"
 APPROVAL_PATCH_END = "# HERMES_FEISHU_CARD_APPROVAL_PATCH_END"
+STATUS_PATCH_BEGIN = "# HERMES_FEISHU_CARD_STATUS_PATCH_BEGIN"
+STATUS_PATCH_END = "# HERMES_FEISHU_CARD_STATUS_PATCH_END"
 CRON_PATCH_BEGIN = "# HERMES_FEISHU_CARD_CRON_PATCH_BEGIN"
 CRON_PATCH_END = "# HERMES_FEISHU_CARD_CRON_PATCH_END"
 SLASH_CONFIRM_PATCH_BEGIN = "# HERMES_FEISHU_CARD_SLASH_CONFIRM_PATCH_BEGIN"
@@ -109,7 +111,7 @@ def apply_patch(content: str, strategy: str = "legacy_gateway_run") -> str:
         ),
         required_callback_args=("question", "choices"),
     )
-    return _apply_callback_patch(
+    content = _apply_callback_patch(
         content,
         callback_name="_approval_notify_sync",
         begin_marker=APPROVAL_PATCH_BEGIN,
@@ -124,6 +126,23 @@ def apply_patch(content: str, strategy: str = "legacy_gateway_run") -> str:
         ),
         required_callback_args=("approval_data",),
     )
+    if strategy == "gateway_run_013_plus":
+        content = _apply_callback_patch(
+            content,
+            callback_name="_status_callback_sync",
+            begin_marker=STATUS_PATCH_BEGIN,
+            end_marker=STATUS_PATCH_END,
+            renderer=_render_status_hook_block,
+            required_outer_names=(
+                "source",
+                "event_message_id",
+                "_status_chat_id",
+                "_loop_for_step",
+                "_run_still_current",
+            ),
+            required_callback_args=("event_type", "message"),
+        )
+    return content
 
 
 def apply_cron_patch(content: str) -> str:
@@ -481,6 +500,13 @@ def remove_patch(content: str) -> str:
     )
     content = _remove_simple_owned_patch(
         content,
+        STATUS_PATCH_BEGIN,
+        STATUS_PATCH_END,
+        _render_status_hook_block,
+        "status callback patch markers",
+    )
+    content = _remove_simple_owned_patch(
+        content,
         QUEUED_COMPLETE_PATCH_BEGIN,
         QUEUED_COMPLETE_PATCH_END,
         _render_queued_complete_hook_block,
@@ -526,6 +552,7 @@ def remove_patch_lenient(content: str) -> str:
         (THINKING_DELTA_PATCH_BEGIN, THINKING_DELTA_PATCH_END),
         (CLARIFY_PATCH_BEGIN, CLARIFY_PATCH_END),
         (APPROVAL_PATCH_BEGIN, APPROVAL_PATCH_END),
+        (STATUS_PATCH_BEGIN, STATUS_PATCH_END),
         (COMMAND_CARD_STARTUP_PATCH_BEGIN, COMMAND_CARD_STARTUP_PATCH_END),
         (COMMAND_CARD_PATCH_BEGIN, COMMAND_CARD_PATCH_END),
         (HFC_COMMAND_PATCH_BEGIN, HFC_COMMAND_PATCH_END),
@@ -1795,6 +1822,29 @@ def _render_approval_hook_block(indent: str, newline: str):
         f"{deeper_indent}    return{newline}",
         *_render_hook_exception_handler(indent, newline),
         f"{indent}{APPROVAL_PATCH_END}{newline}",
+    ]
+
+
+def _render_status_hook_block(indent: str, newline: str):
+    inner_indent = _child_indent(indent)
+    deeper_indent = _child_indent(inner_indent)
+    return [
+        f"{indent}{STATUS_PATCH_BEGIN}{newline}",
+        f"{indent}try:{newline}",
+        (
+            f"{inner_indent}from hermes_feishu_card.hook_runtime "
+            f"import handle_status_from_hermes_locals as _hfc_handle_status{newline}"
+        ),
+        f"{inner_indent}if _run_still_current():{newline}",
+        f"{deeper_indent}_hfc_handle_status({{{newline}",
+        f"{deeper_indent}    **locals(),{newline}",
+        f"{deeper_indent}    \"source\": source,{newline}",
+        f"{deeper_indent}    \"chat_id\": _status_chat_id,{newline}",
+        f"{deeper_indent}    \"message_id\": event_message_id,{newline}",
+        f"{deeper_indent}    \"_hfc_loop\": _loop_for_step,{newline}",
+        f"{deeper_indent}}}, event_type=event_type, message=message){newline}",
+        *_render_hook_exception_handler(indent, newline),
+        f"{indent}{STATUS_PATCH_END}{newline}",
     ]
 
 

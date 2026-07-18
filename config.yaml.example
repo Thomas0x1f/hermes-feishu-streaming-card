@@ -32,6 +32,15 @@ card:
   interaction_mode: auto
   max_wait_ms: 800
   max_chars: 240
+  # Optional role-based CardKit text sizes. Roles: body, reasoning, tool,
+  # notice, footer. Values may be scalar or default/pc/mobile mappings.
+  # card width/height are controlled by the Feishu/Lark client.
+  # text_sizes:
+  #   body: normal
+  #   footer:
+  #     default: x-small
+  #     pc: x-small
+  #     mobile: notation
   # Optional conservative handoff inference. Both an active marker and a future
   # marker must appear; explicit event data.display_status always wins.
   status:

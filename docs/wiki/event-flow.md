@@ -81,6 +81,22 @@ message.completed
 
 sidecar 仍应创建 session 并发送初始卡片，不能把整条流计入 `events_ignored`。
 
+## 上下文压缩运行阶段
+
+新版 Hermes 在 `_status_callback_sync` 里产生 `Compacting context` 状态。patcher 在 Hermes 自身过滤前插入可移除、fail-open 的 hook；`hook_runtime` 只匹配这个固定标记并发出 `system.notice`，其中 `notice_kind=context-compaction`、`phase=started`、`create_session=true`。
+
+- 已有 session：更新同一张卡，Header 临时显示“正在压缩上下文”。
+- 压缩是首个可见事件：仅该精确事件可创建 primary card，并保留原 reply/topic 锚点；后续 answer/tool 继续更新同一张卡。
+- thinking、answer、tool 或 terminal 到来时立即清除运行阶段；不写入最终答案、footer 或诊断正文。
+- 缺少 callback anchor 时 `status_callback=false`，doctor 报 partial compatibility，但其他可验证能力仍可安装。
+- 不使用静默 watchdog，不从等待时长猜测压缩，也不展示虚构百分比。
+
+## 卡片文字字号
+
+`card.text_sizes` 只接受 `body`、`reasoning`、`tool`、`notice`、`footer` 五个角色。每个角色可用 scalar，也可使用 `default`、`pc`、`mobile` 映射；映射只为实际渲染的角色生成 `hfc_<role>` alias。
+
+允许值为：`heading-0`、`heading-1`、`heading-2`、`heading-3`、`heading-4`、`heading`、`normal`、`notation`、`xxxx-large`、`xxx-large`、`xx-large`、`x-large`、`large`、`medium`、`small`、`x-small`。平台示例中的 `normal_v2` 是自定义 alias，本项目不接受。未配置时不输出 `config.style`，保持既有 Card JSON；物理 width/height 由 Feishu/Lark 客户端控制。
+
 ## Feishu topic / thread 锚点
 
 话题场景里，用户原消息、topic thread 和 Hermes 内部 stream id 可能不是同一个值。

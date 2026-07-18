@@ -5,6 +5,7 @@ import html
 import json
 import re
 import time as _time
+from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
 from .session import CardSession
@@ -21,6 +22,7 @@ DEFAULT_FOOTER_FIELDS = (
 MAIN_CONTENT_CHUNK_CHARS = 2400
 DEFAULT_TITLE = "Hermes Agent"
 RUNTIME_HEADER_MAX_CHARS = 120
+TEXT_SIZE_ROLE_ORDER = ("body", "reasoning", "tool", "notice", "footer")
 MODEL_COLOR_PREFIXES = (
     (("gpt-", "o1", "o3"), "blue"),
     (("claude-",), "orange"),
@@ -84,7 +86,9 @@ def render_card(
     max_reasoning_chars: int = 1200,
     max_tool_result_chars: int = 600,
     status_config: Optional[StatusConfig] = None,
+    text_sizes: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
+    used_text_size_roles: set[str] = set()
     status = _render_status(session, status_config=status_config)
     display_status = resolve_display_status(
         session, status_config or StatusConfig.defaults()
@@ -122,7 +126,16 @@ def render_card(
         if runtime_summary
         else _runtime_header_title(session, configured_title)
     )
-    elements = _render_main_content_elements(primary_text)
+    main_role = "notice" if session.delivery_kind == "notice" else "body"
+    elements = _render_main_content_elements(
+        primary_text,
+        text_size=_role_text_size(
+            text_sizes,
+            main_role,
+            default=None,
+            used_roles=used_text_size_roles,
+        ),
+    )
     timeline_elements: list[Dict[str, Any]] = []
     if show_reasoning:
         timeline_elements = _render_timeline_elements(
@@ -131,6 +144,8 @@ def render_card(
             max_items=max_timeline_items,
             max_reasoning_chars=max_reasoning_chars,
             max_tool_result_chars=max_tool_result_chars,
+            text_sizes=text_sizes,
+            used_text_size_roles=used_text_size_roles,
         )
         elements.extend(timeline_elements)
     elements.extend(_render_interaction_elements(session, interaction_mode=interaction_mode))
@@ -144,14 +159,33 @@ def render_card(
         )
     elements.append({"tag": "hr", "element_id": "main_divider"})
     if not timeline_elements:
-        elements.append(
-            {
-                "tag": "markdown",
-                "element_id": "tool_summary",
-                "content": _render_tool_summary(session),
-            }
+        tool_summary = {
+            "tag": "markdown",
+            "element_id": "tool_summary",
+            "content": _render_tool_summary(session),
+        }
+        _set_text_size(
+            tool_summary,
+            _role_text_size(
+                text_sizes,
+                "tool",
+                default=None,
+                used_roles=used_text_size_roles,
+            ),
         )
-    elements.append({"tag": "markdown", "element_id": "footer", "content": footer, "text_size": "x-small"})
+        elements.append(tool_summary)
+    footer_element = {
+        "tag": "markdown",
+        "element_id": "footer",
+        "content": footer,
+        "text_size": _role_text_size(
+            text_sizes,
+            "footer",
+            default="x-small",
+            used_roles=used_text_size_roles,
+        ),
+    }
+    elements.append(footer_element)
     header = {
         "template": status["template"],
         "title": {"tag": "plain_text", "content": header_title},
@@ -171,6 +205,15 @@ def render_card(
             "elements": elements
         },
     }
+    mapped_styles = {
+        f"hfc_{role}": dict(text_sizes[role])
+        for role in TEXT_SIZE_ROLE_ORDER
+        if role in used_text_size_roles
+        and isinstance(text_sizes, Mapping)
+        and isinstance(text_sizes.get(role), Mapping)
+    }
+    if mapped_styles:
+        card["config"]["style"] = {"text_size": mapped_styles}
     if not native_reply_completed:
         card["header"] = header
     return card
@@ -211,6 +254,8 @@ def _runtime_header_summary(session: CardSession) -> str:
         return ""
     if session.status == "completed":
         return ""
+    if session.runtime_phase_text:
+        return ""
     return _sanitize_runtime_header(session.latest_tool_preview)
 
 
@@ -226,7 +271,9 @@ def _sanitize_runtime_header(text: str) -> str:
     return normalized[: RUNTIME_HEADER_MAX_CHARS - 1].rstrip() + "…"
 
 
-def _render_main_content_elements(main_text: str) -> list[Dict[str, Any]]:
+def _render_main_content_elements(
+    main_text: str, *, text_size: str | None = None
+) -> list[Dict[str, Any]]:
     import re
 
     from .text import count_markdown_tables, MAX_CARD_TABLES
@@ -245,7 +292,9 @@ def _render_main_content_elements(main_text: str) -> list[Dict[str, Any]]:
     elements = []
     for index, chunk in enumerate(chunks):
         element_id = "main_content" if index == 0 else f"main_content_{index}"
-        elements.append({"tag": "markdown", "element_id": element_id, "content": chunk})
+        element = {"tag": "markdown", "element_id": element_id, "content": chunk}
+        _set_text_size(element, text_size)
+        elements.append(element)
     return elements
 
 
@@ -362,6 +411,8 @@ def _render_timeline_elements(
     max_items: int,
     max_reasoning_chars: int,
     max_tool_result_chars: int,
+    text_sizes: Mapping[str, Any] | None = None,
+    used_text_size_roles: set[str] | None = None,
 ) -> list[Dict[str, Any]]:
     if not getattr(session, "timeline", None):
         return []
@@ -376,7 +427,12 @@ def _render_timeline_elements(
             _timeline_markdown_elements(
                 f"> 已折叠 {folded} 条早期思考/工具记录",
                 "auxiliary_timeline_folded",
-                text_size="x-small",
+                text_size=_role_text_size(
+                    text_sizes,
+                    "notice",
+                    default="x-small",
+                    used_roles=used_text_size_roles,
+                ),
             )
         )
     for index, item in enumerate(entries):
@@ -393,7 +449,12 @@ def _render_timeline_elements(
                 _timeline_markdown_elements(
                     "\n".join(lines),
                     f"auxiliary_timeline_reasoningentry_{index}",
-                    text_size="small",
+                    text_size=_role_text_size(
+                        text_sizes,
+                        "reasoning",
+                        default="small",
+                        used_roles=used_text_size_roles,
+                    ),
                 )
             )
         elif item.kind == "tool":
@@ -409,7 +470,12 @@ def _render_timeline_elements(
                 _timeline_markdown_elements(
                     _quote_markdown("\n".join(lines)),
                     f"auxiliary_timeline_toolentry_{index}",
-                    text_size="x-small",
+                    text_size=_role_text_size(
+                        text_sizes,
+                        "tool",
+                        default="x-small",
+                        used_roles=used_text_size_roles,
+                    ),
                 )
             )
         elif item.kind == "notice":
@@ -425,7 +491,12 @@ def _render_timeline_elements(
                 _timeline_markdown_elements(
                     _quote_markdown("\n".join(lines)),
                     f"auxiliary_timeline_noticeentry_{index}",
-                    text_size="x-small",
+                    text_size=_role_text_size(
+                        text_sizes,
+                        "notice",
+                        default="x-small",
+                        used_roles=used_text_size_roles,
+                    ),
                 )
             )
     if not panel_elements:
@@ -450,22 +521,46 @@ def _render_timeline_elements(
 
 
 def _timeline_markdown_elements(
-    content: str, element_id_prefix: str, *, text_size: str
+    content: str, element_id_prefix: str, *, text_size: str | None
 ) -> list[Dict[str, Any]]:
-    return [
+    elements = [
         {
             "tag": "markdown",
             "element_id": element_id_prefix
             if index == 0
             else f"{element_id_prefix}_{index}",
             "content": chunk,
-            "text_size": text_size,
         }
         for index, chunk in enumerate(
             split_markdown_blocks(content, MAIN_CONTENT_CHUNK_CHARS)
         )
         if chunk.strip()
     ]
+    for element in elements:
+        _set_text_size(element, text_size)
+    return elements
+
+
+def _role_text_size(
+    text_sizes: Mapping[str, Any] | None,
+    role: str,
+    *,
+    default: str | None,
+    used_roles: set[str] | None = None,
+) -> str | None:
+    value = (text_sizes or {}).get(role)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Mapping):
+        if used_roles is not None:
+            used_roles.add(role)
+        return f"hfc_{role}"
+    return default
+
+
+def _set_text_size(element: dict[str, Any], text_size: str | None) -> None:
+    if text_size is not None:
+        element["text_size"] = text_size
 
 
 def _quote_markdown(content: str) -> str:

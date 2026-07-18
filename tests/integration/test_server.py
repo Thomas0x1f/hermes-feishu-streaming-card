@@ -50,6 +50,7 @@ from hermes_feishu_card.server import (
     SESSIONS_KEY,
     create_app as _create_app,
 )
+from hermes_feishu_card.runner import NoopFeishuClient
 
 
 _REAL_ASYNCIO_SLEEP = asyncio.sleep
@@ -710,6 +711,8 @@ async def test_health_reports_healthy_status_and_active_sessions(client):
     assert response.status == 200
     body = await response.json()
     assert body["status"] == "healthy"
+    assert body["noop_mode"] is False
+    assert body["delivery"] == {"mode": "live"}
     assert body["event_auth_required"] is False
     assert body["active_sessions"] == 0
     assert body["metrics"] == {
@@ -719,6 +722,7 @@ async def test_health_reports_healthy_status_and_active_sessions(client):
         "events_rejected": 0,
         "event_auth_rejections": 0,
         "feishu_send_attempts": 0,
+        "feishu_noop_attempts": 0,
         "feishu_send_successes": 0,
         "feishu_send_failures": 0,
         "feishu_send_retries": 0,
@@ -750,6 +754,38 @@ async def test_health_reports_healthy_status_and_active_sessions(client):
     assert body["reply_index"] == {"entries": 0, "last_lookup": {}}
     assert body["cron"] == {"cards_sent": 0, "fallbacks": 0}
     assert body["profile_diagnostics"] == {}
+
+
+async def test_noop_mode_reports_degraded_health_and_never_claims_delivery():
+    app = create_app(NoopFeishuClient(), noop_mode=True)
+    test_client = TestClient(TestServer(app))
+    await test_client.start_server()
+    try:
+        health = await test_client.get("/health")
+        health_body = await health.json()
+        started = await test_client.post(
+            "/events", json=event_payload("message.started", 0)
+        )
+        started_body = await started.json()
+        metrics_response = await test_client.get("/health")
+        metrics = (await metrics_response.json())["metrics"]
+    finally:
+        await test_client.close()
+
+    assert health.status == 200
+    assert health_body["status"] == "degraded"
+    assert health_body["noop_mode"] is True
+    assert health_body["delivery"] == {"mode": "noop"}
+    assert started.status == 502
+    assert started_body == {
+        "ok": False,
+        "error": "feishu send failed",
+        "delivery": {"outcome": "not_sent"},
+    }
+    assert metrics["feishu_send_attempts"] == 1
+    assert metrics["feishu_noop_attempts"] == 1
+    assert metrics["feishu_send_successes"] == 0
+    assert metrics["feishu_send_failures"] == 1
 
 
 def test_cleanup_runtime_state_removes_related_state_and_counts_once():
@@ -5012,6 +5048,167 @@ async def test_independent_system_notice_without_started_sends_notice_card(clien
     assert feishu_client.updated == []
 
 
+def compaction_notice_data(**overrides):
+    data = {
+        "title": "正在压缩上下文",
+        "content": "正在总结较早的对话，完成后会继续当前任务。",
+        "level": "info",
+        "notice_kind": "context-compaction",
+        "notice_id": "context-compaction:active",
+        "notice_scope": "session",
+        "phase": "started",
+        "create_session": True,
+        "display_status": "in_progress",
+    }
+    data.update(overrides)
+    return data
+
+
+async def test_compaction_notice_updates_existing_primary_card(client):
+    test_client, feishu_client = client
+    started = await test_client.post(
+        "/events",
+        json=event_payload("message.started", 0),
+    )
+    assert started.status == 200
+
+    compacting = await test_client.post(
+        "/events",
+        json=event_payload("system.notice", 1, compaction_notice_data()),
+    )
+
+    assert compacting.status == 200
+    assert (await compacting.json())["applied"] is True
+    assert len(feishu_client.sent) == 1
+    await _wait_until(lambda: len(feishu_client.updated) == 1)
+    updated_card = feishu_client.updated[0][1]
+    assert updated_card["header"]["title"]["content"] == "正在压缩上下文"
+    assert "subtitle" not in updated_card["header"]
+
+
+async def test_compaction_first_creates_topic_primary_card_and_continues_stream(client):
+    test_client, feishu_client = client
+    conversation_id = "omt_compaction_topic"
+    message_id = "om_compaction_user"
+    first = await test_client.post(
+        "/events",
+        json=event_payload(
+            "system.notice",
+            0,
+            compaction_notice_data(reply_to_message_id=message_id),
+            conversation_id=conversation_id,
+            message_id=message_id,
+            thread_id=conversation_id,
+        ),
+    )
+
+    assert first.status == 200
+    assert await first.json() == DELIVERED_RESPONSE
+    assert len(feishu_client.sent) == 1
+    assert feishu_client.sent[0][2] == conversation_id
+    assert feishu_client.sent[0][3] == message_id
+    assert feishu_client.sent[0][1]["header"]["title"]["content"] == "正在压缩上下文"
+    assert message_id in test_client.app[SESSIONS_KEY]
+
+    continued = await test_client.post(
+        "/events",
+        json=event_payload(
+            "answer.delta",
+            1,
+            {"text": "压缩完成后继续回答"},
+            conversation_id=conversation_id,
+            message_id=message_id,
+            thread_id=conversation_id,
+        ),
+    )
+
+    assert continued.status == 200
+    assert (await continued.json())["applied"] is True
+    await _wait_until(lambda: len(feishu_client.updated) == 1)
+    assert "压缩完成后继续回答" in str(feishu_client.updated[0][1])
+    assert "正在压缩上下文" not in str(feishu_client.updated[0][1]["header"])
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        compaction_notice_data(notice_kind="system"),
+        compaction_notice_data(phase="completed"),
+        compaction_notice_data(create_session=False),
+        {key: value for key, value in compaction_notice_data().items() if key != "create_session"},
+        compaction_notice_data(notice_scope="independent"),
+    ],
+)
+async def test_only_exact_compaction_start_can_create_primary_card(client, data):
+    test_client, feishu_client = client
+
+    response = await test_client.post(
+        "/events",
+        json=event_payload("system.notice", 0, data),
+    )
+
+    assert response.status == 200
+    body = await response.json()
+    if data.get("notice_scope") == "independent":
+        assert body == DELIVERED_RESPONSE
+        assert len(feishu_client.sent) == 1
+        assert test_client.app[SESSIONS_KEY]["hermes-message-1"].delivery_kind == "notice"
+    else:
+        assert body == {"ok": True, "applied": False}
+        assert feishu_client.sent == []
+        assert test_client.app[SESSIONS_KEY] == {}
+
+
+async def test_stale_compaction_cannot_override_newer_answer(client):
+    test_client, feishu_client = client
+    first = await test_client.post(
+        "/events",
+        json=event_payload("system.notice", 0, compaction_notice_data()),
+    )
+    assert first.status == 200
+
+    answer = await test_client.post(
+        "/events",
+        json=event_payload("answer.delta", 2, {"text": "较新的回答"}),
+    )
+    assert answer.status == 200
+    await _wait_until(lambda: len(feishu_client.updated) == 1)
+
+    stale = await test_client.post(
+        "/events",
+        json=event_payload("system.notice", 1, compaction_notice_data()),
+    )
+
+    assert stale.status == 200
+    assert await stale.json() == {"ok": True, "applied": False}
+    await _REAL_ASYNCIO_SLEEP(0.02)
+    assert len(feishu_client.updated) == 1
+    session = test_client.app[SESSIONS_KEY]["hermes-message-1"]
+    assert session.runtime_phase_text == ""
+    assert session.answer_text == "较新的回答"
+
+
+async def test_terminal_after_compaction_clears_runtime_phase(client):
+    test_client, feishu_client = client
+    first = await test_client.post(
+        "/events",
+        json=event_payload("system.notice", 0, compaction_notice_data()),
+    )
+    assert first.status == 200
+
+    completed = await test_client.post(
+        "/events",
+        json=event_payload("message.completed", 1, {"answer": "最终答案"}),
+    )
+
+    assert completed.status == 200
+    await _wait_until(lambda: len(feishu_client.updated) == 1)
+    session = test_client.app[SESSIONS_KEY]["hermes-message-1"]
+    assert session.status == "completed"
+    assert session.runtime_phase_text == ""
+    assert "正在压缩上下文" not in str(feishu_client.updated[0][1])
+
+
 async def test_system_notice_delivery_outcome_is_delivered_for_legacy_client(client):
     test_client, _feishu_client = client
 
@@ -6217,6 +6414,49 @@ async def test_started_card_title_uses_bot_over_profile_and_global():
     assert response.status == 200
     sent_card = factory.clients["sales"].sent[0][1]
     assert sent_card["header"]["title"]["content"] == "Sales Bot"
+
+
+async def test_session_card_config_preserves_base_text_size_roles_on_profile_override():
+    feishu_client = FakeFeishuClient()
+    app = create_app(
+        feishu_client,
+        card_config={
+            "text_sizes": {"body": "normal", "footer": "x-small"},
+        },
+    )
+    test_client = TestClient(TestServer(app))
+    await test_client.start_server()
+    try:
+        response = await test_client.post(
+            "/events",
+            json=event_payload(
+                "message.started",
+                0,
+                data={"card": {"text_sizes": {"footer": "notation"}}},
+            ),
+        )
+    finally:
+        await test_client.close()
+
+    assert response.status == 200
+    session_card = next(iter(app[SESSION_CARD_CONFIGS_KEY].values()))
+    assert session_card["text_sizes"] == {
+        "body": "normal",
+        "footer": "notation",
+    }
+    sent_card = feishu_client.sent[0][1]
+    main = next(
+        item
+        for item in sent_card["body"]["elements"]
+        if item.get("element_id") == "main_content"
+    )
+    footer = next(
+        item
+        for item in sent_card["body"]["elements"]
+        if item.get("element_id") == "footer"
+    )
+    assert main["text_size"] == "normal"
+    assert footer["text_size"] == "notation"
 
 
 @pytest.mark.parametrize("profile_id", ["bad:profile/path", "", "x" * 65])

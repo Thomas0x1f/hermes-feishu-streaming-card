@@ -130,6 +130,11 @@ initiating user, while private chats do not add an extra identity comparison.
 Recognized model names receive HTML-escaped semantic color inside the existing
 footer; its layout, field order, separators, and text size are unchanged.
 
+`card.text_sizes` can configure the `body`, `reasoning`, `tool`, `notice`, and
+`footer` roles, with optional `default` / `pc` / `mobile` mappings. Physical
+card width/height are controlled by the Feishu/Lark client and are not an
+installer or sidecar setting.
+
 The default `127.0.0.1` / `localhost` deployment uses a local-process trust
 boundary: hook event requests remain compatible with existing local installs.
 Binding the sidecar to a non-loopback address is rejected unless
@@ -192,7 +197,7 @@ script selects Hermes venv Python and does not fall back to system Python unless
 ```
 export FEISHU_APP_ID=cli_xxx
 export FEISHU_APP_SECRET=xxx
-export HFC_VERSION=v4.0.11
+export HFC_VERSION=v4.0.12
 bash install-docker.sh
 ```
 
