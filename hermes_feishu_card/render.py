@@ -211,6 +211,8 @@ def _runtime_header_summary(session: CardSession) -> str:
         return ""
     if session.status == "completed":
         return ""
+    if session.runtime_phase_text:
+        return ""
     return _sanitize_runtime_header(session.latest_tool_preview)
 
 

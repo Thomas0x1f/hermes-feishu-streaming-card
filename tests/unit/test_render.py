@@ -66,6 +66,77 @@ def test_v4_running_card_uses_preview_title_and_public_interim_body():
     assert "ctx " not in footer["content"]
 
 
+def test_compaction_phase_replaces_header_title_and_hides_stale_tool_summary():
+    session = CardSession(conversation_id="c", message_id="m", chat_id="oc")
+    session.thinking_text = "已保留的公开阶段说明"
+    session.latest_tool_preview = "正在读取：weather_client.py"
+    session.runtime_phase_text = "正在压缩上下文"
+
+    card = render_card(session, title="研发助手")
+
+    assert card["header"]["title"]["content"] == "正在压缩上下文"
+    assert "subtitle" not in card["header"]
+    assert "正在读取：weather_client.py" not in str(card["header"])
+
+
+def test_pending_interaction_has_priority_over_compaction_phase():
+    session = CardSession(conversation_id="c", message_id="m", chat_id="oc")
+    session.runtime_phase_text = "正在压缩上下文"
+    session.active_interaction = InteractionState(
+        interaction_id="approval-compaction",
+        kind="approval",
+        prompt="允许继续执行吗？",
+    )
+
+    card = render_card(session, title="研发助手")
+
+    assert card["header"]["title"]["content"] == "允许继续执行吗？"
+    assert "正在压缩上下文" not in str(card["header"])
+
+
+def test_tool_activity_clears_compaction_and_restores_tool_subtitle():
+    from hermes_feishu_card.events import SidecarEvent
+
+    session = CardSession(conversation_id="c", message_id="m", chat_id="oc")
+    session.runtime_phase_text = "正在压缩上下文"
+    assert session.apply(
+        SidecarEvent(
+            schema_version="1",
+            event="tool.updated",
+            conversation_id="c",
+            message_id="m",
+            chat_id="oc",
+            platform="feishu",
+            sequence=1,
+            created_at=0.0,
+            data={
+                "tool_id": "tool-1",
+                "name": "terminal",
+                "status": "running",
+                "detail": "pytest",
+            },
+        )
+    )
+
+    card = render_card(session, title="研发助手")
+
+    assert session.runtime_phase_text == ""
+    assert card["header"]["title"]["content"] == "研发助手"
+    assert card["header"]["subtitle"]["content"] == "正在执行终端：pytest"
+
+
+def test_completed_card_never_renders_stale_compaction_phase():
+    session = CardSession(conversation_id="c", message_id="m", chat_id="oc")
+    session.status = "completed"
+    session.answer_text = "最终答案"
+    session.runtime_phase_text = "正在压缩上下文"
+
+    card = render_card(session, title="研发助手")
+
+    assert card["header"]["title"]["content"] == "研发助手"
+    assert "正在压缩上下文" not in str(card)
+
+
 def test_v4_answer_delta_remains_primary_over_public_interim_text():
     session = CardSession(conversation_id="c", message_id="m", chat_id="oc")
     session.thinking_text = "公开阶段说明"
