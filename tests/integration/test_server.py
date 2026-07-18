@@ -6408,6 +6408,19 @@ async def test_session_card_config_preserves_base_text_size_roles_on_profile_ove
         "body": "normal",
         "footer": "notation",
     }
+    sent_card = feishu_client.sent[0][1]
+    main = next(
+        item
+        for item in sent_card["body"]["elements"]
+        if item.get("element_id") == "main_content"
+    )
+    footer = next(
+        item
+        for item in sent_card["body"]["elements"]
+        if item.get("element_id") == "footer"
+    )
+    assert main["text_size"] == "normal"
+    assert footer["text_size"] == "notation"
 
 
 @pytest.mark.parametrize("profile_id", ["bad:profile/path", "", "x" * 65])

@@ -1849,9 +1849,17 @@ async def _smoke_feishu_card(config: dict, chat_id: str) -> str:
     footer_fields = card_config.get("footer_fields")
     if not isinstance(footer_fields, list):
         footer_fields = None
+    text_sizes = card_config.get("text_sizes")
+    if not isinstance(text_sizes, dict):
+        text_sizes = None
     message_id = await client.send_card(
         chat_id,
-        render_card(session, footer_fields=footer_fields, title=title),
+        render_card(
+            session,
+            footer_fields=footer_fields,
+            title=title,
+            text_sizes=text_sizes,
+        ),
     )
 
     completed = SidecarEvent(
@@ -1872,7 +1880,12 @@ async def _smoke_feishu_card(config: dict, chat_id: str) -> str:
     session.apply(completed)
     await client.update_card_message(
         message_id,
-        render_card(session, footer_fields=footer_fields, title=title),
+        render_card(
+            session,
+            footer_fields=footer_fields,
+            title=title,
+            text_sizes=text_sizes,
+        ),
     )
     return message_id
 

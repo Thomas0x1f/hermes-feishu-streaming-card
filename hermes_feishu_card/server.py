@@ -2638,6 +2638,11 @@ def _render_session_card_for_app(
             card_config.get("max_tool_result_chars"), 600
         ),
         status_config=StatusConfig.from_mapping(card_config.get("status")),
+        text_sizes=(
+            card_config.get("text_sizes")
+            if isinstance(card_config.get("text_sizes"), dict)
+            else None
+        ),
     )
 
 

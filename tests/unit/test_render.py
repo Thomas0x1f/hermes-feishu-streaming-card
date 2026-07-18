@@ -606,6 +606,133 @@ def test_render_long_main_content_splits_markdown_elements_without_truncating():
     assert "".join(item["content"] for item in main_elements) == session.answer_text
 
 
+def test_render_card_default_json_has_no_style_or_explicit_body_text_size():
+    session = CardSession(conversation_id="c", message_id="m", chat_id="oc")
+    session.status = "completed"
+    session.answer_text = "正文"
+
+    card = render_card(session)
+    main = next(
+        item for item in card["body"]["elements"] if item["element_id"] == "main_content"
+    )
+    footer = next(
+        item for item in card["body"]["elements"] if item["element_id"] == "footer"
+    )
+
+    assert "style" not in card["config"]
+    assert "text_size" not in main
+    assert footer["text_size"] == "x-small"
+
+
+def test_render_scalar_text_sizes_apply_to_each_role_and_body_chunks():
+    from hermes_feishu_card.events import SidecarEvent
+
+    session = CardSession(conversation_id="c", message_id="m", chat_id="oc")
+    base = {
+        "schema_version": "1",
+        "conversation_id": "c",
+        "message_id": "m",
+        "chat_id": "oc",
+        "platform": "feishu",
+        "created_at": 0.0,
+    }
+    session.apply(
+        SidecarEvent(
+            event="answer.delta",
+            sequence=1,
+            data={"text": "先分析实现。"},
+            **base,
+        )
+    )
+    session.apply(
+        SidecarEvent(
+            event="tool.updated",
+            sequence=2,
+            data={
+                "tool_id": "terminal",
+                "name": "terminal",
+                "status": "completed",
+                "detail": "pytest",
+            },
+            **base,
+        )
+    )
+    session.apply(
+        SidecarEvent(
+            event="system.notice",
+            sequence=3,
+            data={"title": "提示", "content": "已切换上下文"},
+            **base,
+        )
+    )
+    session.apply(
+        SidecarEvent(
+            event="message.completed",
+            sequence=4,
+            data={"answer": "甲" * 2600},
+            **base,
+        )
+    )
+    session.attachments = [{"name": "report.txt"}]
+
+    card = render_card(
+        session,
+        timeline_expanded=True,
+        text_sizes={
+            "body": "large",
+            "reasoning": "medium",
+            "tool": "small",
+            "notice": "notation",
+            "footer": "normal",
+        },
+    )
+
+    main = [
+        item
+        for item in card["body"]["elements"]
+        if str(item.get("element_id", "")).startswith("main_content")
+    ]
+    timeline = next(
+        item
+        for item in card["body"]["elements"]
+        if item.get("element_id") == "auxiliary_timeline"
+    )
+    reasoning = next(item for item in timeline["elements"] if "思考" in item["content"])
+    tool = next(item for item in timeline["elements"] if "terminal" in item["content"])
+    notice = next(item for item in timeline["elements"] if "提示" in item["content"])
+    attachment = next(
+        item
+        for item in card["body"]["elements"]
+        if item.get("element_id") == "attachment_summary"
+    )
+    footer = next(
+        item for item in card["body"]["elements"] if item.get("element_id") == "footer"
+    )
+
+    assert len(main) > 1
+    assert all(item["text_size"] == "large" for item in main)
+    assert reasoning["text_size"] == "medium"
+    assert tool["text_size"] == "small"
+    assert notice["text_size"] == "notation"
+    assert footer["text_size"] == "normal"
+    assert "text_size" not in attachment
+
+
+def test_render_independent_notice_uses_notice_text_size():
+    session = CardSession(conversation_id="c", message_id="n", chat_id="oc")
+    session.delivery_kind = "notice"
+    session.notice_title = "通知"
+    session.answer_text = "通知正文"
+    session.status = "completed"
+
+    card = render_card(session, text_sizes={"body": "large", "notice": "small"})
+    main = next(
+        item for item in card["body"]["elements"] if item["element_id"] == "main_content"
+    )
+
+    assert main["text_size"] == "small"
+
+
 def test_render_long_table_chunks_keep_markdown_table_shape():
     session = CardSession(conversation_id="chat-1", message_id="msg-1", chat_id="oc_abc")
     rows = "\n".join(f"| {index} | {'甲' * 80} |" for index in range(80))
