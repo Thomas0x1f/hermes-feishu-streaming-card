@@ -202,7 +202,7 @@ sidecar 负责：
 - 根据 `bindings.chats` 选择 bot 或 fallback/default 路由。
 - 在群内 `/hfc status` 中提示是否已绑定当前 chat。
 - 读取 `bindings.group_rules` 的 enabled/require_mention/计数用于安全诊断，不展示真实 chat/user id。
-- 说明群内 `/new`、`/model`、`/reset` 等 slash command 先经过 Hermes 准入，再进入独立命令卡片；`/update` 仍是 Hermes 后台升级命令。
+- 说明群内所有 slash command 先经过 Hermes 准入；built-in、alias、plugin/quick 和 unknown command 的非空文本反馈都进入独立命令卡片。`/update` 仍是后台升级命令，仅将重启前反馈卡片化。
 
 ## 运维卡与恢复边界
 

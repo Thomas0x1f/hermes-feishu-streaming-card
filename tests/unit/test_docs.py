@@ -1821,3 +1821,11 @@ def test_all_command_feedback_card_lifecycle_is_documented():
     assert "V4.0.13 全命令反馈卡片" in acceptance
     assert "手动 `/compress`" in acceptance
     assert "V4.0.13：Hermes 全命令反馈卡片化" in todo
+
+    wiki = read_doc("docs/wiki/README.md")
+    assert "全命令反馈卡片" in wiki
+    assert "plugin/quick" in wiki
+
+    readiness = read_doc("docs/release-readiness.md")
+    assert "所有非空文本反馈" in readiness
+    assert "重启前反馈进入命令卡" in readiness
