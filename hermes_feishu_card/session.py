@@ -54,6 +54,8 @@ class InteractionState:
     callback_token: str = ""
     choice: str = ""
     choice_label: str = ""
+    choices: list[str] = field(default_factory=list)
+    choice_labels: list[str] = field(default_factory=list)
     user_name: str = ""
     error: str = ""
 
@@ -352,6 +354,18 @@ class CardSession:
         self.active_interaction.choice_label = str(
             data.get("choice_label") or self.active_interaction.choice
         ).strip()
+        choices = data.get("choices")
+        self.active_interaction.choices = (
+            [str(item).strip() for item in choices if str(item).strip()]
+            if isinstance(choices, list)
+            else []
+        )
+        choice_labels = data.get("choice_labels")
+        self.active_interaction.choice_labels = (
+            [str(item).strip() for item in choice_labels if str(item).strip()]
+            if isinstance(choice_labels, list)
+            else []
+        )
         self.active_interaction.user_name = str(data.get("user_name") or "").strip()
 
     def _fail_interaction(self, data: dict[str, Any]) -> None:

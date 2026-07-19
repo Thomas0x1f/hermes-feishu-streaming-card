@@ -414,9 +414,12 @@ async def _interaction_action(
 ) -> web.Response:
     interaction_id = str(value.get("interaction_id") or "").strip()
     token = str(value.get("token") or "").strip()
+    is_multi_select = str(value.get("hfc_action") or "").strip() == (
+        "interaction.multi_select"
+    )
     choice = str(value.get("choice") or "").strip()
     choice_label = str(value.get("choice_label") or choice).strip()
-    if not interaction_id or not token or not choice:
+    if not interaction_id or not token or (not is_multi_select and not choice):
         return web.json_response({"ok": False, "error": "invalid action"}, status=400)
 
     callback_chat_id = _extract_callback_chat_id(payload)
@@ -424,13 +427,43 @@ async def _interaction_action(
     if found is None:
         return web.json_response({"ok": False, "error": "interaction not found"}, status=404)
     session_key, session = found
+    if (
+        session.active_interaction is not None
+        and session.active_interaction.status == "completed"
+    ):
+        return web.json_response(
+            {
+                "ok": True,
+                "toast": {"type": "success", "content": "已选择"},
+                "card": _render_session_card(request, session),
+            }
+        )
     user_name = _extract_operator_name(payload)
-    data = {
-        "interaction_id": interaction_id,
-        "choice": choice,
-        "choice_label": choice_label,
-        "user_name": user_name,
-    }
+    if is_multi_select:
+        interaction = session.active_interaction
+        if interaction is None or interaction.kind != "multi_select":
+            return web.json_response(
+                {"ok": False, "error": "invalid action"}, status=400
+            )
+        selected = _extract_multi_select_choices(payload)
+        allowed_labels = {option.value: option.label for option in interaction.options}
+        if not selected or any(item not in allowed_labels for item in selected):
+            return web.json_response(
+                {"ok": False, "error": "invalid selection"}, status=400
+            )
+        data = {
+            "interaction_id": interaction_id,
+            "choices": selected,
+            "choice_labels": [allowed_labels[item] for item in selected],
+            "user_name": user_name,
+        }
+    else:
+        data = {
+            "interaction_id": interaction_id,
+            "choice": choice,
+            "choice_label": choice_label,
+            "user_name": user_name,
+        }
     if ":" in session_key:
         data["profile_id"] = session_key.split(":", 1)[0]
     event = SidecarEvent(
@@ -2380,12 +2413,21 @@ def _store_interaction_result(app: web.Application, session: CardSession) -> Non
     interaction = session.active_interaction
     if interaction is None:
         return
-    app[INTERACTION_RESULTS_KEY][interaction.interaction_id] = {
-        "interaction_id": interaction.interaction_id,
-        "status": interaction.status,
-        "choice": interaction.choice,
-        "choice_label": interaction.choice_label,
-    }
+    if interaction.kind == "multi_select":
+        result = {
+            "interaction_id": interaction.interaction_id,
+            "status": interaction.status,
+            "choices": interaction.choices,
+            "choice_labels": interaction.choice_labels,
+        }
+    else:
+        result = {
+            "interaction_id": interaction.interaction_id,
+            "status": interaction.status,
+            "choice": interaction.choice,
+            "choice_label": interaction.choice_label,
+        }
+    app[INTERACTION_RESULTS_KEY][interaction.interaction_id] = result
     app[INTERACTION_RESULT_SESSION_KEYS_KEY][interaction.interaction_id] = (
         _session_key_for_session(app, session)
     )
@@ -2400,6 +2442,23 @@ def _extract_action_value(payload: dict[str, Any]) -> dict[str, Any]:
     action = payload.get("action") if isinstance(payload, dict) else None
     value = action.get("value") if isinstance(action, dict) else None
     return value if isinstance(value, dict) else {}
+
+
+def _extract_multi_select_choices(payload: dict[str, Any]) -> list[str]:
+    event = payload.get("event") if isinstance(payload, dict) else None
+    action = event.get("action") if isinstance(event, dict) else None
+    if not isinstance(action, dict):
+        action = payload.get("action") if isinstance(payload, dict) else None
+    form_value = action.get("form_value") if isinstance(action, dict) else None
+    raw_choices = form_value.get("hfc_choices") if isinstance(form_value, dict) else None
+    if not isinstance(raw_choices, list):
+        return []
+    choices: list[str] = []
+    for item in raw_choices:
+        normalized = str(item).strip()
+        if normalized and normalized not in choices:
+            choices.append(normalized)
+    return choices
 
 
 def _extract_callback_chat_id(payload: dict[str, Any]) -> str:

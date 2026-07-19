@@ -335,6 +335,54 @@ def _render_interaction_elements(
             )
         return elements
 
+    if interaction.status == "pending" and interaction.kind == "multi_select":
+        elements.append(
+            {
+                "tag": "form",
+                "name": "hfc_multi_select_form",
+                "element_id": "interaction_multi_select_form",
+                "elements": [
+                    {
+                        "tag": "multi_select_static",
+                        "name": "hfc_choices",
+                        "element_id": "interaction_multi_select_choices",
+                        "required": True,
+                        "options": [
+                            {
+                                "text": {
+                                    "tag": "plain_text",
+                                    "content": option.label,
+                                },
+                                "value": option.value,
+                            }
+                            for option in interaction.options
+                        ],
+                    },
+                    {
+                        "tag": "button",
+                        "name": "hfc_multi_select_submit",
+                        "element_id": "interaction_multi_select_submit",
+                        "text": {"tag": "plain_text", "content": "确认选择"},
+                        "type": "primary",
+                        "size": "medium",
+                        "width": "default",
+                        "form_action_type": "submit",
+                        "behaviors": [
+                            {
+                                "type": "callback",
+                                "value": {
+                                    "hfc_action": "interaction.multi_select",
+                                    "interaction_id": interaction.interaction_id,
+                                    "token": interaction.callback_token,
+                                },
+                            }
+                        ],
+                    },
+                ],
+            }
+        )
+        return elements
+
     if interaction.status == "pending":
         for index, option in enumerate(interaction.options):
             elements.append(
@@ -362,7 +410,10 @@ def _render_interaction_elements(
         return elements
 
     if interaction.status == "completed":
-        choice = interaction.choice_label or interaction.choice or "已完成"
+        if interaction.kind == "multi_select":
+            choice = "、".join(interaction.choice_labels or interaction.choices) or "已完成"
+        else:
+            choice = interaction.choice_label or interaction.choice or "已完成"
         user = f" by {interaction.user_name}" if interaction.user_name else ""
         content = f"已选择：{choice}{user}"
     else:
