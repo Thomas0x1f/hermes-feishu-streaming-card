@@ -4872,7 +4872,12 @@ def _send_lock(url: str, payload: dict[str, Any]) -> asyncio.Lock | None:
     message_id = payload.get("message_id")
     if not isinstance(message_id, str) or not message_id:
         return None
-    loop = asyncio.get_running_loop()
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # Called from a context without a running loop (gateway drain,
+        # cross-thread submit) — skip ordering and let the send proceed.
+        return None
     key = (id(loop), url, message_id)
     with _SEND_LOCKS_GUARD:
         lock = _SEND_LOCKS.get(key)
@@ -4890,7 +4895,14 @@ async def _post_json(url: str, payload: dict[str, Any], timeout: float) -> None:
         headers=_post_headers(url, body),
         method="POST",
     )
-    loop = asyncio.get_running_loop()
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop (loop teardown / cross-thread call): block inline
+        # so the notice still goes out instead of surfacing an uncertain
+        # delivery warning to the user.
+        _open_request(req, timeout)
+        return
     await loop.run_in_executor(None, _open_request, req, timeout)
 
 
@@ -4902,7 +4914,10 @@ async def _post_json_response(url: str, payload: dict[str, Any], timeout: float)
         headers=_post_headers(url, body),
         method="POST",
     )
-    loop = asyncio.get_running_loop()
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return _open_json_request(req, timeout)
     return await loop.run_in_executor(None, _open_json_request, req, timeout)
 
 
