@@ -53,6 +53,7 @@ from .install.recovery import execute_recovery, plan_recovery
 FEISHU_CLIENT_KEY = web.AppKey("feishu_client", Any)
 SESSIONS_KEY = web.AppKey("sessions", dict)
 FEISHU_MESSAGE_IDS_KEY = web.AppKey("feishu_message_ids", dict)
+RECREATE_DEBOUNCE_KEY = web.AppKey("recreate_debounce_tasks", dict)
 SESSION_ALIASES_KEY = web.AppKey("session_aliases", dict)
 CARD_SUMMARIES_KEY = web.AppKey("card_summaries", dict)
 CARD_SUMMARY_SESSION_KEYS_KEY = web.AppKey("card_summary_session_keys", dict)
@@ -196,6 +197,7 @@ def create_app(
     app[INTERACTION_RESULTS_KEY] = {}
     app[INTERACTION_RESULT_SESSION_KEYS_KEY] = {}
     app[MESSAGE_BOT_IDS_KEY] = {}
+    app[RECREATE_DEBOUNCE_KEY] = {}
     app[SESSION_CARD_CONFIGS_KEY] = {}
     app[BOT_ROUTER_KEY] = bot_router
     app[PROCESS_TOKEN_KEY] = process_token
@@ -1697,18 +1699,34 @@ async def _conversation_bumped(request: web.Request) -> web.Response:
             continue
         if not session.displaced:
             session.displaced = True
-            displaced_keys.append(key)
-    # Re-create displaced cards immediately: a long tool call may not emit
-    # another event for minutes, and the card should drop below the user's
-    # new message right away rather than on the next event.
+        displaced_keys.append(key)
+    # Re-create displaced cards after a short debounce: a bot turn often
+    # lands several messages back-to-back (a receipt plus attachments), and
+    # each fires a bump — coalesce them into one re-create at the tail so
+    # the card drops below the last message instead of thrashing.
+    debounce: Dict[str, asyncio.Task] = request.app[RECREATE_DEBOUNCE_KEY]
     for key in displaced_keys:
-        asyncio.get_running_loop().create_task(
-            _render_displaced_now(request.app, key)
+        pending = debounce.get(key)
+        if pending is not None and not pending.done():
+            continue
+        debounce[key] = asyncio.get_running_loop().create_task(
+            _debounced_render_displaced(request.app, key)
         )
     logger.warning(
         "conversation bumped: %d live session(s) displaced", len(displaced_keys)
     )
     return web.json_response({"ok": True, "displaced": len(displaced_keys)})
+
+
+_RECREATE_DEBOUNCE_SECONDS = 2.0
+
+
+async def _debounced_render_displaced(app: web.Application, session_key: str) -> None:
+    try:
+        await asyncio.sleep(_RECREATE_DEBOUNCE_SECONDS)
+    finally:
+        app[RECREATE_DEBOUNCE_KEY].pop(session_key, None)
+    await _render_displaced_now(app, session_key)
 
 
 async def _render_displaced_now(app: web.Application, session_key: str) -> None:

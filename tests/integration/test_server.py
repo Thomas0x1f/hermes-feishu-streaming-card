@@ -7081,7 +7081,10 @@ async def test_conversation_bumped_ignores_completed_sessions(client):
     assert (await resp.json())["displaced"] == 0
 
 
-async def test_conversation_bumped_recreates_immediately_without_new_event(client):
+async def test_conversation_bumped_recreates_immediately_without_new_event(
+    client, monkeypatch
+):
+    monkeypatch.setattr(sidecar_server, "_RECREATE_DEBOUNCE_SECONDS", 0.05)
     test_client, feishu_client = client
     await test_client.post("/events", json=event_payload("message.started", 0))
     assert len(feishu_client.sent) == 1
@@ -7097,4 +7100,21 @@ async def test_conversation_bumped_recreates_immediately_without_new_event(clien
         if len(feishu_client.sent) >= 2:
             break
         await asyncio.sleep(0.02)
+    assert len(feishu_client.sent) == 2
+
+
+async def test_conversation_bump_bursts_coalesce_into_one_recreate(
+    client, monkeypatch
+):
+    monkeypatch.setattr(sidecar_server, "_RECREATE_DEBOUNCE_SECONDS", 0.15)
+    test_client, feishu_client = client
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    assert len(feishu_client.sent) == 1
+
+    # A bot turn firing several messages back-to-back bumps repeatedly;
+    # the debounce must coalesce them into a single re-create.
+    for _ in range(4):
+        await test_client.post("/conversation/bumped", json={"chat_id": "oc_abc"})
+        await asyncio.sleep(0.02)
+    await asyncio.sleep(0.4)
     assert len(feishu_client.sent) == 2

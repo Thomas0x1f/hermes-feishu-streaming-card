@@ -4328,6 +4328,48 @@ async def _hfc_handle_message_event_data(self: Any, data: Any) -> Any:
     return None
 
 
+_HFC_OUTBOUND_BUMP_METHODS = (
+    "send",
+    "send_image",
+    "send_image_file",
+    "send_document",
+    "send_video",
+    "send_voice",
+    "send_animation",
+)
+
+
+def _hfc_wrap_outbound_bump(adapter_type: type, method_name: str) -> None:
+    """Wrap an adapter outbound method to bump the chat after a send.
+
+    Bot-sent messages (receipts, MEDIA attachments, kanban notices) displace
+    a live streaming card just like user messages do; the sidecar coalesces
+    rapid bumps and re-creates the card below the newest message.
+    """
+    flag = f"_hfc_outbound_bump_wrapped_{method_name}"
+    if getattr(adapter_type, flag, False):
+        return
+    original = getattr(adapter_type, method_name, None)
+    if not callable(original):
+        return
+
+    async def _bump_after_send(self, chat_id, *args, __hfc_orig=original, **kwargs):
+        result = await __hfc_orig(self, chat_id, *args, **kwargs)
+        try:
+            success = bool(getattr(result, "success", True))
+            if success and isinstance(chat_id, str) and chat_id.startswith("oc_"):
+                asyncio.get_running_loop().run_in_executor(
+                    None, _hfc_notify_conversation_bumped, chat_id
+                )
+        except Exception:
+            pass
+        return result
+
+    _bump_after_send.__name__ = f"_hfc_bump_{method_name}"
+    setattr(adapter_type, method_name, _bump_after_send)
+    setattr(adapter_type, flag, True)
+
+
 def _hfc_refresh_feishu_event_handler(adapter: Any) -> bool:
     if getattr(adapter, "_hfc_command_card_event_handler_refreshed", False) or getattr(
         adapter,
@@ -4618,6 +4660,9 @@ def install_feishu_command_card_adapter_methods(runner: Any, event: Any = None) 
                         "inbound bump wrap skipped: _handle_message_event_data "
                         "not found on adapter type"
                     )
+
+            for _bump_method in _HFC_OUTBOUND_BUMP_METHODS:
+                _hfc_wrap_outbound_bump(adapter_type, _bump_method)
 
             current_send = adapter_type.__dict__.get("send")
             if current_send is _hfc_send_with_native_command_result_card:
