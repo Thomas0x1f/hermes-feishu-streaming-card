@@ -1698,6 +1698,9 @@ async def _conversation_bumped(request: web.Request) -> web.Response:
         if not session.displaced:
             session.displaced = True
             displaced += 1
+    logger.info(
+        "conversation bumped: %d live session(s) displaced", displaced
+    )
     return web.json_response({"ok": True, "displaced": displaced})
 
 

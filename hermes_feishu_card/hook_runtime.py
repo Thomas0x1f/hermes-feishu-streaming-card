@@ -4295,11 +4295,13 @@ def _hfc_notify_conversation_bumped(chat_id: str) -> None:
     try:
         config = load_runtime_config()
         base = _summary_base_url(config.event_url)
-        _post_json_sync_response(
+        result = _post_json_sync_response(
             f"{base}/conversation/bumped", {"chat_id": chat_id}, 2.0
         )
-    except Exception:
-        pass
+        displaced = result.get("displaced") if isinstance(result, dict) else "?"
+        _hfc_info(f"conversation bumped: displaced={displaced}")
+    except Exception as exc:
+        _hfc_warn(f"conversation bump failed: {exc.__class__.__name__}: {exc}")
 
 
 async def _hfc_handle_message_event_data(self: Any, data: Any) -> Any:
@@ -4610,6 +4612,7 @@ def install_feishu_command_card_adapter_methods(runner: Any, event: Any = None) 
                         _hfc_handle_message_event_data,
                     )
                     setattr(adapter_type, "_hfc_inbound_bump_wrapped", True)
+                    _hfc_info("inbound bump wrap installed on feishu adapter")
 
             current_send = adapter_type.__dict__.get("send")
             if current_send is _hfc_send_with_native_command_result_card:
