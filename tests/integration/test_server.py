@@ -7079,3 +7079,22 @@ async def test_conversation_bumped_ignores_completed_sessions(client):
         "/conversation/bumped", json={"chat_id": "oc_abc"}
     )
     assert (await resp.json())["displaced"] == 0
+
+
+async def test_conversation_bumped_recreates_immediately_without_new_event(client):
+    test_client, feishu_client = client
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    assert len(feishu_client.sent) == 1
+
+    resp = await test_client.post(
+        "/conversation/bumped", json={"chat_id": "oc_abc"}
+    )
+    assert (await resp.json())["displaced"] == 1
+
+    # No further events: the re-create task fired by the bump endpoint alone
+    # must send the fresh bottom card.
+    for _ in range(100):
+        if len(feishu_client.sent) >= 2:
+            break
+        await asyncio.sleep(0.02)
+    assert len(feishu_client.sent) == 2

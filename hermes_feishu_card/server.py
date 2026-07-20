@@ -1689,19 +1689,47 @@ async def _conversation_bumped(request: web.Request) -> web.Response:
             {"ok": False, "error": "chat_id is required"}, status=400
         )
     sessions: Dict[str, CardSession] = request.app[SESSIONS_KEY]
-    displaced = 0
-    for session in sessions.values():
+    displaced_keys: list[str] = []
+    for key, session in sessions.items():
         if session.chat_id != chat_id:
             continue
         if session.status in {"completed", "failed"}:
             continue
         if not session.displaced:
             session.displaced = True
-            displaced += 1
+            displaced_keys.append(key)
+    # Re-create displaced cards immediately: a long tool call may not emit
+    # another event for minutes, and the card should drop below the user's
+    # new message right away rather than on the next event.
+    for key in displaced_keys:
+        asyncio.get_running_loop().create_task(
+            _render_displaced_now(request.app, key)
+        )
     logger.warning(
-        "conversation bumped: %d live session(s) displaced", displaced
+        "conversation bumped: %d live session(s) displaced", len(displaced_keys)
     )
-    return web.json_response({"ok": True, "displaced": displaced})
+    return web.json_response({"ok": True, "displaced": len(displaced_keys)})
+
+
+async def _render_displaced_now(app: web.Application, session_key: str) -> None:
+    """Immediately re-create a just-displaced card at the bottom of its chat."""
+    sessions: Dict[str, CardSession] = app[SESSIONS_KEY]
+    session = sessions.get(session_key)
+    if session is None or not session.displaced:
+        return
+    if session.status in {"completed", "failed"}:
+        return
+    card = _render_session_card_for_app(app, session)
+    bot_id = app[MESSAGE_BOT_IDS_KEY].get(session_key)
+    previous = app[FEISHU_MESSAGE_IDS_KEY].get(session_key)
+    await _recreate_card_at_bottom(
+        app,
+        session_key,
+        session,
+        card,
+        bot_id,
+        previous_message_id=previous,
+    )
 
 
 async def _recreate_card_at_bottom(
@@ -1720,6 +1748,9 @@ async def _recreate_card_at_bottom(
     (best effort).  Returns False when the send did not go through so the
     caller can keep patching the old card.
     """
+    # Claim the flag up front so a concurrent event render does not also
+    # re-create; on failure the caller falls back to patching the old card.
+    session.displaced = False
     delivery = await _send_card_for_app(
         app,
         session.chat_id,
@@ -1736,7 +1767,6 @@ async def _recreate_card_at_bottom(
         return False
     feishu_message_ids: Dict[str, str] = app[FEISHU_MESSAGE_IDS_KEY]
     feishu_message_ids[session_key] = delivery.message_id
-    session.displaced = False
     if previous_message_id and previous_message_id != delivery.message_id:
         asyncio.get_running_loop().create_task(
             _retire_displaced_card(app, previous_message_id, bot_id)
