@@ -4765,6 +4765,131 @@ async def test_interaction_request_renders_buttons_and_callback_resolves(client)
     assert "已选择：允许一次" in str(feishu_client.updated[-1][1])
 
 
+async def test_multi_select_interaction_submit_returns_stable_values(client):
+    test_client, feishu_client = client
+
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    requested = await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            1,
+            {
+                "interaction_id": "materials-1",
+                "kind": "multi_select",
+                "prompt": "请选择接待物料",
+                "options": [
+                    {"label": "水牌", "value": "water_sign"},
+                    {"label": "会议桌签", "value": "table_card"},
+                    {"label": "会议用纸", "value": "meeting_paper"},
+                ],
+            },
+        ),
+    )
+    assert requested.status == 200
+
+    interaction_card = feishu_client.updated[-1][1]
+    form = next(
+        element
+        for element in interaction_card["body"]["elements"]
+        if element.get("tag") == "form"
+    )
+    submit = next(
+        element for element in form["elements"] if element.get("tag") == "button"
+    )
+    action_value = submit["behaviors"][0]["value"]
+
+    callback_payload = {
+        "event": {
+            "operator": {"open_id": "ou_bailey", "name": "Bailey"},
+            "context": {"open_chat_id": "oc_abc"},
+            "action": {
+                "value": action_value,
+                "form_value": {
+                    "hfc_choices": ["water_sign", "table_card"],
+                },
+            },
+        }
+    }
+    callback = await test_client.post(
+        "/card/actions",
+        json=callback_payload,
+    )
+    result = await test_client.get("/interactions/materials-1")
+
+    assert callback.status == 200
+    assert (await callback.json())["ok"] is True
+    assert result.status == 200
+    assert await result.json() == {
+        "ok": True,
+        "status": "completed",
+        "choices": ["water_sign", "table_card"],
+        "choice_labels": ["水牌", "会议桌签"],
+        "interaction_id": "materials-1",
+    }
+    completed_card = str(feishu_client.updated[-1][1])
+    assert "已选择：水牌、会议桌签" in completed_card
+
+    updates_after_first_submit = len(feishu_client.updated)
+    duplicate = await test_client.post("/card/actions", json=callback_payload)
+    assert duplicate.status == 200
+    assert (await duplicate.json())["ok"] is True
+    assert len(feishu_client.updated) == updates_after_first_submit
+
+
+@pytest.mark.parametrize("selected", [[], ["unknown_material"]])
+async def test_multi_select_interaction_rejects_empty_or_unknown_values(
+    client, selected
+):
+    test_client, feishu_client = client
+
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            1,
+            {
+                "interaction_id": "materials-invalid",
+                "kind": "multi_select",
+                "prompt": "请选择接待物料",
+                "options": [
+                    {"label": "水牌", "value": "water_sign"},
+                    {"label": "会议桌签", "value": "table_card"},
+                ],
+            },
+        ),
+    )
+    interaction_card = feishu_client.updated[-1][1]
+    form = next(
+        element
+        for element in interaction_card["body"]["elements"]
+        if element.get("tag") == "form"
+    )
+    submit = next(
+        element for element in form["elements"] if element.get("tag") == "button"
+    )
+
+    callback = await test_client.post(
+        "/card/actions",
+        json={
+            "event": {
+                "context": {"open_chat_id": "oc_abc"},
+                "action": {
+                    "value": submit["behaviors"][0]["value"],
+                    "form_value": {"hfc_choices": selected},
+                },
+            }
+        },
+    )
+    result = await test_client.get("/interactions/materials-invalid")
+
+    assert callback.status == 400
+    assert (await callback.json()) == {"ok": False, "error": "invalid selection"}
+    assert (await result.json())["status"] == "pending"
+    assert "multi_select_static" in str(feishu_client.updated[-1][1])
+
+
 def test_interaction_operator_name_never_falls_back_to_feishu_ids():
     assert sidecar_server._extract_operator_name(
         {"event": {"operator": {"open_id": "ou_private", "user_id": "on_private"}}}

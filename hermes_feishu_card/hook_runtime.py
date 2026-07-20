@@ -3414,6 +3414,7 @@ def _hfc_on_feishu_card_action_trigger(self: Any, data: Any) -> Any:
         "model_picker",
         "resume_picker",
         "interaction.select",
+        "interaction.multi_select",
     ):
         if _hfc_is_duplicate_card_action(self, data):
             return _hfc_empty_feishu_callback_response(self)
@@ -3425,6 +3426,8 @@ def _hfc_on_feishu_card_action_trigger(self: Any, data: Any) -> Any:
     if action == "resume_picker":
         return _hfc_handle_native_resume_action(self, data, action_value)
     if action == "interaction.select":
+        return _hfc_handle_interaction_select_action(self, data, action_value)
+    if action == "interaction.multi_select":
         return _hfc_handle_interaction_select_action(self, data, action_value)
     if action == "operations.select":
         return _hfc_handle_operations_select_action(self, data, action_value)
@@ -3575,13 +3578,18 @@ def _hfc_handle_interaction_select_action(
     so the Hermes hook polling ``/interactions/{id}`` unblocks), and return the
     sidecar's updated card so Feishu updates the card in place.
     """
-    _hfc_info("inline card action received: interaction.select")
+    action = str(action_value.get("hfc_action") or "interaction.select").strip()
+    is_multi_select = action == "interaction.multi_select"
+    _hfc_info(f"inline card action received: {action}")
     interaction_id = str(action_value.get("interaction_id") or "").strip()
     token = str(action_value.get("token") or "").strip()
     choice = str(action_value.get("choice") or action_value.get("hfc_choice") or "").strip()
     choice_label = str(action_value.get("choice_label") or choice).strip()
-    if not interaction_id or not token or not choice:
-        _hfc_info("interaction.select ignored: missing interaction_id/token/choice")
+    form_choices = _hfc_multi_select_choices_from_data(data) if is_multi_select else []
+    if not interaction_id or not token or (is_multi_select and not form_choices) or (
+        not is_multi_select and not choice
+    ):
+        _hfc_info(f"{action} ignored: missing interaction_id/token/choice")
         return _hfc_empty_feishu_callback_response(adapter)
 
     chat_id = _hfc_action_chat_id(data)
@@ -3602,17 +3610,20 @@ def _hfc_handle_interaction_select_action(
     if open_id:
         operator_payload["open_id"] = open_id
 
+    forwarded_value = {
+        "hfc_action": action,
+        "interaction_id": interaction_id,
+        "token": token,
+    }
+    forwarded_action: dict[str, Any] = {"value": forwarded_value}
+    if is_multi_select:
+        forwarded_action["form_value"] = {"hfc_choices": form_choices}
+    else:
+        forwarded_value["choice"] = choice
+        forwarded_value["choice_label"] = choice_label
     sidecar_payload = {
         "event": {
-            "action": {
-                "value": {
-                    "hfc_action": "interaction.select",
-                    "interaction_id": interaction_id,
-                    "choice": choice,
-                    "choice_label": choice_label,
-                    "token": token,
-                }
-            },
+            "action": forwarded_action,
             "context": {"open_chat_id": chat_id},
             "operator": operator_payload,
         }
@@ -3624,14 +3635,29 @@ def _hfc_handle_interaction_select_action(
         url = f"{base_url}/card/actions"
         result = _post_json_sync_response(url, sidecar_payload, 5.0)
     except Exception as exc:
-        _hfc_warn(f"interaction.select forward failed: {exc.__class__.__name__}: {exc}")
+        _hfc_warn(f"{action} forward failed: {exc.__class__.__name__}: {exc}")
         return _hfc_empty_feishu_callback_response(adapter)
 
     if isinstance(result, dict) and isinstance(result.get("card"), dict):
-        _hfc_info(f"interaction.select resolved: interaction_id={interaction_id!r}")
+        _hfc_info(f"{action} resolved: interaction_id={interaction_id!r}")
         return _hfc_raw_feishu_callback_response(adapter, result["card"])
-    _hfc_info("interaction.select forwarded but no card returned")
+    _hfc_info(f"{action} forwarded but no card returned")
     return _hfc_empty_feishu_callback_response(adapter)
+
+
+def _hfc_multi_select_choices_from_data(data: Any) -> list[str]:
+    event_obj = getattr(data, "event", None)
+    action_obj = getattr(event_obj, "action", None)
+    form_value = getattr(action_obj, "form_value", {}) or {}
+    raw_choices = form_value.get("hfc_choices") if isinstance(form_value, dict) else None
+    if not isinstance(raw_choices, list):
+        return []
+    choices: list[str] = []
+    for item in raw_choices:
+        normalized = str(item).strip()
+        if normalized and normalized not in choices:
+            choices.append(normalized)
+    return choices
 
 
 def _hfc_resolve_native_slash_action(
@@ -4273,6 +4299,16 @@ async def _hfc_handle_feishu_card_action_event(self: Any, data: Any) -> None:
             action_value,
         )
         return
+    if action == "interaction.multi_select":
+        if _hfc_is_duplicate_card_action(self, data):
+            return
+        await asyncio.to_thread(
+            _hfc_handle_interaction_select_action,
+            self,
+            data,
+            action_value,
+        )
+        return
     if action == "operations.select":
         _hfc_info("background operations.select claimed by HFC")
         return
@@ -4722,6 +4758,10 @@ def install_feishu_command_card_adapter_methods(runner: Any, event: Any = None) 
         return False
 
 
+_HFC_MULTI_SELECT_QUESTION_PREFIX = "[hfc:multi-select]"
+_HFC_MULTI_SELECT_CHOICE_SEPARATOR = "::"
+
+
 def request_clarify_response_from_hermes_locals(
     local_vars: dict[str, Any],
     *,
@@ -4732,14 +4772,26 @@ def request_clarify_response_from_hermes_locals(
 ) -> str | None:
     if not choices:
         return None
+    normalized_question = str(question or "请选择").strip()
+    is_multi_select = normalized_question.startswith(_HFC_MULTI_SELECT_QUESTION_PREFIX)
+    if is_multi_select:
+        normalized_question = normalized_question[
+            len(_HFC_MULTI_SELECT_QUESTION_PREFIX) :
+        ].strip() or "请选择"
     options = []
     for index, choice in enumerate(list(choices)):
         label = str(choice).strip()
+        value = label
+        if is_multi_select and _HFC_MULTI_SELECT_CHOICE_SEPARATOR in label:
+            label, value = (
+                part.strip()
+                for part in label.split(_HFC_MULTI_SELECT_CHOICE_SEPARATOR, 1)
+            )
         if label:
             options.append(
                 {
                     "label": label,
-                    "value": label,
+                    "value": value,
                     "style": "primary" if index == 0 else "default",
                 }
             )
@@ -4747,15 +4799,22 @@ def request_clarify_response_from_hermes_locals(
         return None
     result = request_interaction_from_hermes_locals(
         local_vars,
-        kind="clarify",
+        kind="multi_select" if is_multi_select else "clarify",
         interaction_id=interaction_id,
-        prompt=str(question or "请选择").strip(),
+        prompt=normalized_question,
         options=options,
         timeout_seconds=timeout_seconds,
     )
     if isinstance(result, dict) and result.get("status") == "completed":
+        if is_multi_select:
+            selected = result.get("choices")
+            if isinstance(selected, list) and selected:
+                values = [str(item).strip() for item in selected if str(item).strip()]
+                return json.dumps(values, ensure_ascii=False) if values else None
         choice = str(result.get("choice") or "").strip()
         return choice or None
+    if is_multi_select:
+        return "[hfc multi-select unavailable; ask the user to reply with text]"
     return None
 
 

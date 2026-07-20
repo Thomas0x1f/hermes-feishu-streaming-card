@@ -185,6 +185,12 @@ V3.10.0 的 command-card adapter hook 会在运行时包装 runner 的 `_handle_
 
 Agent 任务内的 `interaction.requested` 会渲染为当前 streaming card 里的按钮。
 
+HFC 还支持在不修改 Hermes `clarify` schema 的前提下请求真正多选：question 以
+`[hfc:multi-select]` 开头，choices 使用 `显示名::稳定值`。hook 会移除内部前缀，
+把选项渲染为 Card JSON 2.0 的 `form + multi_select_static + submit`，完成后向
+Hermes 返回稳定值 JSON 数组。空选择、未知值和重复提交不会重复完成 interaction；
+多选卡不可用时返回明确 sentinel，由 agent 回退普通文字，不降级成原生单选。
+
 HTTP callback 可达时，Feishu/Lark 直接 POST 到 sidecar `/card/actions`。在 WebSocket 长连接或本地/private sidecar 场景中，按钮点击会先到 Hermes Feishu adapter 的原生 card-action channel，再由 hook runtime 接管 `interaction.select` 并转发到 sidecar `/card/actions`。
 
 关键边界：
@@ -192,6 +198,8 @@ HTTP callback 可达时，Feishu/Lark 直接 POST 到 sidecar `/card/actions`。
 - sidecar 仍负责校验 `interaction_id` 和 callback token。
 - callback payload 带 `open_chat_id` 时，sidecar 还会确认 chat id 与 active session 匹配。
 - 成功后 sidecar 记录 `interaction.completed`，Hermes hook 轮询 `/interactions/{interaction_id}` 后继续执行。
+- 多选提交从 `action.form_value.hfc_choices` 读取数组，并逐项对照当前
+  interaction options 白名单校验。
 - sidecar 拒绝、超时或没有返回 card 时，hook 返回空 Feishu callback response，避免崩溃或落入未知原生 handler。
 
 ## 群聊边界
