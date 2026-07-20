@@ -54,6 +54,7 @@ $HfcAllowedEnvKeys = @(
     "HERMES_FEISHU_CARD_PORT",
     "HERMES_FEISHU_CARD_PROFILE_ID",
     "HERMES_FEISHU_CARD_EVENT_URL",
+    "HERMES_FEISHU_CARD_NOTICE_UNCERTAIN_WARNING_ENABLED",
     "HFC_CONFIG",
     "HFC_VERSION",
     "HFC_NO_REPAIR"
@@ -259,7 +260,8 @@ foreach ($key in @(
     "FEISHU_CONNECTION_MODE",
     "FEISHU_HOME_CHANNEL",
     "HERMES_FEISHU_CARD_HOST",
-    "HERMES_FEISHU_CARD_PORT"
+    "HERMES_FEISHU_CARD_PORT",
+    "HERMES_FEISHU_CARD_NOTICE_UNCERTAIN_WARNING_ENABLED"
 )) {
     if (!(Get-Item "Env:$key" -ErrorAction SilentlyContinue) -and $envValues.ContainsKey($key)) {
         [Environment]::SetEnvironmentVariable($key, $envValues[$key], "Process")

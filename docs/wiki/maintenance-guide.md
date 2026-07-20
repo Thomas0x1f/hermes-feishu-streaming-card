@@ -28,7 +28,7 @@
 
 - 字段名必须贴合 Hermes 变量：`source`、`event`、`response`、`agent_result`、`event_message_id` 等。
 - Feishu topic 场景必须保留 `source.message_id` 和 `reply_to_message_id`。
-- 已识别 `system.notice` 必须按 sidecar 结果分流：`delivered` 抑制原生文本，`not_sent` 回退原始通知文本，`unknown` 只尝试固定通用提示且不重复原始通知文本；不可解析响应一律视为 `unknown`。
+- 已识别 `system.notice` 必须按 sidecar 结果分流：`delivered` 抑制原生文本，`not_sent` 回退原始通知文本，`unknown` 默认抑制原生提示且不重复原始通知文本；仅当 `HERMES_FEISHU_CARD_NOTICE_UNCERTAIN_WARNING_ENABLED=1` 时尝试固定通用提示 `⚠️ 一条运行提示的卡片投递结果无法确认，请稍后查看 /hfc status。`，不可解析响应一律视为 `unknown`，相关诊断指标始终保留。
 - 上下文压缩只从 `_status_callback_sync` 的固定 `Compacting context` 标记产生 `context-compaction`；不得用静默 watchdog、普通 compression 文本或虚构百分比推断。
 - cron completion hook 必须位于 `extract_media` / `media_files` 过滤之后：`native_delivery=required` 时清空原生正文但继续文件上传，不能在媒体提取前提前返回。
 - 不得恢复固定 command allowlist；built-in、alias、plugin/quick、unknown feedback 都必须经过统一 command context。`/update` 只卡片化重启前反馈，不改变后台升级和重启语义。

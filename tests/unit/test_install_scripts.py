@@ -866,6 +866,13 @@ def test_installers_resolve_profile_arguments_with_shared_precedence(
     assert f"args={setup}" in log
 
 
+@pytest.mark.parametrize("script_name", ["install.sh", "install-docker.sh", "install.ps1"])
+def test_installers_allow_notice_uncertain_warning_switch_from_env_file(script_name):
+    script = (ROOT / script_name).read_text(encoding="utf-8")
+
+    assert "HERMES_FEISHU_CARD_NOTICE_UNCERTAIN_WARNING_ENABLED" in script
+
+
 def test_install_powershell_declares_and_forwards_profile_parameters():
     script = (ROOT / "install.ps1").read_text(encoding="utf-8")
 

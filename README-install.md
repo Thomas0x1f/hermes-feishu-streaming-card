@@ -186,6 +186,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 | `FEISHU_APP_SECRET` | unset | Feishu/Lark app secret. |
 | `HFC_SKIP_START` | `0` | Set to `1` to install hook without starting sidecar. |
 | `HFC_NO_PROMPT` | `0` | Set to `1` for non-interactive installs. |
+| `HERMES_FEISHU_CARD_NOTICE_UNCERTAIN_WARNING_ENABLED` | `0` | Set to `1` to show the generic native warning for unknown delivery; suppressed by default. |
 
 ## Docker Containers
 

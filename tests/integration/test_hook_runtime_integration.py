@@ -314,16 +314,18 @@ class _NoticeFailureClient:
 
 
 @pytest.mark.parametrize(
-    ("outcome", "expected_content", "metric_name"),
+    ("outcome", "expected_content", "expected_success", "metric_name"),
     [
         (
             "not_sent",
             "ℹ️ Codex gpt-5.5 caps context at 272K, so auto-compaction was raised to 85%.",
+            True,
             "notice_native_fallbacks",
         ),
         (
             "unknown",
-            "⚠️ 一条运行提示的卡片投递结果无法确认，请稍后查看 /hfc status。",
+            None,
+            False,
             "notice_uncertain_warnings",
         ),
     ],
@@ -332,6 +334,7 @@ async def test_installed_notice_hook_uses_sidecar_delivery_outcome_for_topic_fal
     monkeypatch,
     outcome,
     expected_content,
+    expected_success,
     metric_name,
 ):
     feishu_client = _NoticeFailureClient(outcome)
@@ -391,15 +394,18 @@ async def test_installed_notice_hook_uses_sidecar_delivery_outcome_for_topic_fal
     finally:
         await test_client.close()
 
-    assert result.success is True
-    assert adapter.native_calls == [
-        (
-            "oc_topic",
-            expected_content,
-            "om_topic_user",
-            {"thread_id": "omt_topic"},
+    assert result.success is expected_success
+    expected_native_calls = []
+    if expected_content is not None:
+        expected_native_calls.append(
+            (
+                "oc_topic",
+                expected_content,
+                "om_topic_user",
+                {"thread_id": "omt_topic"},
+            )
         )
-    ]
+    assert adapter.native_calls == expected_native_calls
     assert len(feishu_client.delivery_calls) == 1
     delivery_kwargs = feishu_client.delivery_calls[0][1]
     assert delivery_kwargs["reply_to_message_id"] == "om_topic_user"

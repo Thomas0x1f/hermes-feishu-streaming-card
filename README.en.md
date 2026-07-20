@@ -168,6 +168,7 @@ High-frequency stream tuning usually needs no change. For DeepSeek burst, token-
 | `HERMES_FEISHU_CARD_DELTA_COALESCE_MS` | `250` | Max Gateway-side delta coalescing wait |
 | `HERMES_FEISHU_CARD_DELTA_COALESCE_CHARS` | `600` | Flush pending delta when this character budget is reached |
 | `HERMES_FEISHU_CARD_DELTA_COALESCE_MAX_PENDING` | `128` | Pending delta session cap |
+| `HERMES_FEISHU_CARD_NOTICE_UNCERTAIN_WARNING_ENABLED` | `0` | Set to `1` to restore the generic native warning for unknown delivery; `/hfc status` diagnostics remain available |
 
 ## Latest Releases
 ![Feishu topic reply card continuity and reasoning/tool timeline showcase](docs/assets/feishu-topic-card-showcase-v389.png)

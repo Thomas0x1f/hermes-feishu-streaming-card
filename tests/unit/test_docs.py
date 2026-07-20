@@ -29,6 +29,7 @@ def test_maintainer_docs_define_reliable_notice_delivery_contract():
     assert "不重试 `/events`" in combined
     assert "原始通知文本" in combined
     assert "不重复原始通知文本" in combined
+    assert "HERMES_FEISHU_CARD_NOTICE_UNCERTAIN_WARNING_ENABLED" in combined
     assert "⚠️ 一条运行提示的卡片投递结果无法确认，请稍后查看 /hfc status。" in combined
 
 
@@ -60,6 +61,7 @@ def test_readme_documents_sidecar_only_and_supported_hermes_version():
     assert "Hermes Agent Gateway 的飞书/Lark 回复变成一张持续更新的交互式卡片" in readme
     assert "/hfc status" in readme
     assert "HERMES_FEISHU_CARD_DELTA_COALESCE_MS" in readme
+    assert "HERMES_FEISHU_CARD_NOTICE_UNCERTAIN_WARNING_ENABLED" in readme
     assert "sidecar-only" in readme.lower()
     assert "setup --hermes-dir" in readme
     assert "整合安装器" in readme

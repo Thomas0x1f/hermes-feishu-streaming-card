@@ -438,6 +438,7 @@ Common environment variables:
 | `HFC_ENV_FILE` | `.env` next to `HFC_CONFIG` | Feishu credential file |
 | `HFC_SKIP_START` | `0` | Set to `1` to install the hook without starting sidecar |
 | `HFC_NO_PROMPT` | `0` | Set to `1` for non-interactive automation |
+| `HERMES_FEISHU_CARD_NOTICE_UNCERTAIN_WARNING_ENABLED` | `0` | Suppress the generic native warning for unknown delivery by default; set to `1` to restore it while keeping `/hfc status` diagnostics |
 
 High-frequency streaming knobs usually do not need manual tuning:
 

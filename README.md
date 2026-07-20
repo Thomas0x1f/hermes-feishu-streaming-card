@@ -167,7 +167,7 @@ bash install-docker.sh
 | `HERMES_FEISHU_CARD_DELTA_COALESCE_MS` | `250` | Gateway 内 delta 最大合并等待时间 |
 | `HERMES_FEISHU_CARD_DELTA_COALESCE_CHARS` | `600` | pending delta 达到字符数后立即 flush |
 | `HERMES_FEISHU_CARD_DELTA_COALESCE_MAX_PENDING` | `128` | pending delta session 上限 |
-
+| `HERMES_FEISHU_CARD_NOTICE_UNCERTAIN_WARNING_ENABLED` | `0` | 设为 `1` 时恢复 unknown 投递结果的通用原生警告；默认静默并保留 `/hfc status` 诊断 |
 ## 最新版本
 ![飞书话题内卡片连续更新与思考工具 timeline 展示](docs/assets/feishu-topic-card-showcase-v389.png)
 | 版本 | 重点 |

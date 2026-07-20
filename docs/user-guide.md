@@ -464,6 +464,7 @@ python3 -m hermes_feishu_card.cli status --config ~/.hermes/config.yaml
 | `HFC_ENV_FILE` | `HFC_CONFIG` 同目录 `.env` | 飞书凭据保存位置 |
 | `HFC_SKIP_START` | `0` | 设为 `1` 时只安装 hook，不启动 sidecar |
 | `HFC_NO_PROMPT` | `0` | 设为 `1` 时禁止交互式输入，适合自动化安装 |
+| `HERMES_FEISHU_CARD_NOTICE_UNCERTAIN_WARNING_ENABLED` | `0` | 默认抑制 unknown 投递结果的通用原生警告；设为 `1` 可恢复，诊断仍保留在 `/hfc status` |
 
 高频流式调优变量默认无需配置，只有在超高频 thinking/burst 场景下才需要调整：
 

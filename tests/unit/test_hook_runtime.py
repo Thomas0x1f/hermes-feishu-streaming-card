@@ -34,6 +34,7 @@ def clear_hook_env(monkeypatch):
     for name in (
         "HERMES_FEISHU_CARD_ENABLED",
         "HERMES_FEISHU_CARD_EVENT_URL",
+        "HERMES_FEISHU_CARD_NOTICE_UNCERTAIN_WARNING_ENABLED",
         "HERMES_FEISHU_CARD_TIMEOUT_MS",
         "HERMES_FEISHU_CARD_PROFILE_ID",
         "HERMES_HOME",
@@ -46,6 +47,7 @@ def test_load_runtime_config_defaults():
     config = hook_runtime.load_runtime_config()
 
     assert config.enabled is True
+    assert config.notice_uncertain_warning_enabled is False
     assert config.event_url == "http://127.0.0.1:8765/events"
     assert config.timeout_seconds == 0.8
 
@@ -1852,7 +1854,9 @@ def test_native_feishu_system_notice_send_posts_sidecar_and_suppresses_text(monk
     assert posted[0][2] == hook_runtime.TERMINAL_TIMEOUT_SECONDS
 
 
-def test_native_feishu_system_notice_send_warns_when_card_times_out(monkeypatch):
+def test_native_feishu_system_notice_send_suppresses_uncertain_warning_by_default(
+    monkeypatch,
+):
     attempts = []
 
     async def fake_post_json_ordered_response(url, payload, timeout):
@@ -1897,17 +1901,10 @@ def test_native_feishu_system_notice_send_warns_when_card_times_out(monkeypatch)
 
     result = asyncio.run(run())
 
-    assert result.success is True
-    assert result.message_id == "om_native_text"
+    assert result.success is False
+    assert result.error == "delivery_outcome=unknown"
     assert len(attempts) == 1
-    assert adapter.text_sent == [
-        (
-            "oc_abc",
-            "⚠️ 一条运行提示的卡片投递结果无法确认，请稍后查看 /hfc status。",
-            "om_user_weather",
-            {"reply_to_message_id": "om_user_weather"},
-        )
-    ]
+    assert adapter.text_sent == []
 
 
 @pytest.mark.parametrize(
@@ -1924,7 +1921,7 @@ def test_native_feishu_system_notice_send_warns_when_card_times_out(monkeypatch)
         ),
     ],
 )
-def test_system_notice_delivery_outcome_selects_safe_native_fallback(
+def test_system_notice_delivery_outcome_selects_safe_native_fallback_when_enabled(
     monkeypatch,
     error,
     expected_content,
@@ -1942,6 +1939,9 @@ def test_system_notice_delivery_outcome_selects_safe_native_fallback(
         return SimpleNamespace(success=False, message_id="", error=error)
 
     Adapter._hfc_original_send = original
+    monkeypatch.setenv(
+        "HERMES_FEISHU_CARD_NOTICE_UNCERTAIN_WARNING_ENABLED", "1"
+    )
     monkeypatch.setattr(hook_runtime, "_hfc_send_system_notice_card", failed_notice)
     monkeypatch.setattr(
         hook_runtime,
@@ -2327,6 +2327,9 @@ def test_identical_background_task_results_use_distinct_independent_message_ids(
 
 
 def test_background_notice_timeout_uses_uncertain_warning(monkeypatch):
+    monkeypatch.setenv(
+        "HERMES_FEISHU_CARD_NOTICE_UNCERTAIN_WARNING_ENABLED", "1"
+    )
     adapter, posted = _install_background_notice_probe(
         monkeypatch,
         post_error=TimeoutError("timed out"),
@@ -2763,6 +2766,9 @@ def test_native_feishu_system_notice_edit_updates_same_card(monkeypatch):
 
 
 def test_heartbeat_after_unknown_delivery_reuses_independent_card(monkeypatch):
+    monkeypatch.setenv(
+        "HERMES_FEISHU_CARD_NOTICE_UNCERTAIN_WARNING_ENABLED", "1"
+    )
     posted = []
     responses = [
         {"ok": True, "applied": False},

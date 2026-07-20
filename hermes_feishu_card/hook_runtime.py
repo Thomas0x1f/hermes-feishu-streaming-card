@@ -119,6 +119,7 @@ SUPPORTED_RUNTIME_EVENTS = {
 @dataclass(frozen=True)
 class RuntimeConfig:
     enabled: bool
+    notice_uncertain_warning_enabled: bool
     event_url: str
     timeout_seconds: float
     delta_coalesce_ms: int
@@ -248,6 +249,15 @@ def reset_runtime_state() -> None:
 def load_runtime_config() -> RuntimeConfig:
     enabled_value = os.environ.get("HERMES_FEISHU_CARD_ENABLED", "1").strip().lower()
     enabled = enabled_value not in {"0", "false", "no", "off"}
+    notice_warning_value = os.environ.get(
+        "HERMES_FEISHU_CARD_NOTICE_UNCERTAIN_WARNING_ENABLED", "0"
+    ).strip().lower()
+    notice_uncertain_warning_enabled = notice_warning_value not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
     event_url = os.environ.get("HERMES_FEISHU_CARD_EVENT_URL", DEFAULT_EVENT_URL).strip()
     if not event_url:
         event_url = DEFAULT_EVENT_URL
@@ -272,6 +282,7 @@ def load_runtime_config() -> RuntimeConfig:
     )
     return RuntimeConfig(
         enabled=enabled,
+        notice_uncertain_warning_enabled=notice_uncertain_warning_enabled,
         event_url=event_url,
         timeout_seconds=timeout_seconds,
         delta_coalesce_ms=delta_coalesce_ms,
@@ -2770,6 +2781,11 @@ async def _hfc_send_with_native_command_result_card(
         return notice_result
     if _hfc_classify_system_notice(content) is not None:
         outcome = _hfc_send_result_delivery_outcome(notice_result)
+        if (
+            outcome == "unknown"
+            and not load_runtime_config().notice_uncertain_warning_enabled
+        ):
+            return notice_result
         if callable(original):
             fallback_content = (
                 content if outcome == "not_sent" else _NOTICE_UNCERTAIN_WARNING
