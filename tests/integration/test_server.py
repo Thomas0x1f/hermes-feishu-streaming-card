@@ -7027,3 +7027,55 @@ async def test_interrupt_abandon_does_not_affect_completed_sessions(client):
         assert mid != "feishu-message-1", (
             "Already-completed session should not get extra updates on abandon"
         )
+
+
+async def test_conversation_bumped_recreates_card_at_bottom(client):
+    test_client, feishu_client = client
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    assert len(feishu_client.sent) == 1
+
+    resp = await test_client.post(
+        "/conversation/bumped", json={"chat_id": "oc_abc"}
+    )
+    assert await resp.json() == {"ok": True, "displaced": 1}
+
+    # The next render goes through the displaced path: a fresh card is sent
+    # at the bottom instead of patching the displaced one.
+    resp = await test_client.post(
+        "/events",
+        json=event_payload("message.completed", 1, {"answer": "done"}),
+    )
+    assert (await resp.json())["ok"] is True
+    assert len(feishu_client.sent) == 2
+
+    # The displaced card eventually receives the retire pointer patch.
+    retired = []
+    for _ in range(100):
+        retired = [
+            card
+            for message_id, card in feishu_client.updated
+            if message_id == "feishu-message-1"
+        ]
+        if retired:
+            break
+        await asyncio.sleep(0.02)
+    assert retired, "displaced card should be retired with a pointer patch"
+    assert "已移至下方" in json.dumps(retired[-1], ensure_ascii=False)
+
+
+async def test_conversation_bumped_rejects_missing_chat_id(client):
+    test_client, _ = client
+    resp = await test_client.post("/conversation/bumped", json={})
+    assert resp.status == 400
+
+
+async def test_conversation_bumped_ignores_completed_sessions(client):
+    test_client, feishu_client = client
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    await test_client.post(
+        "/events", json=event_payload("message.completed", 1, {"answer": "x"})
+    )
+    resp = await test_client.post(
+        "/conversation/bumped", json={"chat_id": "oc_abc"}
+    )
+    assert (await resp.json())["displaced"] == 0

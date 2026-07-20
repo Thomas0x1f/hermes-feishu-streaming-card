@@ -4282,6 +4282,50 @@ async def _hfc_handle_feishu_card_action_event(self: Any, data: Any) -> None:
         await original(self, data)
 
 
+def _hfc_notify_conversation_bumped(chat_id: str) -> None:
+    """Tell the sidecar a new inbound message landed in ``chat_id``.
+
+    Streaming cards still updating in that chat are now displaced (no longer
+    the bottom-most message); the sidecar re-creates them at the bottom on
+    their next render. Best effort — a missed bump only means the card keeps
+    patching in place.
+    """
+    if not chat_id:
+        return
+    try:
+        config = load_runtime_config()
+        base = _summary_base_url(config.event_url)
+        _post_json_sync_response(
+            f"{base}/conversation/bumped", {"chat_id": chat_id}, 2.0
+        )
+    except Exception:
+        pass
+
+
+async def _hfc_handle_message_event_data(self: Any, data: Any) -> Any:
+    """Wrapper for the Feishu adapter's inbound message handler.
+
+    Fires a conversation-bumped notification for non-bot senders, then
+    delegates to the original handler untouched.
+    """
+    event = getattr(data, "event", None)
+    message = getattr(event, "message", None)
+    sender = getattr(event, "sender", None)
+    chat_id = str(getattr(message, "chat_id", "") or "")
+    sender_type = str(getattr(sender, "sender_type", "") or "").lower()
+    if chat_id and sender_type not in {"bot", "app"}:
+        try:
+            asyncio.get_running_loop().run_in_executor(
+                None, _hfc_notify_conversation_bumped, chat_id
+            )
+        except Exception:
+            pass
+    original = getattr(type(self), "_hfc_original_handle_message_event_data", None)
+    if callable(original):
+        return await original(self, data)
+    return None
+
+
 def _hfc_refresh_feishu_event_handler(adapter: Any) -> bool:
     if getattr(adapter, "_hfc_command_card_event_handler_refreshed", False) or getattr(
         adapter,
@@ -4544,6 +4588,28 @@ def install_feishu_command_card_adapter_methods(runner: Any, event: Any = None) 
                     adapter_ready = True
             elif callable(getattr(adapter_type, "_handle_card_action_event", None)):
                 adapter_ready = True
+
+            current_msg_handler = adapter_type.__dict__.get(
+                "_handle_message_event_data"
+            )
+            if current_msg_handler is _hfc_handle_message_event_data:
+                setattr(adapter_type, "_hfc_inbound_bump_wrapped", True)
+            elif not getattr(adapter_type, "_hfc_inbound_bump_wrapped", False):
+                original_msg_handler = current_msg_handler or getattr(
+                    adapter_type, "_handle_message_event_data", None
+                )
+                if callable(original_msg_handler):
+                    setattr(
+                        adapter_type,
+                        "_hfc_original_handle_message_event_data",
+                        original_msg_handler,
+                    )
+                    setattr(
+                        adapter_type,
+                        "_handle_message_event_data",
+                        _hfc_handle_message_event_data,
+                    )
+                    setattr(adapter_type, "_hfc_inbound_bump_wrapped", True)
 
             current_send = adapter_type.__dict__.get("send")
             if current_send is _hfc_send_with_native_command_result_card:

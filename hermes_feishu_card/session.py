@@ -83,6 +83,10 @@ class CardSession:
     attachments: list[dict[str, str]] = field(default_factory=list)
     active_interaction: InteractionState | None = None
     delivery_kind: str = "chat"
+    # Set when a newer message landed below the streaming card in the chat.
+    # The next render re-creates the card at the bottom instead of patching
+    # the displaced one, so live updates always stay in view.
+    displaced: bool = False
     reply_to_message_id: str = ""
     notice_title: str = ""
     notice_level: str = "info"

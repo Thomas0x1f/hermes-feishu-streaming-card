@@ -262,6 +262,7 @@ def create_app(
     app.router.add_post("/card/actions", _card_actions)
     app.router.add_post("/commands", _commands)
     app.router.add_post("/events", _events)
+    app.router.add_post("/conversation/bumped", _conversation_bumped)
     app.on_startup.append(_start_runtime_cleanup)
     app.on_cleanup.append(_stop_operations_diagnostics)
     app.on_cleanup.append(_stop_runtime_cleanup)
@@ -1659,6 +1660,113 @@ async def _events(request: web.Request) -> web.Response:
     return response
 
 
+async def _conversation_bumped(request: web.Request) -> web.Response:
+    """Mark live sessions in a chat as displaced by a newer message.
+
+    The gateway hook posts here when an inbound user message lands in a chat.
+    Any streaming card still being updated in that chat is no longer the
+    bottom-most message, so its next render re-creates the card at the bottom
+    instead of patching in place (see ``CardSession.displaced``).
+    """
+    metrics: SidecarMetrics = request.app[METRICS_KEY]
+    if request.app[EVENT_AUTH_REQUIRED_KEY]:
+        body = await request.read()
+        try:
+            request.app[EVENT_AUTH_VERIFIER_KEY].verify(request.headers, body)
+        except EventAuthenticationError:
+            metrics.event_auth_rejections += 1
+            return web.json_response(
+                {"ok": False, "error": "event authentication failed"},
+                status=401,
+            )
+    try:
+        payload = await request.json()
+    except ValueError:
+        return web.json_response({"ok": False, "error": "invalid json"}, status=400)
+    chat_id = str(payload.get("chat_id") or "").strip()
+    if not chat_id:
+        return web.json_response(
+            {"ok": False, "error": "chat_id is required"}, status=400
+        )
+    sessions: Dict[str, CardSession] = request.app[SESSIONS_KEY]
+    displaced = 0
+    for session in sessions.values():
+        if session.chat_id != chat_id:
+            continue
+        if session.status in {"completed", "failed"}:
+            continue
+        if not session.displaced:
+            session.displaced = True
+            displaced += 1
+    return web.json_response({"ok": True, "displaced": displaced})
+
+
+async def _recreate_card_at_bottom(
+    app: web.Application,
+    session_key: str,
+    session: CardSession,
+    card: dict[str, Any],
+    bot_id: str | None,
+    *,
+    previous_message_id: str | None,
+) -> bool:
+    """Re-create a displaced streaming card at the bottom of its chat.
+
+    Sends the current render as a fresh message, repoints the session's
+    Feishu message id at it, and retires the displaced card in place
+    (best effort).  Returns False when the send did not go through so the
+    caller can keep patching the old card.
+    """
+    delivery = await _send_card_for_app(
+        app,
+        session.chat_id,
+        card,
+        bot_id,
+        reply_to_message_id=session.reply_to_message_id or None,
+        delivery_key=session_key,
+        delivery_kind=session.delivery_kind,
+    )
+    if not delivery.delivered or not delivery.message_id:
+        logger.warning(
+            "displaced card re-create failed for session; keeping old card"
+        )
+        return False
+    feishu_message_ids: Dict[str, str] = app[FEISHU_MESSAGE_IDS_KEY]
+    feishu_message_ids[session_key] = delivery.message_id
+    session.displaced = False
+    if previous_message_id and previous_message_id != delivery.message_id:
+        asyncio.get_running_loop().create_task(
+            _retire_displaced_card(app, previous_message_id, bot_id)
+        )
+    return True
+
+
+async def _retire_displaced_card(
+    app: web.Application, message_id: str, bot_id: str | None
+) -> None:
+    """Swap a displaced card for a small pointer to the re-created one."""
+    card = {
+        "schema": "2.0",
+        "config": {"update_multi": True},
+        "header": {
+            "template": "grey",
+            "title": {"tag": "plain_text", "content": app[CARD_TITLE_KEY]},
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": "⤵️ 会话有新消息，本卡片已移至下方继续更新。",
+                }
+            ]
+        },
+    }
+    try:
+        await _update_card_for_app(app, message_id, card, bot_id)
+    except Exception:
+        logger.debug("retire displaced card failed", exc_info=True)
+
+
 def _normalize_hfc_command(value: Any) -> str:
     command = str(value or "").strip().lower()
     if command in {"status", "doctor", "monitor"}:
@@ -2313,16 +2421,33 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                 return False
             await _populate_subscription_usage(request.app, latest_session)
             latest_card = _render_session_card(request, latest_session)
+            # A displaced re-create may have moved the live card since this
+            # closure captured feishu_message_id — always patch the current one.
+            target_message_id = feishu_message_ids.get(session_key) or feishu_message_id
+            if latest_session.displaced:
+                recreated = await _recreate_card_at_bottom(
+                    request.app,
+                    session_key,
+                    latest_session,
+                    latest_card,
+                    bot_id,
+                    previous_message_id=target_message_id,
+                )
+                if recreated:
+                    return True
+                # Re-create failed: clear the flag and keep patching the old
+                # card so updates are never lost.
+                latest_session.displaced = False
             updated = await _update_card_for_app(
                 request.app,
-                feishu_message_id,
+                target_message_id,
                 latest_card,
                 bot_id,
             )
             if not updated and is_terminal:
                 await _retry_terminal_update(
                     request.app,
-                    feishu_message_id,
+                    target_message_id,
                     latest_card,
                     bot_id,
                 )
