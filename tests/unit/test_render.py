@@ -451,6 +451,49 @@ def test_render_pending_interaction_as_buttons():
     assert "rm -rf /tmp/demo" in str(card)
 
 
+def test_render_clarify_media_in_same_card_before_buttons():
+    from hermes_feishu_card.events import SidecarEvent
+
+    session = CardSession(conversation_id="chat-1", message_id="msg-1", chat_id="oc_abc")
+    session.apply(
+        SidecarEvent(
+            schema_version="1",
+            event="interaction.requested",
+            conversation_id="chat-1",
+            message_id="msg-1",
+            chat_id="oc_abc",
+            platform="feishu",
+            sequence=1,
+            created_at=0.0,
+            data={
+                "interaction_id": "visual-1",
+                "kind": "clarify",
+                "prompt": "请确认主视觉",
+                "media_image_keys": ["img_v2_master"],
+                "options": [
+                    {"label": "确认", "value": "confirm"},
+                    {"label": "修改", "value": "revise"},
+                ],
+            },
+        )
+    )
+
+    card = render_card(session)
+
+    elements = card["body"]["elements"]
+    image_index = next(
+        index
+        for index, element in enumerate(elements)
+        if element.get("element_id") == "interaction_media_0"
+    )
+    button_index = next(
+        index for index, element in enumerate(elements) if element.get("tag") == "button"
+    )
+    assert elements[image_index]["content"] == "![待确认媒体](img_v2_master)"
+    assert image_index < button_index
+    assert "MEDIA:" not in str(card)
+
+
 def test_render_pending_multi_select_as_form_with_submit():
     from hermes_feishu_card.events import SidecarEvent
 

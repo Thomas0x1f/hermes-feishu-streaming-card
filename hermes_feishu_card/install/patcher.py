@@ -1787,6 +1787,7 @@ def _render_clarify_hook_block(indent: str, newline: str):
         f"{deeper_indent}    \"conversation_id\": session_key or _status_chat_id,{newline}",
         f"{deeper_indent}    \"message_id\": event_message_id,{newline}",
         f"{deeper_indent}    \"_hfc_loop\": locals().get(\"_loop_for_step\"),{newline}",
+        f"{deeper_indent}    \"_hfc_status_adapter\": _status_adapter,{newline}",
         f"{deeper_indent}    \"kind\": \"clarify\",{newline}",
         f"{deeper_indent}}}, interaction_id=\"clarify_\" + _hfc_uuid4().hex[:10], question=question, choices=choices){newline}",
         f"{deeper_indent}if _hfc_clarify_response is not None:{newline}",

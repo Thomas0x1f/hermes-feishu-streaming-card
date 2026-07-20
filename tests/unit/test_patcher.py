@@ -755,6 +755,7 @@ def test_apply_patch_inserts_streaming_callback_hooks():
     assert 'event_name="answer.delta"' in patched
     assert 'event_name="thinking.delta"' in patched
     assert '"kind": "clarify"' in patched
+    assert '"_hfc_status_adapter": _status_adapter' in patched
     assert "resolve_gateway_approval" in patched
     assert (
         'if event_type in ("tool.started", "tool.completed") and _run_still_current():'

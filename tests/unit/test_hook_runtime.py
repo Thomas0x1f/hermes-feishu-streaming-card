@@ -720,6 +720,7 @@ def test_build_interaction_event_reuses_active_card_message_id():
         interaction_id="approval-1",
         prompt="允许执行命令吗？",
         description="rm -rf /tmp/demo",
+        media_paths=["/opt/data/workspace/master.png"],
         options=[
             {"label": "允许一次", "value": "once"},
             {"label": "拒绝", "value": "deny"},
@@ -731,6 +732,9 @@ def test_build_interaction_event_reuses_active_card_message_id():
     assert interaction["data"]["interaction_id"] == "approval-1"
     assert interaction["data"]["kind"] == "approval"
     assert interaction["data"]["prompt"] == "允许执行命令吗？"
+    assert interaction["data"]["media_paths"] == [
+        "/opt/data/workspace/master.png"
+    ]
     assert interaction["data"]["options"][0]["value"] == "once"
 
 
@@ -4753,6 +4757,136 @@ def test_clarify_multi_select_marker_returns_stable_values(monkeypatch):
         {"label": "会议用纸", "value": "meeting_paper", "style": "default"},
         {"label": "台卡", "value": "desk_card", "style": "default"},
     ]
+
+
+def test_clarify_uses_hermes_media_parser_and_forwards_safe_image(monkeypatch):
+    captured = {}
+
+    class OfficialMediaAdapter:
+        @staticmethod
+        def extract_media(content):
+            assert content == "请确认主视觉\nMEDIA:/opt/data/workspace/master.png"
+            return [('/opt/data/workspace/master.png', False)], "请确认主视觉"
+
+        @staticmethod
+        def filter_media_delivery_paths(media_files):
+            assert media_files == [('/opt/data/workspace/master.png', False)]
+            return media_files
+
+    def fake_request(local_vars, **kwargs):
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "status": "completed",
+            "choice": "confirm",
+            "choice_label": "确认",
+        }
+
+    monkeypatch.setattr(
+        hook_runtime,
+        "request_interaction_from_hermes_locals",
+        fake_request,
+    )
+
+    result = hook_runtime.request_clarify_response_from_hermes_locals(
+        {"_hfc_status_adapter": OfficialMediaAdapter()},
+        interaction_id="visual-1",
+        question="请确认主视觉\nMEDIA:/opt/data/workspace/master.png",
+        choices=["确认", "修改"],
+    )
+
+    assert result == "confirm"
+    assert captured["prompt"] == "请确认主视觉"
+    assert captured["media_paths"] == ["/opt/data/workspace/master.png"]
+
+
+def test_clarify_media_failure_does_not_fall_back_to_unseen_confirmation(monkeypatch):
+    class OfficialMediaAdapter:
+        @staticmethod
+        def extract_media(content):
+            return [('/opt/data/workspace/master.png', False)], "请确认主视觉"
+
+        @staticmethod
+        def filter_media_delivery_paths(media_files):
+            return media_files
+
+    monkeypatch.setattr(
+        hook_runtime,
+        "request_interaction_from_hermes_locals",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = hook_runtime.request_clarify_response_from_hermes_locals(
+        {"_hfc_status_adapter": OfficialMediaAdapter()},
+        interaction_id="visual-1",
+        question="请确认主视觉\nMEDIA:/opt/data/workspace/master.png",
+        choices=["确认", "修改"],
+    )
+
+    assert result == (
+        "[hfc clarify media unavailable; do not confirm media the user could not see]"
+    )
+
+
+@pytest.mark.parametrize(
+    "safe_media",
+    [
+        [],
+        [("/opt/data/workspace/voice.mp3", True)],
+        [("/opt/data/workspace/report.pdf", False)],
+    ],
+)
+def test_clarify_rejects_unsafe_or_non_image_media(monkeypatch, safe_media):
+    class OfficialMediaAdapter:
+        @staticmethod
+        def extract_media(content):
+            return [("/opt/data/workspace/source.bin", False)], "请确认媒体"
+
+        @staticmethod
+        def filter_media_delivery_paths(media_files):
+            return safe_media
+
+    def fail_request(*_args, **_kwargs):
+        raise AssertionError("unrenderable media must not create a confirmation card")
+
+    monkeypatch.setattr(
+        hook_runtime,
+        "request_interaction_from_hermes_locals",
+        fail_request,
+    )
+
+    result = hook_runtime.request_clarify_response_from_hermes_locals(
+        {"_hfc_status_adapter": OfficialMediaAdapter()},
+        interaction_id="media-invalid",
+        question="请确认媒体\nMEDIA:/opt/data/workspace/source.bin",
+        choices=["确认", "修改"],
+    )
+
+    assert result == (
+        "[hfc clarify media unavailable; do not confirm media the user could not see]"
+    )
+
+
+def test_clarify_media_does_not_leak_when_official_parser_is_unavailable(monkeypatch):
+    def fail_request(*_args, **_kwargs):
+        raise AssertionError("raw MEDIA directive must not reach the card")
+
+    monkeypatch.setattr(
+        hook_runtime,
+        "request_interaction_from_hermes_locals",
+        fail_request,
+    )
+
+    result = hook_runtime.request_clarify_response_from_hermes_locals(
+        {},
+        interaction_id="media-no-adapter",
+        question="请确认媒体\nMEDIA:/opt/data/workspace/master.png",
+        choices=["确认", "修改"],
+    )
+
+    assert result == (
+        "[hfc clarify media unavailable; do not confirm media the user could not see]"
+    )
 
 
 def test_clarify_multi_select_does_not_fall_back_to_native_single_select(monkeypatch):

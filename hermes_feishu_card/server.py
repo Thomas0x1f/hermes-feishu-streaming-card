@@ -120,6 +120,7 @@ SESSION_CREATING_EVENTS = {
 }
 DIAGNOSTICS_KEY = web.AppKey("diagnostics", dict)
 PROFILE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+MAX_CLARIFY_MEDIA_IMAGES = 4
 logger = logging.getLogger(__name__)
 
 
@@ -2087,6 +2088,24 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
         event = _event_for_session(incoming_event, session)
     event_is_terminal = _event_is_terminal(event)
 
+    if event.event == "interaction.requested" and event.data.get("media_paths"):
+        bot_id = message_bot_ids.get(session_key)
+        if bot_id is None:
+            route = _resolve_route(request, event)
+            bot_id = route.bot_id if route is not None else None
+        try:
+            event = await _prepare_clarify_media(request.app, event, bot_id)
+        except Exception as exc:
+            logger.warning(
+                "clarify media upload failed: %s",
+                exc.__class__.__name__,
+            )
+            metrics.events_rejected += 1
+            return web.json_response(
+                {"ok": False, "error": "clarify media upload failed"},
+                status=502,
+            ), None
+
     if _skip_native_text_fallback_interaction(request.app, event):
         metrics.events_ignored += 1
         return web.json_response(
@@ -2418,6 +2437,47 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
             _session_key(event),
         )
     return web.json_response(response_payload), post_lock_task
+
+
+async def _prepare_clarify_media(
+    app: web.Application,
+    event: SidecarEvent,
+    bot_id: str | None,
+) -> SidecarEvent:
+    raw_paths = event.data.get("media_paths")
+    if not isinstance(raw_paths, list) or not raw_paths:
+        return event
+    if len(raw_paths) > MAX_CLARIFY_MEDIA_IMAGES:
+        raise ValueError("too many clarify media images")
+
+    hermes_home = os.environ.get("HERMES_HOME", "").strip()
+    allowed_root = (
+        Path(hermes_home).expanduser().resolve()
+        if hermes_home
+        else Path(app[OPERATIONS_HERMES_ROOT_KEY]).expanduser().resolve()
+    )
+    safe_paths: list[Path] = []
+    for raw_path in raw_paths:
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise ValueError("invalid clarify media path")
+        try:
+            path = Path(raw_path).expanduser().resolve(strict=True)
+            path.relative_to(allowed_root)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ValueError("clarify media path is outside Hermes home") from exc
+        if not path.is_file():
+            raise ValueError("clarify media path must be a regular file")
+        safe_paths.append(path)
+
+    client = _client_for_bot(app, bot_id)
+    upload_image = getattr(client, "upload_image", None)
+    if not callable(upload_image):
+        raise RuntimeError("Feishu client does not support image upload")
+    image_keys = [await upload_image(path) for path in safe_paths]
+    data = dict(event.data)
+    data.pop("media_paths", None)
+    data["media_image_keys"] = image_keys
+    return replace(event, data=data)
 
 
 def _post_terminal_cleanup(

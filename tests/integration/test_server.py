@@ -128,6 +128,7 @@ class FakeFeishuClient:
     def __init__(self):
         self.sent = []
         self.updated = []
+        self.uploaded_images = []
         self.fail_send = False
         self.send_delay = 0.0
         self.update_failures_remaining = 0
@@ -149,6 +150,10 @@ class FakeFeishuClient:
             self.update_failures_remaining -= 1
             raise RuntimeError(self.update_error_message)
         self.updated.append((message_id, card))
+
+    async def upload_image(self, image_path):
+        self.uploaded_images.append(str(image_path))
+        return f"img_v2_{len(self.uploaded_images)}"
 
 
 class PermanentFailureClient(FakeFeishuClient):
@@ -4763,6 +4768,77 @@ async def test_interaction_request_renders_buttons_and_callback_resolves(client)
         "interaction_id": "approval-1",
     }
     assert "已选择：允许一次" in str(feishu_client.updated[-1][1])
+
+
+async def test_clarify_media_uploads_and_renders_inside_same_card(
+    client, monkeypatch, tmp_path
+):
+    test_client, feishu_client = client
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    image_path = tmp_path / "workspace" / "master.png"
+    image_path.parent.mkdir()
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nimage-bytes")
+
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    requested = await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            1,
+            {
+                "interaction_id": "visual-1",
+                "kind": "clarify",
+                "prompt": "请确认主视觉",
+                "media_paths": [str(image_path)],
+                "options": [
+                    {"label": "确认", "value": "confirm"},
+                    {"label": "修改", "value": "revise"},
+                ],
+            },
+        ),
+    )
+
+    assert requested.status == 200
+    assert feishu_client.uploaded_images == [str(image_path.resolve())]
+    assert len(feishu_client.sent) == 1
+    interaction_card = feishu_client.updated[-1][1]
+    serialized = json.dumps(interaction_card, ensure_ascii=False)
+    assert "![待确认媒体](img_v2_1)" in serialized
+    assert str(image_path) not in serialized
+    assert "MEDIA:" not in serialized
+
+
+async def test_clarify_media_rejects_path_outside_hermes_home_without_leaking_it(
+    client, monkeypatch, tmp_path
+):
+    test_client, feishu_client = client
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    image_path = tmp_path / "private.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nprivate-image")
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    requested = await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            1,
+            {
+                "interaction_id": "visual-unsafe",
+                "kind": "clarify",
+                "prompt": "请确认主视觉",
+                "media_paths": [str(image_path)],
+                "options": [{"label": "确认", "value": "confirm"}],
+            },
+        ),
+    )
+
+    response_text = await requested.text()
+    assert requested.status == 502
+    assert str(image_path) not in response_text
+    assert feishu_client.uploaded_images == []
+    assert "请确认主视觉" not in str(feishu_client.updated)
 
 
 async def test_multi_select_interaction_submit_returns_stable_values(client):

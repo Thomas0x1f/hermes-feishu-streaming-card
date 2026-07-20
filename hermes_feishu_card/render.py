@@ -308,6 +308,14 @@ def _render_interaction_elements(
         return []
 
     elements: list[Dict[str, Any]] = []
+    for index, image_key in enumerate(interaction.media_image_keys):
+        elements.append(
+            {
+                "tag": "markdown",
+                "element_id": f"interaction_media_{index}",
+                "content": f"![待确认媒体]({image_key})",
+            }
+        )
     if interaction.status == "pending" and interaction.description:
         elements.append(
             {

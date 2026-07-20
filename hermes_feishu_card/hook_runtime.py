@@ -968,6 +968,7 @@ def build_interaction_event(
     prompt: str,
     options: list[dict[str, Any]] | None = None,
     description: str = "",
+    media_paths: list[str] | None = None,
     timeout_seconds: float | None = None,
     fallback_policy: str = "",
 ) -> dict[str, Any] | None:
@@ -978,6 +979,7 @@ def build_interaction_event(
         "_hfc_interaction_prompt": prompt,
         "_hfc_interaction_description": description,
         "_hfc_interaction_options": options or [],
+        "_hfc_interaction_media_paths": media_paths or [],
         "_hfc_interaction_timeout_seconds": timeout_seconds,
         "_hfc_interaction_fallback_policy": fallback_policy,
     }
@@ -992,6 +994,7 @@ def request_interaction_from_hermes_locals(
     prompt: str,
     options: list[dict[str, Any]] | None = None,
     description: str = "",
+    media_paths: list[str] | None = None,
     timeout_seconds: float | None = None,
     poll_interval_seconds: float | None = None,
 ) -> dict[str, Any] | None:
@@ -1006,6 +1009,7 @@ def request_interaction_from_hermes_locals(
             prompt=prompt,
             options=options or [],
             description=description,
+            media_paths=media_paths or [],
             timeout_seconds=timeout_seconds,
         )
         if payload is None:
@@ -1032,6 +1036,7 @@ def request_interaction_from_hermes_locals(
                     prompt=prompt,
                     options=options or [],
                     description=description,
+                    media_paths=media_paths or [],
                     timeout_seconds=timeout_seconds,
                 )
                 if payload is None:
@@ -4664,6 +4669,47 @@ _HFC_MULTI_SELECT_CHOICE_SEPARATOR = "::"
 _HFC_MULTI_SELECT_UNAVAILABLE = (
     "[hfc multi-select unavailable; ask the user to reply with text]"
 )
+_HFC_CLARIFY_MEDIA_UNAVAILABLE = (
+    "[hfc clarify media unavailable; do not confirm media the user could not see]"
+)
+_HFC_CLARIFY_IMAGE_EXTENSIONS = {
+    ".bmp",
+    ".gif",
+    ".ico",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".tif",
+    ".tiff",
+    ".webp",
+}
+
+
+def _clarify_media_from_question(
+    local_vars: dict[str, Any], question: str
+) -> tuple[str, list[str], bool]:
+    has_media_directive = bool(MEDIA_RE.search(_mask_markdown_code(question)))
+    adapter = local_vars.get("_hfc_status_adapter")
+    extract_media = getattr(adapter, "extract_media", None)
+    filter_media = getattr(adapter, "filter_media_delivery_paths", None)
+    if not callable(extract_media) or not callable(filter_media):
+        return question, [], has_media_directive
+    try:
+        media_files, cleaned_question = extract_media(question)
+        safe_media = filter_media(media_files)
+    except Exception:
+        return question, [], has_media_directive
+    if not media_files:
+        return question, [], has_media_directive
+    image_paths = [
+        str(path)
+        for path, is_voice in safe_media
+        if not is_voice and Path(str(path)).suffix.lower() in _HFC_CLARIFY_IMAGE_EXTENSIONS
+    ]
+    cleaned = str(cleaned_question or "").strip() or "请选择"
+    if len(image_paths) != len(media_files):
+        return cleaned, [], True
+    return cleaned, image_paths, True
 
 
 def request_clarify_response_from_hermes_locals(
@@ -4680,6 +4726,12 @@ def request_clarify_response_from_hermes_locals(
         normalized_question = normalized_question[
             len(_HFC_MULTI_SELECT_QUESTION_PREFIX) :
         ].strip() or "请选择"
+    normalized_question, media_paths, media_required = _clarify_media_from_question(
+        local_vars,
+        normalized_question,
+    )
+    if media_required and not media_paths:
+        return _HFC_CLARIFY_MEDIA_UNAVAILABLE
     if not choices:
         return _HFC_MULTI_SELECT_UNAVAILABLE if is_multi_select else None
     options = []
@@ -4713,6 +4765,7 @@ def request_clarify_response_from_hermes_locals(
         interaction_id=interaction_id,
         prompt=normalized_question,
         options=options,
+        media_paths=media_paths,
         timeout_seconds=timeout_seconds,
     )
     if isinstance(result, dict) and result.get("status") == "completed":
@@ -4723,6 +4776,8 @@ def request_clarify_response_from_hermes_locals(
                 return json.dumps(values, ensure_ascii=False) if values else None
         choice = str(result.get("choice") or "").strip()
         return choice or None
+    if media_paths:
+        return _HFC_CLARIFY_MEDIA_UNAVAILABLE
     if is_multi_select:
         return _HFC_MULTI_SELECT_UNAVAILABLE
     return None
@@ -5509,6 +5564,15 @@ def _event_data(
         )
         if fallback_policy:
             data["fallback_policy"] = fallback_policy
+        media_paths = local_vars.get("_hfc_interaction_media_paths")
+        if isinstance(media_paths, list):
+            normalized_media_paths = [
+                str(path).strip()
+                for path in media_paths
+                if isinstance(path, str) and path.strip()
+            ]
+            if normalized_media_paths:
+                data["media_paths"] = normalized_media_paths
         if event_name == "interaction.failed":
             data["error"] = (
                 _first_string(local_vars, ("error",)) or "交互请求失败"

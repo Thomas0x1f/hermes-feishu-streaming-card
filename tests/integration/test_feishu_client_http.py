@@ -76,10 +76,31 @@ async def feishu_api():
         )
         return web.json_response({"code": 0, "msg": "ok", "data": {}})
 
+    async def upload_image(request):
+        reader = await request.multipart()
+        fields = {}
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            if part.filename:
+                fields[part.name] = {
+                    "filename": part.filename,
+                    "content": await part.read(),
+                    "content_type": part.headers.get("Content-Type"),
+                }
+            else:
+                fields[part.name] = await part.text()
+        requests.append(("upload_image", fields, dict(request.headers)))
+        return web.json_response(
+            {"code": 0, "msg": "ok", "data": {"image_key": "img_v2_master"}}
+        )
+
     app = web.Application()
     app.router.add_post("/auth/v3/tenant_access_token/internal", tenant_token)
     app.router.add_post("/im/v1/messages", send_message)
     app.router.add_post("/im/v1/messages/{message_id}/reply", reply_message)
+    app.router.add_post("/im/v1/images", upload_image)
     app.router.add_patch("/im/v1/messages/{message_id}", update_message)
     server = TestServer(app)
     client = TestClient(server)
@@ -120,6 +141,31 @@ async def test_send_card_fetches_token_and_posts_interactive_message(feishu_api)
     assert "你好" in send_request[2]["content"]
     assert send_request[2]["uuid"] == "hfc_" + "a" * 40
     assert send_request[3]["Authorization"] == "Bearer tenant-token-1"
+
+
+async def test_upload_image_uses_official_message_multipart_flow(feishu_api, tmp_path):
+    test_client, requests, token_calls = feishu_api
+    image_path = tmp_path / "master.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nimage-bytes")
+    client = FeishuClient(
+        FeishuClientConfig(
+            app_id="cli_test",
+            app_secret="secret",
+            base_url=str(test_client.make_url("/")),
+        )
+    )
+
+    image_key = await client.upload_image(image_path)
+
+    assert image_key == "img_v2_master"
+    assert token_calls() == 1
+    upload_request = requests[1]
+    assert upload_request[0] == "upload_image"
+    assert upload_request[1]["image_type"] == "message"
+    assert upload_request[1]["image"]["filename"] == "master.png"
+    assert upload_request[1]["image"]["content"] == image_path.read_bytes()
+    assert upload_request[1]["image"]["content_type"] == "image/png"
+    assert upload_request[2]["Authorization"] == "Bearer tenant-token-1"
 
 
 async def test_send_card_replies_in_thread_when_reply_anchor_present(feishu_api):

@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import mimetypes
+from pathlib import Path
 import time
 from dataclasses import dataclass
 from hashlib import sha256
@@ -17,6 +19,18 @@ _RETRYABLE_HTTP_STATUSES = {429, 502, 503, 504}
 _SEND_MAX_ATTEMPTS = 3
 _SEND_RETRY_DELAYS_SECONDS = (0.4, 1.2)
 _MAX_RETRY_AFTER_SECONDS = 2.0
+_MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
+_IMAGE_UPLOAD_EXTENSIONS = {
+    ".bmp",
+    ".gif",
+    ".ico",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".tif",
+    ".tiff",
+    ".webp",
+}
 _sleep = asyncio.sleep
 
 
@@ -274,6 +288,41 @@ class FeishuClient:
             json_body={"content": content},
         )
 
+    async def upload_image(self, image_path: str | Path) -> str:
+        try:
+            path = Path(image_path).expanduser().resolve(strict=True)
+            size = path.stat().st_size
+        except (OSError, RuntimeError, ValueError, TypeError) as exc:
+            raise ValueError("image file is unavailable") from exc
+        if not path.is_file():
+            raise ValueError("image path must be a regular file")
+        if path.suffix.lower() not in _IMAGE_UPLOAD_EXTENSIONS:
+            raise ValueError("unsupported image format")
+        if size <= 0 or size > _MAX_IMAGE_UPLOAD_BYTES:
+            raise ValueError("image size must be between 1 byte and 10 MB")
+
+        image_bytes = await asyncio.to_thread(path.read_bytes)
+        token = await self._tenant_token()
+        form = aiohttp.FormData()
+        form.add_field("image_type", "message")
+        form.add_field(
+            "image",
+            image_bytes,
+            filename=path.name,
+            content_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+        )
+        body = await self._request_multipart(
+            "POST",
+            "/im/v1/images",
+            token=token,
+            form=form,
+        )
+        data = body.get("data")
+        image_key = data.get("image_key") if isinstance(data, dict) else None
+        if not isinstance(image_key, str) or not image_key.strip():
+            raise FeishuAPIError("Feishu image upload response missing image_key")
+        return image_key.strip()
+
     async def _tenant_token(self) -> str:
         now = time.time()
         if self._tenant_access_token and now < self._tenant_access_token_expires_at:
@@ -367,6 +416,74 @@ class FeishuClient:
                 "Feishu API application failure",
                 api_code=_safe_api_code(code),
                 retryable=False,
+                outcome="not_sent",
+            )
+        return payload
+
+    async def _request_multipart(
+        self,
+        method: str,
+        path: str,
+        *,
+        token: str,
+        form: aiohttp.FormData,
+    ) -> dict[str, Any]:
+        url = f"{self.config.base_url.rstrip('/')}/{path.lstrip('/')}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept-Encoding": "gzip, deflate",
+        }
+        timeout = aiohttp.ClientTimeout(total=float(self.config.timeout_seconds))
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.request(
+                    method,
+                    url,
+                    data=form,
+                    headers=headers,
+                ) as response:
+                    try:
+                        payload = await response.json(content_type=None)
+                    except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
+                        retryable = response.status in _RETRYABLE_HTTP_STATUSES
+                        raise FeishuAPIError(
+                            "Feishu API returned non-json response",
+                            status_code=response.status,
+                            retryable=retryable,
+                            outcome=(
+                                "unknown"
+                                if retryable or response.status < 400
+                                else "not_sent"
+                            ),
+                        ) from exc
+        except FeishuAPIError:
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            raise FeishuAPIError(
+                f"Feishu API request failed: {exc.__class__.__name__}",
+                retryable=True,
+                outcome="unknown",
+            ) from exc
+
+        if not isinstance(payload, dict):
+            raise FeishuAPIError(
+                "Feishu API returned non-object response",
+                outcome="unknown",
+            )
+        if response.status >= 400:
+            retryable = response.status in _RETRYABLE_HTTP_STATUSES
+            raise FeishuAPIError(
+                "Feishu API HTTP failure",
+                status_code=response.status,
+                api_code=_safe_api_code(payload.get("code")),
+                retryable=retryable,
+                outcome="unknown" if retryable else "not_sent",
+            )
+        code = payload.get("code")
+        if code != 0:
+            raise FeishuAPIError(
+                "Feishu API application failure",
+                api_code=_safe_api_code(code),
                 outcome="not_sent",
             )
         return payload

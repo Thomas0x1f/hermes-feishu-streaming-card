@@ -51,6 +51,7 @@ class InteractionState:
     chat_type: str = ""
     initiator_open_id: str = ""
     description: str = ""
+    media_image_keys: list[str] = field(default_factory=list)
     status: str = "pending"
     options: list[InteractionOption] = field(default_factory=list)
     callback_token: str = ""
@@ -401,9 +402,26 @@ def _interaction_from_event_data(data: dict[str, Any]) -> InteractionState:
         chat_type=str(data.get("chat_type") or "").strip().lower(),
         initiator_open_id=str(data.get("initiator_open_id") or "").strip(),
         description=str(data.get("description") or "").strip(),
+        media_image_keys=_interaction_media_image_keys(data.get("media_image_keys")),
         options=_interaction_options(data.get("options")),
         callback_token=str(data.get("callback_token") or secrets.token_urlsafe(16)),
     )
+
+
+def _interaction_media_image_keys(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    keys: list[str] = []
+    for item in value:
+        image_key = str(item).strip()
+        if (
+            image_key
+            and len(image_key) <= 256
+            and re.fullmatch(r"[A-Za-z0-9_-]+", image_key)
+            and image_key not in keys
+        ):
+            keys.append(image_key)
+    return keys
 
 
 def _interaction_options(value: Any) -> list[InteractionOption]:
