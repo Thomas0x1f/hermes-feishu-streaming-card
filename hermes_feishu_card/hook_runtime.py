@@ -914,6 +914,9 @@ def _command_operator(
         value = _first_attr_string(candidate, ("open_id",))
         if value:
             return value
+    source_user_id = _first_attr_string(source_obj, ("user_id",)) or ""
+    if source_user_id.startswith("ou_"):
+        return source_user_id
     return ""
 
 

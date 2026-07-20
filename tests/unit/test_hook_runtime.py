@@ -755,6 +755,28 @@ def test_build_interaction_event_carries_group_initiator():
     assert interaction["data"]["initiator_open_id"] == "ou_initiator"
 
 
+def test_build_interaction_event_reads_group_initiator_from_source_user_id():
+    interaction = hook_runtime.build_interaction_event(
+        {
+            "chat_id": "oc_group",
+            "conversation_id": "conv_group",
+            "event_message_id": "om_group_message",
+            "source": SimpleNamespace(
+                chat_type="group",
+                user_id="ou_initiator",
+                user_id_alt="on_initiator",
+            ),
+        },
+        kind="multi_select",
+        interaction_id="materials-owned",
+        prompt="请选择接待物料",
+        options=[{"label": "水牌", "value": "water_sign"}],
+    )
+
+    assert interaction["data"]["chat_type"] == "group"
+    assert interaction["data"]["initiator_open_id"] == "ou_initiator"
+
+
 def test_request_interaction_posts_event_and_polls_until_completed(monkeypatch):
     posted = []
     polls = iter(
