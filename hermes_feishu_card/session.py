@@ -288,9 +288,6 @@ class CardSession:
                     for attachment in attachments
                     if isinstance(attachment, dict) and isinstance(attachment.get("name"), str)
                 ]
-            self.media_image_keys = _media_image_keys(
-                event.data.get("media_image_keys")
-            )
         elif event.event == "message.failed":
             self._close_pending_interaction()
             self._archive_current_answer_to_reasoning()
@@ -298,6 +295,10 @@ class CardSession:
             self.status = "failed"
             error = event.data.get("error")
             self.answer_text = error if isinstance(error, str) else "消息处理失败"
+        if event.event != "interaction.requested":
+            for image_key in _media_image_keys(event.data.get("media_image_keys")):
+                if image_key not in self.media_image_keys:
+                    self.media_image_keys.append(image_key)
         self.updated_at = time.time()
         self.refresh_display_status_source()
         return True

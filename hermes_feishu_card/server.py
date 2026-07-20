@@ -99,6 +99,8 @@ OPERATIONS_PUBLISH_LOCKS_KEY = web.AppKey("operations_publish_locks", dict)
 OPERATIONS_PUBLISH_LOCKS_GUARD_KEY = web.AppKey("operations_publish_locks_guard", Any)
 FLUSH_CONTROLLERS_KEY = web.AppKey("flush_controllers", dict)
 CLEANUP_TASK_KEY = web.AppKey("cleanup_task", asyncio.Task)
+MEDIA_IMAGE_KEY_CACHE_KEY = web.AppKey("media_image_key_cache", dict)
+MEDIA_IMAGE_KEY_CACHE_LOCK_KEY = web.AppKey("media_image_key_cache_lock", asyncio.Lock)
 UPDATE_MAX_ATTEMPTS = 3
 UPDATE_MIN_INTERVAL_SECONDS = 0.2
 RUNTIME_CLEANUP_INTERVAL_SECONDS = 60.0
@@ -121,6 +123,7 @@ SESSION_CREATING_EVENTS = {
 DIAGNOSTICS_KEY = web.AppKey("diagnostics", dict)
 PROFILE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 MAX_CARD_MEDIA_IMAGES = 4
+MAX_MEDIA_IMAGE_KEY_CACHE_ENTRIES = 256
 logger = logging.getLogger(__name__)
 
 
@@ -210,6 +213,8 @@ def create_app(
     app[MESSAGE_LOCKS_KEY] = {}
     app[MESSAGE_LOCK_USERS_KEY] = {}
     app[FLUSH_CONTROLLERS_KEY] = {}
+    app[MEDIA_IMAGE_KEY_CACHE_KEY] = {}
+    app[MEDIA_IMAGE_KEY_CACHE_LOCK_KEY] = asyncio.Lock()
     app[DIAGNOSTICS_KEY] = {
         "last_update_error": "",
         "last_route_error": "",
@@ -2087,10 +2092,9 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
     if session is not None:
         event = _event_for_session(incoming_event, session)
     event_is_terminal = _event_is_terminal(event)
+    event, running_answer_without_media = _event_with_visible_media(event, session)
 
-    if event.event in {"interaction.requested", "message.completed"} and event.data.get(
-        "media_paths"
-    ):
+    if event.data.get("media_paths"):
         bot_id = message_bot_ids.get(session_key)
         if bot_id is None:
             route = _resolve_route(request, event)
@@ -2109,6 +2113,8 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                 {"ok": False, "error": f"{media_kind} media upload failed"},
                 status=502,
             ), None
+        if running_answer_without_media is not None and session is not None:
+            session.answer_text = running_answer_without_media
 
     if _skip_native_text_fallback_interaction(request.app, event):
         metrics.events_ignored += 1
@@ -2477,11 +2483,76 @@ async def _prepare_event_media(
     upload_image = getattr(client, "upload_image", None)
     if not callable(upload_image):
         raise RuntimeError("Feishu client does not support image upload")
-    image_keys = [await upload_image(path) for path in safe_paths]
+    content_md5s = [await asyncio.to_thread(_file_md5, path) for path in safe_paths]
+    image_keys: list[str] = []
+    cache: dict[tuple[str, str], str] = app[MEDIA_IMAGE_KEY_CACHE_KEY]
+    cache_scope = str(bot_id or "")
+    async with app[MEDIA_IMAGE_KEY_CACHE_LOCK_KEY]:
+        for path, content_md5 in zip(safe_paths, content_md5s):
+            cache_key = (cache_scope, content_md5)
+            image_key = cache.get(cache_key)
+            if image_key is None:
+                image_key = await upload_image(path)
+                if len(cache) >= MAX_MEDIA_IMAGE_KEY_CACHE_ENTRIES:
+                    cache.pop(next(iter(cache)))
+                cache[cache_key] = image_key
+            image_keys.append(image_key)
     data = dict(event.data)
     data.pop("media_paths", None)
     data["media_image_keys"] = image_keys
     return replace(event, data=data)
+
+
+def _file_md5(path: Path) -> str:
+    digest = hashlib.md5(usedforsecurity=False)
+    with path.open("rb") as image_file:
+        for chunk in iter(lambda: image_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _event_with_visible_media(
+    event: SidecarEvent,
+    session: CardSession | None,
+) -> tuple[SidecarEvent, str | None]:
+    from .hook_runtime import _card_visible_answer, _extract_media_image_paths
+
+    text_fields = {
+        "thinking.delta": ("text",),
+        "answer.delta": ("text",),
+        "system.notice": ("content", "text"),
+        "interaction.requested": ("prompt", "description"),
+        "message.completed": ("answer",),
+    }.get(event.event, ())
+    data = dict(event.data)
+    raw_media_paths = data.get("media_paths")
+    media_paths = [
+        path.strip()
+        for path in raw_media_paths
+        if isinstance(path, str) and path.strip()
+    ] if isinstance(raw_media_paths, list) else []
+
+    for field in text_fields:
+        value = data.get(field)
+        if not isinstance(value, str) or not value:
+            continue
+        discovered = _extract_media_image_paths(value)
+        if not discovered:
+            continue
+        media_paths.extend(discovered)
+        data[field] = _card_visible_answer(value)
+
+    cleaned_running_answer: str | None = None
+    if event.event == "interaction.requested" and session is not None:
+        discovered = _extract_media_image_paths(session.answer_text)
+        if discovered:
+            media_paths.extend(discovered)
+            cleaned_running_answer = _card_visible_answer(session.answer_text)
+
+    if not media_paths:
+        return event, None
+    data["media_paths"] = list(dict.fromkeys(media_paths))
+    return replace(event, data=data), cleaned_running_answer
 
 
 def _post_terminal_cleanup(

@@ -4808,6 +4808,175 @@ async def test_clarify_media_uploads_and_renders_inside_same_card(
     assert "MEDIA:" not in serialized
 
 
+async def test_running_answer_media_directive_renders_immediately(
+    client, monkeypatch, tmp_path
+):
+    test_client, feishu_client = client
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    image_path = tmp_path / "workspace" / "master.png"
+    image_path.parent.mkdir()
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nimage-bytes")
+
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    delta = await test_client.post(
+        "/events",
+        json=event_payload(
+            "answer.delta",
+            1,
+            {"text": f"主视觉 M01 候选已生成\nMEDIA:{image_path}"},
+        ),
+    )
+
+    assert delta.status == 200
+    assert feishu_client.uploaded_images == [str(image_path.resolve())]
+    interaction_card = feishu_client.updated[-1][1]
+    serialized = json.dumps(interaction_card, ensure_ascii=False)
+    assert "主视觉 M01 候选已生成" in serialized
+    assert "![生成图片](img_v2_1)" in serialized
+    assert str(image_path) not in serialized
+    assert "MEDIA:" not in serialized
+
+
+async def test_media_upload_cache_reuses_image_key_by_content_md5(
+    client, monkeypatch, tmp_path
+):
+    test_client, feishu_client = client
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    first_path = tmp_path / "workspace" / "first.png"
+    second_path = tmp_path / "workspace" / "second.png"
+    first_path.parent.mkdir()
+    first_path.write_bytes(b"same-image-bytes")
+    second_path.write_bytes(b"same-image-bytes")
+
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "answer.delta", 1, {"text": f"第一张\nMEDIA:{first_path}"}
+        ),
+    )
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "answer.delta", 2, {"text": f"第二张\nMEDIA:{second_path}"}
+        ),
+    )
+
+    assert feishu_client.uploaded_images == [str(first_path.resolve())]
+    serialized = json.dumps(feishu_client.updated[-1][1], ensure_ascii=False)
+    assert serialized.count("![生成图片](img_v2_1)") == 1
+    assert "img_v2_2" not in serialized
+    assert str(first_path) not in serialized
+    assert str(second_path) not in serialized
+
+    second_path.write_bytes(b"changed-image-bytes")
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "answer.delta", 3, {"text": f"更新后\nMEDIA:{second_path}"}
+        ),
+    )
+
+    assert feishu_client.uploaded_images == [
+        str(first_path.resolve()),
+        str(second_path.resolve()),
+    ]
+    _message_id, changed_card = await wait_for_card_update(
+        feishu_client, "img_v2_2"
+    )
+    serialized = json.dumps(changed_card, ensure_ascii=False)
+    assert "![生成图片](img_v2_1)" in serialized
+    assert "![生成图片](img_v2_2)" in serialized
+
+
+async def test_completed_media_reuses_image_key_uploaded_during_streaming(
+    client, monkeypatch, tmp_path
+):
+    test_client, feishu_client = client
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    image_path = tmp_path / "workspace" / "master.png"
+    image_path.parent.mkdir()
+    image_path.write_bytes(b"unchanged-image-bytes")
+
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "answer.delta", 1, {"text": f"生成中\nMEDIA:{image_path}"}
+        ),
+    )
+    completed = await test_client.post(
+        "/events",
+        json=event_payload(
+            "message.completed",
+            2,
+            {"answer": "生成完成", "media_paths": [str(image_path)]},
+        ),
+    )
+
+    assert completed.status == 200
+    assert feishu_client.uploaded_images == [str(image_path.resolve())]
+    _message_id, completed_card = await wait_for_card_update(
+        feishu_client, "生成完成"
+    )
+    serialized = json.dumps(completed_card, ensure_ascii=False)
+    assert serialized.count("![生成图片](img_v2_1)") == 1
+
+
+async def test_running_answer_media_is_consumed_when_clarify_reuses_the_card(
+    client, monkeypatch, tmp_path
+):
+    test_client, feishu_client = client
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    image_path = tmp_path / "workspace" / "master.png"
+    image_path.parent.mkdir()
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nimage-bytes")
+
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "answer.delta",
+            1,
+            {
+                "text": (
+                    "主视觉 M01 候选已生成，请先查看下图后确认：\n\n"
+                    f"MEDIA:{image_path}\n\n"
+                    "已确认主视觉 M01，接下来选择接待物料。"
+                )
+            },
+        ),
+    )
+    requested = await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            2,
+            {
+                "interaction_id": "materials-with-running-media",
+                "kind": "multi_select",
+                "prompt": "请选择接待物料",
+                "options": [
+                    {"label": "水牌", "value": "water_sign"},
+                    {"label": "会议用纸", "value": "meeting_paper"},
+                ],
+            },
+        ),
+    )
+
+    assert requested.status == 200
+    assert feishu_client.uploaded_images == [str(image_path.resolve())]
+    _message_id, interaction_card = await wait_for_card_update(
+        feishu_client, "请选择接待物料"
+    )
+    serialized = json.dumps(interaction_card, ensure_ascii=False)
+    assert "主视觉 M01 候选已生成" in serialized
+    assert "请选择接待物料" in serialized
+    assert "![生成图片](img_v2_1)" in serialized
+    assert str(image_path) not in serialized
+    assert "MEDIA:" not in serialized
+
+
 async def test_completed_media_directive_uploads_and_renders_inside_same_card(
     client, monkeypatch, tmp_path
 ):
