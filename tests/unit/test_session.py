@@ -392,6 +392,30 @@ def test_session_tracks_pending_and_completed_interaction():
     assert session.active_interaction.user_name == "Bailey"
 
 
+def test_session_rejects_empty_and_duplicate_explicit_interaction_values():
+    session = CardSession(conversation_id="chat-1", message_id="msg-1", chat_id="oc_abc")
+
+    assert session.apply(
+        event(
+            "interaction.requested",
+            1,
+            {
+                "interaction_id": "materials-1",
+                "kind": "multi_select",
+                "prompt": "请选择接待物料",
+                "options": [
+                    {"label": "水牌", "value": ""},
+                    {"label": "会议桌签", "value": "material"},
+                    {"label": "会议用纸", "value": "material"},
+                ],
+            },
+        )
+    )
+
+    assert session.active_interaction is not None
+    assert [option.value for option in session.active_interaction.options] == ["material"]
+
+
 def test_system_notice_records_and_updates_timeline_entry():
     session = CardSession(conversation_id="chat-1", message_id="msg-1", chat_id="oc_abc")
 

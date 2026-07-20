@@ -304,6 +304,8 @@ def _render_interaction_elements(
     interaction = session.active_interaction
     if interaction is None:
         return []
+    if session.status in {"completed", "failed"} and interaction.status == "failed":
+        return []
 
     elements: list[Dict[str, Any]] = []
     if interaction.status == "pending" and interaction.description:

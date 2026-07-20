@@ -1065,6 +1065,23 @@ def request_interaction_from_hermes_locals(
             if isinstance(result, dict) and result.get("status") in {"completed", "failed"}:
                 return result
             if time.monotonic() >= deadline:
+                failed_payload = build_event(
+                    "interaction.failed",
+                    {
+                        **local_vars,
+                        "_hfc_interaction_id": interaction_id,
+                        "_hfc_interaction_kind": kind,
+                        "_hfc_interaction_prompt": prompt,
+                        "error": "交互请求超时",
+                    },
+                )
+                if failed_payload is not None:
+                    _post_interaction_event(
+                        local_vars,
+                        config.event_url,
+                        failed_payload,
+                        _timeout_for_event(config, failed_payload["event"]),
+                    )
                 return {
                     "ok": False,
                     "status": "timeout",
@@ -4484,6 +4501,9 @@ def install_feishu_command_card_adapter_methods(runner: Any, event: Any = None) 
 
 _HFC_MULTI_SELECT_QUESTION_PREFIX = "[hfc:multi-select]"
 _HFC_MULTI_SELECT_CHOICE_SEPARATOR = "::"
+_HFC_MULTI_SELECT_UNAVAILABLE = (
+    "[hfc multi-select unavailable; ask the user to reply with text]"
+)
 
 
 def request_clarify_response_from_hermes_locals(
@@ -4494,15 +4514,16 @@ def request_clarify_response_from_hermes_locals(
     choices: Any,
     timeout_seconds: float | None = None,
 ) -> str | None:
-    if not choices:
-        return None
     normalized_question = str(question or "请选择").strip()
     is_multi_select = normalized_question.startswith(_HFC_MULTI_SELECT_QUESTION_PREFIX)
     if is_multi_select:
         normalized_question = normalized_question[
             len(_HFC_MULTI_SELECT_QUESTION_PREFIX) :
         ].strip() or "请选择"
+    if not choices:
+        return _HFC_MULTI_SELECT_UNAVAILABLE if is_multi_select else None
     options = []
+    seen_values: set[str] = set()
     for index, choice in enumerate(list(choices)):
         label = str(choice).strip()
         value = label
@@ -4511,6 +4532,10 @@ def request_clarify_response_from_hermes_locals(
                 part.strip()
                 for part in label.split(_HFC_MULTI_SELECT_CHOICE_SEPARATOR, 1)
             )
+        if is_multi_select and (
+            not label or not value or value in seen_values
+        ):
+            return _HFC_MULTI_SELECT_UNAVAILABLE
         if label:
             options.append(
                 {
@@ -4519,8 +4544,9 @@ def request_clarify_response_from_hermes_locals(
                     "style": "primary" if index == 0 else "default",
                 }
             )
+            seen_values.add(value)
     if not options:
-        return None
+        return _HFC_MULTI_SELECT_UNAVAILABLE if is_multi_select else None
     result = request_interaction_from_hermes_locals(
         local_vars,
         kind="multi_select" if is_multi_select else "clarify",
@@ -4538,7 +4564,7 @@ def request_clarify_response_from_hermes_locals(
         choice = str(result.get("choice") or "").strip()
         return choice or None
     if is_multi_select:
-        return "[hfc multi-select unavailable; ask the user to reply with text]"
+        return _HFC_MULTI_SELECT_UNAVAILABLE
     return None
 
 
@@ -5305,6 +5331,15 @@ def _event_data(
                 ),
             }
         )
+        gateway_event_obj = local_vars.get("event")
+        chat_type = _command_chat_type(local_vars, source_obj, gateway_event_obj)
+        if chat_type:
+            data["chat_type"] = chat_type.strip().lower()
+        initiator_open_id = _command_operator(
+            local_vars, source_obj, gateway_event_obj
+        )
+        if initiator_open_id:
+            data["initiator_open_id"] = initiator_open_id
         timeout_value = _finite_float(local_vars.get("_hfc_interaction_timeout_seconds"))
         if timeout_value is not None:
             data["timeout_seconds"] = timeout_value
@@ -5314,6 +5349,10 @@ def _event_data(
         )
         if fallback_policy:
             data["fallback_policy"] = fallback_policy
+        if event_name == "interaction.failed":
+            data["error"] = (
+                _first_string(local_vars, ("error",)) or "交互请求失败"
+            )
         return data
     if event_name == "tool.updated":
         tool_id = _first_string(local_vars, ("tool_id", "tool_call_id", "name")) or "tool"

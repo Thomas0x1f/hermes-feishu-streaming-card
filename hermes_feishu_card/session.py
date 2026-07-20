@@ -48,6 +48,8 @@ class InteractionState:
     interaction_id: str
     kind: str
     prompt: str
+    chat_type: str = ""
+    initiator_open_id: str = ""
     description: str = ""
     status: str = "pending"
     options: list[InteractionOption] = field(default_factory=list)
@@ -252,6 +254,7 @@ class CardSession:
             if not is_runtime_phase:
                 self.timeline.record_notice(notice_id, title, level, content)
         elif event.event == "message.completed":
+            self._close_pending_interaction()
             completed_answer = normalize_stream_text(str(event.data.get("answer") or ""))
             if completed_answer.strip():
                 completed_answer = self._prepare_completed_answer(completed_answer)
@@ -284,6 +287,7 @@ class CardSession:
                     if isinstance(attachment, dict) and isinstance(attachment.get("name"), str)
                 ]
         elif event.event == "message.failed":
+            self._close_pending_interaction()
             self._archive_current_answer_to_reasoning()
             self.timeline.complete()
             self.status = "failed"
@@ -292,6 +296,14 @@ class CardSession:
         self.updated_at = time.time()
         self.refresh_display_status_source()
         return True
+
+    def _close_pending_interaction(self) -> None:
+        if (
+            self.active_interaction is not None
+            and self.active_interaction.status == "pending"
+        ):
+            self.active_interaction.status = "failed"
+            self.active_interaction.error = "交互请求已结束"
 
     def _archive_current_answer_to_reasoning(self, final_answer: str = "") -> None:
         preface = normalize_stream_text(self.answer_text).strip()
@@ -386,6 +398,8 @@ def _interaction_from_event_data(data: dict[str, Any]) -> InteractionState:
         interaction_id=interaction_id,
         kind=str(data.get("kind") or "choice").strip() or "choice",
         prompt=str(data.get("prompt") or "").strip(),
+        chat_type=str(data.get("chat_type") or "").strip().lower(),
+        initiator_open_id=str(data.get("initiator_open_id") or "").strip(),
         description=str(data.get("description") or "").strip(),
         options=_interaction_options(data.get("options")),
         callback_token=str(data.get("callback_token") or secrets.token_urlsafe(16)),
@@ -396,15 +410,18 @@ def _interaction_options(value: Any) -> list[InteractionOption]:
     if not isinstance(value, list):
         return []
     options: list[InteractionOption] = []
+    seen_values: set[str] = set()
     for index, item in enumerate(value, start=1):
         if not isinstance(item, dict):
             continue
         label = str(item.get("label") or item.get("text") or item.get("value") or "").strip()
-        option_value = str(item.get("value") or label or index).strip()
-        if not label or not option_value:
+        raw_value = item.get("value") if "value" in item else label or index
+        option_value = str(raw_value).strip()
+        if not label or not option_value or option_value in seen_values:
             continue
         style = str(item.get("style") or item.get("type") or "default").strip() or "default"
         options.append(InteractionOption(label=label, value=option_value, style=style))
+        seen_values.add(option_value)
     return options
 
 

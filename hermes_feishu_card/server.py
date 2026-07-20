@@ -412,14 +412,15 @@ async def _interaction_action(
     payload: dict[str, Any],
     value: dict[str, Any],
 ) -> web.Response:
+    action = str(value.get("hfc_action") or "").strip()
     interaction_id = str(value.get("interaction_id") or "").strip()
     token = str(value.get("token") or "").strip()
-    is_multi_select = str(value.get("hfc_action") or "").strip() == (
-        "interaction.multi_select"
-    )
     choice = str(value.get("choice") or "").strip()
-    choice_label = str(value.get("choice_label") or choice).strip()
-    if not interaction_id or not token or (not is_multi_select and not choice):
+    if (
+        action not in {"interaction.select", "interaction.multi_select"}
+        or not interaction_id
+        or not token
+    ):
         return web.json_response({"ok": False, "error": "invalid action"}, status=400)
 
     callback_chat_id = _extract_callback_chat_id(payload)
@@ -427,10 +428,20 @@ async def _interaction_action(
     if found is None:
         return web.json_response({"ok": False, "error": "interaction not found"}, status=404)
     session_key, session = found
+    interaction = session.active_interaction
+    operator_open_id = _extract_operator_open_id(payload)
     if (
-        session.active_interaction is not None
-        and session.active_interaction.status == "completed"
+        interaction is not None
+        and _is_group_chat(interaction.chat_type)
+        and (
+            not interaction.initiator_open_id
+            or operator_open_id != interaction.initiator_open_id
+        )
     ):
+        return web.json_response(
+            {"ok": False, "error": "interaction forbidden"}, status=403
+        )
+    if interaction is not None and interaction.status == "completed":
         return web.json_response(
             {
                 "ok": True,
@@ -438,15 +449,24 @@ async def _interaction_action(
                 "card": _render_session_card(request, session),
             }
         )
+    expected_action = (
+        "interaction.multi_select"
+        if interaction is not None and interaction.kind == "multi_select"
+        else "interaction.select"
+    )
+    if action != expected_action:
+        return web.json_response(
+            {"ok": False, "error": "invalid action"}, status=400
+        )
     user_name = _extract_operator_name(payload)
+    is_multi_select = interaction is not None and interaction.kind == "multi_select"
+    allowed_labels = (
+        {option.value: option.label for option in interaction.options}
+        if interaction is not None
+        else {}
+    )
     if is_multi_select:
-        interaction = session.active_interaction
-        if interaction is None or interaction.kind != "multi_select":
-            return web.json_response(
-                {"ok": False, "error": "invalid action"}, status=400
-            )
         selected = _extract_multi_select_choices(payload)
-        allowed_labels = {option.value: option.label for option in interaction.options}
         if not selected or any(item not in allowed_labels for item in selected):
             return web.json_response(
                 {"ok": False, "error": "invalid selection"}, status=400
@@ -458,10 +478,14 @@ async def _interaction_action(
             "user_name": user_name,
         }
     else:
+        if not choice or choice not in allowed_labels:
+            return web.json_response(
+                {"ok": False, "error": "invalid selection"}, status=400
+            )
         data = {
             "interaction_id": interaction_id,
             "choice": choice,
-            "choice_label": choice_label,
+            "choice_label": allowed_labels[choice],
             "user_name": user_name,
         }
     if ":" in session_key:
@@ -2318,7 +2342,14 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
     )
     if terminal_already_handled:
         applied = True
-    if applied and event.event.startswith("interaction."):
+    if applied and (
+        event.event.startswith("interaction.")
+        or (
+            event_is_terminal
+            and session.active_interaction is not None
+            and session.active_interaction.status == "failed"
+        )
+    ):
         _store_interaction_result(request.app, session)
     if event_is_terminal:
         request.app[DIAGNOSTICS_KEY]["last_terminal_event"] = {
@@ -2427,6 +2458,8 @@ def _store_interaction_result(app: web.Application, session: CardSession) -> Non
             "choice": interaction.choice,
             "choice_label": interaction.choice_label,
         }
+    if interaction.status == "failed":
+        result["error"] = interaction.error or "交互请求失败"
     app[INTERACTION_RESULTS_KEY][interaction.interaction_id] = result
     app[INTERACTION_RESULT_SESSION_KEYS_KEY][interaction.interaction_id] = (
         _session_key_for_session(app, session)
