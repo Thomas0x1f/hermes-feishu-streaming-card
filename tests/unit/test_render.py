@@ -451,6 +451,66 @@ def test_render_pending_interaction_as_buttons():
     assert "rm -rf /tmp/demo" in str(card)
 
 
+def test_render_pending_multi_select_as_form_with_submit():
+    from hermes_feishu_card.events import SidecarEvent
+
+    session = CardSession(conversation_id="chat-1", message_id="msg-1", chat_id="oc_abc")
+    session.apply(
+        SidecarEvent(
+            schema_version="1",
+            event="interaction.requested",
+            conversation_id="chat-1",
+            message_id="msg-1",
+            chat_id="oc_abc",
+            platform="feishu",
+            sequence=1,
+            created_at=0.0,
+            data={
+                "interaction_id": "materials-1",
+                "kind": "multi_select",
+                "prompt": "请选择接待物料",
+                "options": [
+                    {"label": "水牌", "value": "water_sign"},
+                    {"label": "会议桌签", "value": "table_card"},
+                ],
+            },
+        )
+    )
+
+    card = render_card(session)
+
+    form = next(
+        element for element in card["body"]["elements"] if element.get("tag") == "form"
+    )
+    selector = next(
+        element
+        for element in form["elements"]
+        if element.get("tag") == "multi_select_static"
+    )
+    submit = next(
+        element for element in form["elements"] if element.get("tag") == "button"
+    )
+    assert form["name"] == "hfc_multi_select_form"
+    assert selector["name"] == "hfc_choices"
+    assert selector["required"] is True
+    assert selector["options"] == [
+        {
+            "text": {"tag": "plain_text", "content": "水牌"},
+            "value": "water_sign",
+        },
+        {
+            "text": {"tag": "plain_text", "content": "会议桌签"},
+            "value": "table_card",
+        },
+    ]
+    assert submit["form_action_type"] == "submit"
+    assert submit["behaviors"][0]["value"] == {
+        "hfc_action": "interaction.multi_select",
+        "interaction_id": "materials-1",
+        "token": session.active_interaction.callback_token,
+    }
+
+
 def test_render_pending_interaction_as_text_choices_for_localhost_mode():
     from hermes_feishu_card.events import SidecarEvent
 

@@ -734,6 +734,27 @@ def test_build_interaction_event_reuses_active_card_message_id():
     assert interaction["data"]["options"][0]["value"] == "once"
 
 
+def test_build_interaction_event_carries_group_initiator():
+    interaction = hook_runtime.build_interaction_event(
+        {
+            "chat_id": "oc_group",
+            "conversation_id": "conv_group",
+            "event_message_id": "om_group_message",
+            "source": SimpleNamespace(
+                chat_type="group",
+                sender_id=SimpleNamespace(open_id="ou_initiator"),
+            ),
+        },
+        kind="multi_select",
+        interaction_id="materials-owned",
+        prompt="请选择接待物料",
+        options=[{"label": "水牌", "value": "water_sign"}],
+    )
+
+    assert interaction["data"]["chat_type"] == "group"
+    assert interaction["data"]["initiator_open_id"] == "ou_initiator"
+
+
 def test_request_interaction_posts_event_and_polls_until_completed(monkeypatch):
     posted = []
     polls = iter(
@@ -4629,6 +4650,137 @@ def test_request_interaction_returns_none_for_text_fallback_mode(monkeypatch):
     assert result is None
 
 
+def test_request_interaction_timeout_marks_sidecar_interaction_failed(monkeypatch):
+    posted = []
+    monkeypatch.setenv("HERMES_FEISHU_CARD_EVENT_URL", "http://sidecar.test/events")
+
+    def fake_post(local_vars, url, payload, timeout):
+        posted.append(payload)
+        return {"ok": True, "applied": True}
+
+    monkeypatch.setattr(hook_runtime, "_post_interaction_event", fake_post)
+    monkeypatch.setattr(
+        hook_runtime,
+        "_get_json_sync",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "status": "pending",
+            "interaction_id": "materials-timeout",
+        },
+    )
+
+    result = hook_runtime.request_interaction_from_hermes_locals(
+        {"chat_id": "oc_abc", "message_id": "msg_1"},
+        kind="multi_select",
+        interaction_id="materials-timeout",
+        prompt="请选择接待物料",
+        options=[{"label": "水牌", "value": "water_sign"}],
+        timeout_seconds=0,
+        poll_interval_seconds=0,
+    )
+
+    assert result == {
+        "ok": False,
+        "status": "timeout",
+        "interaction_id": "materials-timeout",
+    }
+    assert [payload["event"] for payload in posted] == [
+        "interaction.requested",
+        "interaction.failed",
+    ]
+    assert posted[-1]["data"]["interaction_id"] == "materials-timeout"
+    assert posted[-1]["data"]["error"] == "交互请求超时"
+
+
+def test_clarify_multi_select_marker_returns_stable_values(monkeypatch):
+    captured = {}
+
+    def fake_request(local_vars, **kwargs):
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "status": "completed",
+            "choices": ["water_sign", "table_card"],
+            "choice_labels": ["水牌", "会议桌签"],
+        }
+
+    monkeypatch.setattr(
+        hook_runtime,
+        "request_interaction_from_hermes_locals",
+        fake_request,
+    )
+
+    result = hook_runtime.request_clarify_response_from_hermes_locals(
+        {},
+        interaction_id="materials-1",
+        question="[hfc:multi-select]请选择接待物料",
+        choices=[
+            "水牌::water_sign",
+            "会议桌签::table_card",
+            "会议用纸::meeting_paper",
+            "台卡::desk_card",
+        ],
+    )
+
+    assert json.loads(result) == ["water_sign", "table_card"]
+    assert captured["kind"] == "multi_select"
+    assert captured["prompt"] == "请选择接待物料"
+    assert captured["options"] == [
+        {"label": "水牌", "value": "water_sign", "style": "primary"},
+        {"label": "会议桌签", "value": "table_card", "style": "default"},
+        {"label": "会议用纸", "value": "meeting_paper", "style": "default"},
+        {"label": "台卡", "value": "desk_card", "style": "default"},
+    ]
+
+
+def test_clarify_multi_select_does_not_fall_back_to_native_single_select(monkeypatch):
+    monkeypatch.setattr(
+        hook_runtime,
+        "request_interaction_from_hermes_locals",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = hook_runtime.request_clarify_response_from_hermes_locals(
+        {},
+        interaction_id="materials-1",
+        question="[hfc:multi-select]请选择接待物料",
+        choices=["水牌::water_sign", "会议桌签::table_card"],
+    )
+
+    assert result == "[hfc multi-select unavailable; ask the user to reply with text]"
+
+
+@pytest.mark.parametrize(
+    "choices",
+    [
+        [],
+        ["水牌::"],
+        ["::water_sign"],
+        ["水牌::material", "会议桌签::material"],
+    ],
+)
+def test_clarify_multi_select_invalid_stable_values_use_text_sentinel(
+    monkeypatch, choices
+):
+    def fail_request(*_args, **_kwargs):
+        raise AssertionError("invalid multi-select options must not reach sidecar")
+
+    monkeypatch.setattr(
+        hook_runtime,
+        "request_interaction_from_hermes_locals",
+        fail_request,
+    )
+
+    result = hook_runtime.request_clarify_response_from_hermes_locals(
+        {},
+        interaction_id="materials-invalid-options",
+        question="[hfc:multi-select]请选择接待物料",
+        choices=choices,
+    )
+
+    assert result == "[hfc multi-select unavailable; ask the user to reply with text]"
+
+
 def test_request_interaction_polls_through_transient_not_found(monkeypatch):
     polls = iter(
         [
@@ -6969,6 +7121,77 @@ def test_interaction_select_forwards_to_sidecar_and_returns_card(monkeypatch):
     }
     assert sent["context"]["open_chat_id"] == "oc_abc"
     assert sent["operator"] == {"name": "Bailey", "open_id": "ou_user"}
+    assert response.card.type == "raw"
+    assert response.card.data["header"]["template"] == "green"
+
+
+def test_interaction_multi_select_forwards_form_values_to_sidecar(monkeypatch):
+    class FakeCallBackCard:
+        def __init__(self):
+            self.type = None
+            self.data = None
+
+    class FakeP2Response:
+        def __init__(self):
+            self.card = None
+
+    class DummyFeishuAdapter:
+        name = "feishu"
+
+        def __init__(self):
+            self._loop = object()
+
+        def _on_card_action_trigger(self, data):
+            return "original"
+
+    DummyFeishuAdapter.__module__ = hook_runtime.__name__
+    monkeypatch.setattr(
+        hook_runtime, "P2CardActionTriggerResponse", FakeP2Response, raising=False
+    )
+    monkeypatch.setattr(hook_runtime, "CallBackCard", FakeCallBackCard, raising=False)
+
+    posted = {}
+
+    def fake_post(url, payload, timeout):
+        posted["url"] = url
+        posted["payload"] = payload
+        return {"ok": True, "card": {"header": {"template": "green"}}}
+
+    monkeypatch.setattr(hook_runtime, "_post_json_sync_response", fake_post)
+    monkeypatch.setattr(
+        hook_runtime,
+        "load_runtime_config",
+        lambda: SimpleNamespace(event_url="http://127.0.0.1:8765/events"),
+    )
+
+    data = SimpleNamespace(
+        event=SimpleNamespace(
+            action=SimpleNamespace(
+                value={
+                    "hfc_action": "interaction.multi_select",
+                    "interaction_id": "materials-1",
+                    "token": "tok-1",
+                },
+                form_value={"hfc_choices": ["water_sign", "table_card"]},
+            ),
+            context=SimpleNamespace(open_chat_id="oc_abc"),
+            operator=SimpleNamespace(open_id="ou_user", user_name="Bailey"),
+        )
+    )
+
+    response = hook_runtime._hfc_on_feishu_card_action_trigger(
+        DummyFeishuAdapter(), data
+    )
+
+    assert posted["url"] == "http://127.0.0.1:8765/card/actions"
+    assert posted["payload"]["event"]["action"] == {
+        "value": {
+            "hfc_action": "interaction.multi_select",
+            "interaction_id": "materials-1",
+            "token": "tok-1",
+        },
+        "form_value": {"hfc_choices": ["water_sign", "table_card"]},
+    }
     assert response.card.type == "raw"
     assert response.card.data["header"]["template"] == "green"
 
