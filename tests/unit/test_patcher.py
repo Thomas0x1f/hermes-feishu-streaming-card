@@ -772,6 +772,30 @@ def test_apply_patch_inserts_streaming_callback_hooks():
     assert patcher.remove_patch(patched) == content
 
 
+def test_clarify_hook_preserves_the_current_streaming_card_identity():
+    content = (
+        "async def _handle_message_with_agent(self, event, source, _quick_key, run_generation):\n"
+        "    return await self._run_agent(event_message_id=event.message_id)\n"
+        "\n"
+        "async def _run_agent(self, source, event_message_id=None):\n"
+        "    _status_chat_id = source.chat_id\n"
+        "    def _run_still_current():\n"
+        "        return True\n"
+        "\n"
+        "    def _clarify_callback_sync(question: str, choices):\n"
+        "        return \"\"\n"
+    )
+
+    patched = patcher.apply_patch(content)
+    clarify_block = patched.split(patcher.CLARIFY_PATCH_BEGIN, 1)[1].split(
+        patcher.CLARIFY_PATCH_END, 1
+    )[0]
+
+    assert '"message_id": event_message_id' in clarify_block
+    assert '"conversation_id":' not in clarify_block
+    assert patcher.remove_patch(patched) == content
+
+
 def _status_callback_fixture() -> str:
     return (
         "async def _handle_message_with_agent(self, event, source, _quick_key, run_generation):\n"

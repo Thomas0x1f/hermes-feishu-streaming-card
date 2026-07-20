@@ -494,6 +494,50 @@ def test_render_clarify_media_in_same_card_before_buttons():
     assert "MEDIA:" not in str(card)
 
 
+def test_render_clarify_appends_to_existing_message_content():
+    from hermes_feishu_card.events import SidecarEvent
+
+    session = CardSession(conversation_id="chat-1", message_id="msg-1", chat_id="oc_abc")
+    session.answer_text = "已经完成需求分析，下面需要你确认主视觉。"
+    session.apply(
+        SidecarEvent(
+            schema_version="1",
+            event="interaction.requested",
+            conversation_id="chat-1",
+            message_id="msg-1",
+            chat_id="oc_abc",
+            platform="feishu",
+            sequence=1,
+            created_at=0.0,
+            data={
+                "interaction_id": "visual-keep-content",
+                "kind": "clarify",
+                "prompt": "请确认主视觉",
+                "media_image_keys": ["img_v2_master"],
+                "options": [{"label": "确认", "value": "confirm"}],
+            },
+        )
+    )
+
+    elements = render_card(session)["body"]["elements"]
+    main_index = next(
+        index
+        for index, element in enumerate(elements)
+        if element.get("element_id") == "main_content"
+    )
+    image_index = next(
+        index
+        for index, element in enumerate(elements)
+        if element.get("element_id") == "interaction_media_0"
+    )
+    button_index = next(
+        index for index, element in enumerate(elements) if element.get("tag") == "button"
+    )
+
+    assert elements[main_index]["content"] == session.answer_text
+    assert main_index < image_index < button_index
+
+
 def test_render_pending_multi_select_as_form_with_submit():
     from hermes_feishu_card.events import SidecarEvent
 
