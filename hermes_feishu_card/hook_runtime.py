@@ -4299,7 +4299,7 @@ def _hfc_notify_conversation_bumped(chat_id: str) -> None:
             f"{base}/conversation/bumped", {"chat_id": chat_id}, 2.0
         )
         displaced = result.get("displaced") if isinstance(result, dict) else "?"
-        _hfc_info(f"conversation bumped: displaced={displaced}")
+        _hfc_warn(f"conversation bumped: displaced={displaced}")
     except Exception as exc:
         _hfc_warn(f"conversation bump failed: {exc.__class__.__name__}: {exc}")
 
@@ -4612,7 +4612,12 @@ def install_feishu_command_card_adapter_methods(runner: Any, event: Any = None) 
                         _hfc_handle_message_event_data,
                     )
                     setattr(adapter_type, "_hfc_inbound_bump_wrapped", True)
-                    _hfc_info("inbound bump wrap installed on feishu adapter")
+                    _hfc_warn("inbound bump wrap installed on feishu adapter")
+                else:
+                    _hfc_warn(
+                        "inbound bump wrap skipped: _handle_message_event_data "
+                        "not found on adapter type"
+                    )
 
             current_send = adapter_type.__dict__.get("send")
             if current_send is _hfc_send_with_native_command_result_card:
