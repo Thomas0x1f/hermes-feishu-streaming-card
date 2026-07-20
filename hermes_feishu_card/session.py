@@ -86,6 +86,7 @@ class CardSession:
     subscription_usage: str = ""
     subscription_usage_checked: bool = False
     attachments: list[dict[str, str]] = field(default_factory=list)
+    media_image_keys: list[str] = field(default_factory=list)
     active_interaction: InteractionState | None = None
     delivery_kind: str = "chat"
     reply_to_message_id: str = ""
@@ -287,6 +288,9 @@ class CardSession:
                     for attachment in attachments
                     if isinstance(attachment, dict) and isinstance(attachment.get("name"), str)
                 ]
+            self.media_image_keys = _media_image_keys(
+                event.data.get("media_image_keys")
+            )
         elif event.event == "message.failed":
             self._close_pending_interaction()
             self._archive_current_answer_to_reasoning()
@@ -402,13 +406,13 @@ def _interaction_from_event_data(data: dict[str, Any]) -> InteractionState:
         chat_type=str(data.get("chat_type") or "").strip().lower(),
         initiator_open_id=str(data.get("initiator_open_id") or "").strip(),
         description=str(data.get("description") or "").strip(),
-        media_image_keys=_interaction_media_image_keys(data.get("media_image_keys")),
+        media_image_keys=_media_image_keys(data.get("media_image_keys")),
         options=_interaction_options(data.get("options")),
         callback_token=str(data.get("callback_token") or secrets.token_urlsafe(16)),
     )
 
 
-def _interaction_media_image_keys(value: Any) -> list[str]:
+def _media_image_keys(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     keys: list[str] = []

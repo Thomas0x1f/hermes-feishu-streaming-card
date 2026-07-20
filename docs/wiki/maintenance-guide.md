@@ -31,6 +31,7 @@
 - 已识别 `system.notice` 必须按 sidecar 结果分流：`delivered` 抑制原生文本，`not_sent` 回退原始通知文本，`unknown` 默认抑制原生提示且不重复原始通知文本；仅当 `HERMES_FEISHU_CARD_NOTICE_UNCERTAIN_WARNING_ENABLED=1` 时尝试固定通用提示 `⚠️ 一条运行提示的卡片投递结果无法确认，请稍后查看 /hfc status。`，不可解析响应一律视为 `unknown`，相关诊断指标始终保留。
 - 上下文压缩只从 `_status_callback_sync` 的固定 `Compacting context` 标记产生 `context-compaction`；不得用静默 watchdog、普通 compression 文本或虚构百分比推断。
 - cron completion hook 必须位于 `extract_media` / `media_files` 过滤之后：`native_delivery=required` 时清空原生正文但继续文件上传，不能在媒体提取前提前返回。
+- 普通完成卡片只内嵌 Markdown 代码块之外的显式 `MEDIA:` 图片；路径必须在 `HERMES_HOME` 内完成 realpath 边界校验，上传后只保留 `image_key`，原生媒体投递继续 fail-open。
 - 不得恢复固定 command allowlist；built-in、alias、plugin/quick、unknown feedback 都必须经过统一 command context。`/update` 只卡片化重启前反馈，不改变后台升级和重启语义。
 - command context 只能接管非空文本；Agent turn、专用交互卡和媒体路径保持原边界。只有 create/PATCH 成功才抑制对应原生文本。
 - 已连接 Lark WebSocket 的 live `EventDispatcherHandler` identity 不得被重建或替换；只可通过 `_ws_thread_loop.call_soon_threadsafe(...)` 更新现有 `p2.card.action.trigger` processor callback，不兼容内部结构必须 fail-open。

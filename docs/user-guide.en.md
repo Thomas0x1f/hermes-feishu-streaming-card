@@ -496,7 +496,7 @@ python3 -m hermes_feishu_card.cli doctor \
 - **Progressive answer**: streams `answer.delta` into one card, replaces thinking on completion
 - **Approval/choice interactions**: Hermes approval, clarify choices, and independent slash commands prefer Feishu button cards; when unavailable they fall back to numbered/text choices and Hermes' native text reply path
 - **Cron final cards and reply context**: cron jobs can deliver final cards, and reply cards preserve the needed context
-- **Attachment summaries and native media delivery**: cards show attachment summaries while the hook keeps Hermes native media/file delivery paths unsuppressed
+- **Attachment summaries, card images, and native media delivery**: cards show attachment summaries; explicit `MEDIA:` images outside Markdown code blocks are validated within `HERMES_HOME`, uploaded, and rendered after the completed body without storing or exposing local paths, while native media/file delivery remains fail-open
 - **Tool call tracking**: `tool.updated` shows cumulative call count and status
 - **Runtime footer**: duration, model, tokens, context %. Non-terminal cards show a rotating braille spinner
 - **Table limit protection** (new in V3.3.0): auto-truncates tables exceeding Feishu's 5-table limit with a notice appended

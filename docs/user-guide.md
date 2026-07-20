@@ -576,7 +576,7 @@ python3 -m hermes_feishu_card.cli start --config ~/.hermes_feishu_card/config.ya
 - **多 Profile 进程内隔离**：一个 sidecar 服务多个 Hermes profile，使用 `profile_id:message_id` 隔离 session。
 - **Profile / Bot 卡片标题**：全局、profile、bot 均可设置标题，bot 级优先。
 - **Cron 最终卡片与回复上下文**：cron 任务可发送最终卡片，reply card context 保留必要上下文。
-- **附件摘要与原生媒体投递**：卡片内展示 attachment summaries，hook 不抑制 Hermes 原生媒体/文件投递路径。
+- **附件摘要、卡片图片与原生媒体投递**：卡片内展示 attachment summaries；完成 answer 中位于 Markdown 代码块之外的显式 `MEDIA:` 图片会在 `HERMES_HOME` 边界内校验、上传并渲染在正文后，卡片不保存或暴露本地路径，原生媒体/文件投递仍保持 fail-open。
 - **DeepSeek 思维链兼容**：过滤 `<think>`/`</think>` 与 `<thinking>`/`</thinking>` 标签。
 - **工具调用跟踪**：累计工具调用次数和每个工具的当前状态。
 - **运行统计 footer**：显示耗时、模型、token、上下文占比；非终态卡片显示旋转生成中状态。

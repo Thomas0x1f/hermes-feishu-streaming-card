@@ -5041,6 +5041,7 @@ def test_completed_event_ignores_media_directives_inside_markdown_code(answer):
 
     assert payload["data"]["answer"] == answer
     assert payload["data"]["attachments"] == []
+    assert "media_paths" not in payload["data"]
     assert payload["data"]["native_delivery"] == "allowed"
 
 

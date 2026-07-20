@@ -199,6 +199,11 @@ Clarify 卡片里，不额外发送媒体消息。卡片状态只保存 `image_k
 路径。该路径仅接受 `HERMES_HOME` 内最多 4 个受支持的图片文件，每个文件不超过
 10 MB；解析、过滤、上传或渲染失败时不会创建一张用户看不到媒体却仍可确认的卡片。
 
+普通 `message.completed` 卡片也识别 Markdown 代码块之外的显式 `MEDIA:` 图片。hook
+把图片路径作为临时事件字段交给 sidecar；sidecar 复用相同的目录边界、数量、格式和
+大小校验，上传后只把 `image_key` 写入内存态 `CardSession`，并在正文后渲染图片。
+音频、视频、文件以及 Hermes 结构化媒体字段继续使用原生媒体投递路径。
+
 HTTP callback 可达时，Feishu/Lark 直接 POST 到 sidecar `/card/actions`。在 WebSocket
 长连接或本地/private sidecar 场景中，按钮或多选提交会先到 Hermes Feishu adapter
 的原生 card-action channel，再由 hook runtime 分别接管 `interaction.select` 或

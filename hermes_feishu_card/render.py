@@ -136,6 +136,14 @@ def render_card(
             used_roles=used_text_size_roles,
         ),
     )
+    for index, image_key in enumerate(session.media_image_keys):
+        elements.append(
+            {
+                "tag": "markdown",
+                "element_id": f"content_media_{index}",
+                "content": f"![生成图片]({image_key})",
+            }
+        )
     timeline_elements: list[Dict[str, Any]] = []
     if show_reasoning:
         timeline_elements = _render_timeline_elements(

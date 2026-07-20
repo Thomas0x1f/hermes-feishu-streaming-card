@@ -5622,6 +5622,9 @@ def _event_data(
             "tokens": _completion_tokens(local_vars, answer),
             "context": _completion_context(local_vars),
         })
+        media_paths = _extract_media_image_paths(answer)
+        if media_paths:
+            data["media_paths"] = media_paths
         delivery_kind = _first_string(local_vars, ("delivery_kind",))
         if delivery_kind:
             data["delivery_kind"] = delivery_kind
@@ -5816,6 +5819,18 @@ def _extract_attachments(
         seen.add(name)
         attachments.append({"kind": _attachment_kind(name), "name": name, "summary": name})
     return attachments
+
+
+def _extract_media_image_paths(text: str) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for match in MEDIA_RE.finditer(_mask_markdown_code(text)):
+        path = match.group(1).rstrip(ATTACHMENT_TRAILING_PUNCTUATION)
+        if not path or path in seen or _attachment_kind(path) != "image":
+            continue
+        seen.add(path)
+        paths.append(path)
+    return paths
 
 
 def _mask_markdown_code(text: Any) -> str:
