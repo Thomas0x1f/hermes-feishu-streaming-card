@@ -5123,6 +5123,10 @@ def _build_event(
     created_at_value = local_vars.get("created_at")
     created_at = _created_at(created_at_value)
     created_at_lifecycle_token = _created_at_lifecycle_token(created_at_value)
+    if created_at_lifecycle_token is None and gateway_event_obj is not None:
+        # 无 created_at 时用网关事件对象身份区分并发回合（如 kanban 唤醒的
+        # internal 合成消息），避免同会话的 fallback 卡片会话互相碰撞。
+        created_at_lifecycle_token = f"evt:{id(gateway_event_obj):x}"
     fallback_key = (conversation_id, chat_id)
     explicit_message_id = _first_string(
         local_vars, ("message_id", "msg_id", "event_message_id")

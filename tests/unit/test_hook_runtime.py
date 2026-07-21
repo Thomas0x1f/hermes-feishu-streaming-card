@@ -2203,6 +2203,38 @@ def test_kanban_platform_notice_is_swallowed(monkeypatch):
     assert scheduled == []
 
 
+def test_concurrent_internal_turns_get_distinct_fallback_cards():
+    source = SimpleNamespace(platform="feishu", chat_id="oc_fallback_evt")
+    event_a = SimpleNamespace()
+    event_b = SimpleNamespace()
+    base = {
+        "source": source,
+        "conversation_id": "conv_fallback_evt",
+        "message_id": None,
+    }
+
+    started_a = hook_runtime.build_event(
+        "message.started", {**base, "event": event_a, "text": "a"}
+    )
+    started_b = hook_runtime.build_event(
+        "message.started", {**base, "event": event_b, "text": "b"}
+    )
+    assert started_a is not None and started_b is not None
+    assert started_a["message_id"] != started_b["message_id"]
+
+    completed_a = hook_runtime.build_event(
+        "message.completed", {**base, "event": event_a, "answer": "a"}
+    )
+    assert completed_a is not None
+    assert completed_a["message_id"] == started_a["message_id"]
+
+    completed_b = hook_runtime.build_event(
+        "message.completed", {**base, "event": event_b, "answer": "b"}
+    )
+    assert completed_b is not None
+    assert completed_b["message_id"] == started_b["message_id"]
+
+
 def test_long_running_heartbeat_notice_is_non_terminal():
     notice = hook_runtime._hfc_classify_system_notice(
         "⏳ Working — 6 min — iteration 10/90, "
