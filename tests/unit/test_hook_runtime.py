@@ -2120,6 +2120,63 @@ def test_background_process_notice_classification_and_stable_id():
     assert len(independent_ids) == 1
 
 
+def test_kanban_notice_classification_and_stable_id():
+    done = hook_runtime._hfc_classify_system_notice(
+        "✔ [reception-v2] @brand_researcher Kanban t_e9815768 done — "
+        "brand_colors: visit-20260721-tencent"
+    )
+    failed = hook_runtime._hfc_classify_system_notice(
+        "✗ [reception-v2] @brand_researcher Kanban t_e9815768 failed — "
+        "brand_colors: visit-20260721-tencent"
+    )
+    progress = hook_runtime._hfc_classify_system_notice(
+        "[reception-v2] @brand_researcher Kanban t_e9815768 doing — "
+        "brand_colors: visit-20260721-tencent"
+    )
+    another = hook_runtime._hfc_classify_system_notice(
+        "✔ [reception-v2] @writer Kanban t_abc123 done — draft ready"
+    )
+
+    assert done == {
+        "title": "看板任务已完成",
+        "level": "success",
+        "notice_kind": "kanban-task",
+        "notice_id": "kanban-task:t_e9815768",
+        "notice_terminal": True,
+    }
+    assert failed == {
+        "title": "看板任务失败",
+        "level": "error",
+        "notice_kind": "kanban-task",
+        "notice_id": "kanban-task:t_e9815768",
+        "notice_terminal": True,
+    }
+    assert progress == {
+        "title": "看板任务更新",
+        "level": "info",
+        "notice_kind": "kanban-task",
+        "notice_id": "kanban-task:t_e9815768",
+        "notice_terminal": False,
+    }
+    assert another is not None
+    assert another["notice_id"] == "kanban-task:t_abc123"
+
+
+def test_kanban_notice_does_not_match_plain_text():
+    assert (
+        hook_runtime._hfc_classify_system_notice(
+            "关于 Kanban t_e9815768 的说明：任务已经 done 了"
+        )
+        is None
+    )
+    assert (
+        hook_runtime._hfc_classify_system_notice(
+            "[链接] @某人 提到了 Kanban 看板"
+        )
+        is None
+    )
+
+
 def test_long_running_heartbeat_notice_is_non_terminal():
     notice = hook_runtime._hfc_classify_system_notice(
         "⏳ Working — 6 min — iteration 10/90, "

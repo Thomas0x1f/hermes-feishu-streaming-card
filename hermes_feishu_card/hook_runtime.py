@@ -82,6 +82,11 @@ BACKGROUND_TASK_FAILED_RE = re.compile(
     r"(?P<task_id>bg_\d{6}_[0-9a-f]{6}) "
     r"failed:(?:[ \t\r\n][\s\S]*)?\Z"
 )
+KANBAN_NOTICE_RE = re.compile(
+    r"\A(?:\S{1,4}\s+)?\[[^\]\n]+\]\s+@\S+\s+"
+    r"Kanban\s+(?P<task_id>t_[0-9a-zA-Z]+)\s+(?P<status>[a-z_-]+)"
+    r"(?:\s[\s\S]*)?\Z"
+)
 ATTACHMENT_TRAILING_PUNCTUATION = ",.;:)]}，。；：）】}"
 NATIVE_DELIVERY_MARKERS = ("[[as_document]]", "[[audio_as_voice]]")
 NATIVE_DELIVERY_ATTACHMENT_FIELDS = (
@@ -2360,6 +2365,9 @@ def _hfc_classify_system_notice(content: Any) -> dict[str, Any] | None:
     background_notice = _hfc_classify_background_notice(raw_text)
     if background_notice is not None:
         return background_notice
+    kanban_notice = _hfc_classify_kanban_notice(raw_text.strip())
+    if kanban_notice is not None:
+        return kanban_notice
     text = raw_text.strip()
     lowered = text.lower()
     if text.startswith("⏳") or lowered.startswith("working ") or "working —" in lowered:
@@ -2406,6 +2414,33 @@ def _hfc_classify_system_notice(content: Any) -> dict[str, Any] | None:
             "notice_id": _hfc_content_notice_id("compression", text),
         }
     return None
+
+
+def _hfc_classify_kanban_notice(text: str) -> dict[str, Any] | None:
+    matched = KANBAN_NOTICE_RE.fullmatch(text)
+    if matched is None:
+        return None
+    task_id = matched.group("task_id")
+    status = matched.group("status")
+    if status in {"done", "completed", "finished"}:
+        title = "看板任务已完成"
+        level = "success"
+        terminal = True
+    elif status in {"failed", "error", "cancelled"}:
+        title = "看板任务失败"
+        level = "error"
+        terminal = True
+    else:
+        title = "看板任务更新"
+        level = "info"
+        terminal = False
+    return {
+        "title": title,
+        "level": level,
+        "notice_kind": "kanban-task",
+        "notice_id": f"kanban-task:{task_id}",
+        "notice_terminal": terminal,
+    }
 
 
 def _hfc_classify_background_notice(text: str) -> dict[str, Any] | None:
