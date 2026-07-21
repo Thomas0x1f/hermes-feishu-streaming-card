@@ -2161,6 +2161,23 @@ def test_kanban_notice_classification_and_stable_id():
     assert another is not None
     assert another["notice_id"] == "kanban-task:t_abc123"
 
+    independent_ids = {
+        hook_runtime._hfc_independent_notice_message_id(
+            "oc_abc",
+            content,
+            notice,
+        )
+        for content, notice in (
+            ("done", done),
+            ("failed", failed),
+            ("progress", progress),
+        )
+    }
+    assert len(independent_ids) == 1
+    assert independent_ids != {
+        hook_runtime._hfc_independent_notice_message_id("oc_abc", "done", another)
+    }
+
 
 def test_kanban_notice_does_not_match_plain_text():
     assert (

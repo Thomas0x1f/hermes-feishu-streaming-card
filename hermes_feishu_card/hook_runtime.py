@@ -2644,7 +2644,7 @@ def _hfc_independent_notice_message_id(
     anchor: str = "",
 ) -> str:
     notice_id = str(notice.get("notice_id") or "").strip()
-    if notice.get("notice_kind") == "background-process" and notice_id:
+    if notice.get("notice_kind") in {"background-process", "kanban-task"} and notice_id:
         raw = f"{chat_id}:{notice_id}".encode("utf-8")
         return "notice_" + sha256(raw).hexdigest()[:16]
     if notice.get("notice_kind") == "heartbeat" and notice_id:
