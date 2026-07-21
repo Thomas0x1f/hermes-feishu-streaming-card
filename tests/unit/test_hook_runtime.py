@@ -2120,78 +2120,87 @@ def test_background_process_notice_classification_and_stable_id():
     assert len(independent_ids) == 1
 
 
-def test_kanban_notice_classification_and_stable_id():
-    done = hook_runtime._hfc_classify_system_notice(
+def test_kanban_notice_matches_notifier_templates():
+    templates = (
         "✔ [reception-v2] @brand_researcher Kanban t_e9815768 done — "
-        "brand_colors: visit-20260721-tencent"
+        "brand_colors: visit-20260721-tencent\n已完成",
+        "⏸ [reception-v2] @brand_researcher Kanban t_76b13b80 blocked: 缺少输入",
+        "⏸ [reception-v2] @brand_researcher Kanban t_76b13b80 blocked",
+        "✖ [reception-v2] @brand_researcher Kanban t_ab9a919f gave up "
+        "after repeated spawn failures\npid 8583 exited with code 1",
+        "✖ [reception-v2] @brand_researcher Kanban t_ab9a919f worker crashed "
+        "(pid gone); dispatcher will retry",
+        "⏱ [reception-v2] @brand_researcher Kanban t_ab9a919f timed out "
+        "(max_runtime=600s); will retry",
+        "🔄 [reception-v2] @brand_researcher Kanban t_ab9a919f → doing",
+        "✔ [reception-v2] Kanban t_abc123 done — 无执行者任务",
     )
-    failed = hook_runtime._hfc_classify_system_notice(
-        "✗ [reception-v2] @brand_researcher Kanban t_e9815768 failed — "
-        "brand_colors: visit-20260721-tencent"
-    )
-    progress = hook_runtime._hfc_classify_system_notice(
-        "[reception-v2] @brand_researcher Kanban t_e9815768 doing — "
-        "brand_colors: visit-20260721-tencent"
-    )
-    another = hook_runtime._hfc_classify_system_notice(
-        "✔ [reception-v2] @writer Kanban t_abc123 done — draft ready"
-    )
-
-    assert done == {
-        "title": "看板任务已完成",
-        "level": "success",
-        "notice_kind": "kanban-task",
-        "notice_id": "kanban-task:t_e9815768",
-        "notice_terminal": True,
-    }
-    assert failed == {
-        "title": "看板任务失败",
-        "level": "error",
-        "notice_kind": "kanban-task",
-        "notice_id": "kanban-task:t_e9815768",
-        "notice_terminal": True,
-    }
-    assert progress == {
-        "title": "看板任务更新",
-        "level": "info",
-        "notice_kind": "kanban-task",
-        "notice_id": "kanban-task:t_e9815768",
-        "notice_terminal": False,
-    }
-    assert another is not None
-    assert another["notice_id"] == "kanban-task:t_abc123"
-
-    independent_ids = {
-        hook_runtime._hfc_independent_notice_message_id(
-            "oc_abc",
-            content,
-            notice,
-        )
-        for content, notice in (
-            ("done", done),
-            ("failed", failed),
-            ("progress", progress),
-        )
-    }
-    assert len(independent_ids) == 1
-    assert independent_ids != {
-        hook_runtime._hfc_independent_notice_message_id("oc_abc", "done", another)
-    }
+    for text in templates:
+        assert hook_runtime._hfc_is_kanban_notice(text), text
 
 
 def test_kanban_notice_does_not_match_plain_text():
-    assert (
-        hook_runtime._hfc_classify_system_notice(
-            "关于 Kanban t_e9815768 的说明：任务已经 done 了"
-        )
-        is None
+    non_notices = (
+        "关于 Kanban t_e9815768 的说明：任务已经 done 了",
+        "[链接] @某人 提到了 Kanban 看板",
+        "[reception-v2] 看板今天新增了 3 个任务",
     )
-    assert (
-        hook_runtime._hfc_classify_system_notice(
-            "[链接] @某人 提到了 Kanban 看板"
+    for text in non_notices:
+        assert not hook_runtime._hfc_is_kanban_notice(text), text
+    assert hook_runtime._hfc_classify_system_notice(
+        "✔ [reception-v2] @brand_researcher Kanban t_e9815768 done — x"
+    ) is None
+
+
+def test_kanban_notice_send_is_dropped_entirely(monkeypatch):
+    calls = []
+
+    class Adapter:
+        pass
+
+    async def original(self, chat_id, content, reply_to=None, metadata=None):
+        calls.append(content)
+        return SimpleNamespace(success=True, message_id="native-1", error="")
+
+    async def notice_card(self, **kwargs):
+        calls.append("notice-card")
+        return SimpleNamespace(success=True, message_id="card-1", error="")
+
+    Adapter._hfc_original_send = original
+    monkeypatch.setattr(hook_runtime, "_hfc_send_system_notice_card", notice_card)
+
+    result = asyncio.run(
+        hook_runtime._hfc_send_with_native_command_result_card(
+            Adapter(),
+            "oc_test",
+            "✔ [reception-v2] @brand_researcher Kanban t_e9815768 done — "
+            "brand_colors: visit-20260721-tencent",
         )
-        is None
     )
+
+    assert result.success is True
+    assert result.message_id == "kanban_notice_suppressed"
+    assert calls == []
+
+
+def test_kanban_platform_notice_is_swallowed(monkeypatch):
+    scheduled = []
+    monkeypatch.setattr(
+        hook_runtime,
+        "_hfc_schedule_platform_notice_card",
+        lambda **kwargs: scheduled.append(kwargs),
+    )
+    source = SimpleNamespace(platform="feishu", chat_id="oc_test", message_id="")
+    runner = SimpleNamespace(adapters={})
+
+    handled = hook_runtime.handle_platform_notice_from_hermes(
+        runner,
+        source,
+        "⏸ [reception-v2] @brand_researcher Kanban t_76b13b80 blocked: 缺少输入",
+    )
+
+    assert handled is True
+    assert scheduled == []
 
 
 def test_long_running_heartbeat_notice_is_non_terminal():
