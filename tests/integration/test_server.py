@@ -4966,7 +4966,7 @@ async def test_clarify_media_uploads_and_renders_inside_same_card(
     assert "MEDIA:" not in serialized
 
 
-async def test_running_answer_media_directive_renders_immediately(
+async def test_running_answer_media_directive_preuploads_without_rendering(
     client, monkeypatch, tmp_path
 ):
     test_client, feishu_client = client
@@ -4987,10 +4987,39 @@ async def test_running_answer_media_directive_renders_immediately(
 
     assert delta.status == 200
     assert feishu_client.uploaded_images == [str(image_path.resolve())]
-    interaction_card = feishu_client.updated[-1][1]
-    serialized = json.dumps(interaction_card, ensure_ascii=False)
+    streaming_card = feishu_client.updated[-1][1]
+    serialized = json.dumps(streaming_card, ensure_ascii=False)
     assert "主视觉 M01 候选已生成" in serialized
-    assert "![生成图片](img_v2_1)" in serialized
+    assert "img_v2_1" not in serialized
+    assert str(image_path) not in serialized
+    assert "MEDIA:" not in serialized
+
+
+async def test_thinking_media_directive_preuploads_without_rendering(
+    client, monkeypatch, tmp_path
+):
+    test_client, feishu_client = client
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    image_path = tmp_path / "workspace" / "draft.png"
+    image_path.parent.mkdir()
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\ndraft-bytes")
+
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    delta = await test_client.post(
+        "/events",
+        json=event_payload(
+            "thinking.delta",
+            1,
+            {"text": f"正在准备候选图\nMEDIA:{image_path}"},
+        ),
+    )
+
+    assert delta.status == 200
+    assert feishu_client.uploaded_images == [str(image_path.resolve())]
+    streaming_card = feishu_client.updated[-1][1]
+    serialized = json.dumps(streaming_card, ensure_ascii=False)
+    assert "正在准备候选图" in serialized
+    assert "img_v2_1" not in serialized
     assert str(image_path) not in serialized
     assert "MEDIA:" not in serialized
 
@@ -5022,7 +5051,7 @@ async def test_media_upload_cache_reuses_image_key_by_content_md5(
 
     assert feishu_client.uploaded_images == [str(first_path.resolve())]
     serialized = json.dumps(feishu_client.updated[-1][1], ensure_ascii=False)
-    assert serialized.count("![生成图片](img_v2_1)") == 1
+    assert "img_v2_1" not in serialized
     assert "img_v2_2" not in serialized
     assert str(first_path) not in serialized
     assert str(second_path) not in serialized
@@ -5039,15 +5068,13 @@ async def test_media_upload_cache_reuses_image_key_by_content_md5(
         str(first_path.resolve()),
         str(second_path.resolve()),
     ]
-    _message_id, changed_card = await wait_for_card_update(
-        feishu_client, "img_v2_2"
-    )
+    changed_card = feishu_client.updated[-1][1]
     serialized = json.dumps(changed_card, ensure_ascii=False)
-    assert "![生成图片](img_v2_1)" in serialized
-    assert "![生成图片](img_v2_2)" in serialized
+    assert "img_v2_1" not in serialized
+    assert "img_v2_2" not in serialized
 
 
-async def test_completed_media_reuses_image_key_uploaded_during_streaming(
+async def test_completed_media_reuses_preuploaded_image_key_and_renders_once(
     client, monkeypatch, tmp_path
 ):
     test_client, feishu_client = client
@@ -5063,6 +5090,8 @@ async def test_completed_media_reuses_image_key_uploaded_during_streaming(
             "answer.delta", 1, {"text": f"生成中\nMEDIA:{image_path}"}
         ),
     )
+    streaming_card = json.dumps(feishu_client.updated[-1][1], ensure_ascii=False)
+    assert "img_v2_1" not in streaming_card
     completed = await test_client.post(
         "/events",
         json=event_payload(
@@ -5081,7 +5110,7 @@ async def test_completed_media_reuses_image_key_uploaded_during_streaming(
     assert serialized.count("![生成图片](img_v2_1)") == 1
 
 
-async def test_running_answer_media_is_consumed_when_clarify_reuses_the_card(
+async def test_unrelated_clarify_does_not_render_preuploaded_running_media(
     client, monkeypatch, tmp_path
 ):
     test_client, feishu_client = client
@@ -5130,7 +5159,7 @@ async def test_running_answer_media_is_consumed_when_clarify_reuses_the_card(
     serialized = json.dumps(interaction_card, ensure_ascii=False)
     assert "主视觉 M01 候选已生成" in serialized
     assert "请选择接待物料" in serialized
-    assert "![生成图片](img_v2_1)" in serialized
+    assert "img_v2_1" not in serialized
     assert str(image_path) not in serialized
     assert "MEDIA:" not in serialized
 

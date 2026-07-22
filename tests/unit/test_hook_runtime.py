@@ -4938,6 +4938,120 @@ def test_clarify_uses_hermes_media_parser_and_forwards_safe_image(monkeypatch):
     assert captured["media_paths"] == ["/opt/data/workspace/master.png"]
 
 
+def test_clarify_media_waits_for_a_slow_delivery_ack(monkeypatch):
+    captured = {}
+
+    class OfficialMediaAdapter:
+        @staticmethod
+        def extract_media(content):
+            return [('/opt/data/workspace/master.png', False)], "请确认主视觉"
+
+        @staticmethod
+        def filter_media_delivery_paths(media_files):
+            return media_files
+
+    class RunningLoop:
+        @staticmethod
+        def is_running():
+            return True
+
+    class SlowDeliveryFuture:
+        @staticmethod
+        def result(timeout):
+            captured["delivery_wait_timeout"] = timeout
+            if timeout < 10:
+                raise TimeoutError("delivery acknowledgement arrived after stream timeout")
+            return {"ok": True, "applied": True, "interaction_mode": "callback"}
+
+    def fake_schedule(coroutine, loop):
+        assert isinstance(loop, RunningLoop)
+        coroutine.close()
+        return SlowDeliveryFuture()
+
+    monkeypatch.setenv("HERMES_FEISHU_CARD_EVENT_URL", "http://sidecar.test/events")
+    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", fake_schedule)
+    monkeypatch.setattr(
+        hook_runtime,
+        "_get_json_sync",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "status": "completed",
+            "interaction_id": "visual-slow",
+            "choice": "confirm",
+            "choice_label": "确认",
+        },
+    )
+
+    result = hook_runtime.request_clarify_response_from_hermes_locals(
+        {
+            "_hfc_loop": RunningLoop(),
+            "_hfc_status_adapter": OfficialMediaAdapter(),
+            "chat_id": "oc_abc",
+            "conversation_id": "conversation-1",
+            "message_id": "message-1",
+        },
+        interaction_id="visual-slow",
+        question="请确认主视觉\nMEDIA:/opt/data/workspace/master.png",
+        choices=["确认", "修改"],
+    )
+
+    assert result == "confirm"
+    assert captured["delivery_wait_timeout"] >= 10
+
+
+def test_clarify_media_cancels_a_delivery_that_misses_the_ack_deadline(monkeypatch):
+    captured = {"cancelled": False}
+
+    class OfficialMediaAdapter:
+        @staticmethod
+        def extract_media(content):
+            return [('/opt/data/workspace/master.png', False)], "请确认主视觉"
+
+        @staticmethod
+        def filter_media_delivery_paths(media_files):
+            return media_files
+
+    class RunningLoop:
+        @staticmethod
+        def is_running():
+            return True
+
+    class LateDeliveryFuture:
+        @staticmethod
+        def result(timeout):
+            raise TimeoutError("delivery acknowledgement missed its deadline")
+
+        @staticmethod
+        def cancel():
+            captured["cancelled"] = True
+
+    def fake_schedule(coroutine, loop):
+        assert isinstance(loop, RunningLoop)
+        coroutine.close()
+        return LateDeliveryFuture()
+
+    monkeypatch.setenv("HERMES_FEISHU_CARD_EVENT_URL", "http://sidecar.test/events")
+    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", fake_schedule)
+
+    result = hook_runtime.request_clarify_response_from_hermes_locals(
+        {
+            "_hfc_loop": RunningLoop(),
+            "_hfc_status_adapter": OfficialMediaAdapter(),
+            "chat_id": "oc_abc",
+            "conversation_id": "conversation-1",
+            "message_id": "message-1",
+        },
+        interaction_id="visual-too-late",
+        question="请确认主视觉\nMEDIA:/opt/data/workspace/master.png",
+        choices=["确认", "修改"],
+    )
+
+    assert result == (
+        "[hfc clarify media unavailable; do not confirm media the user could not see]"
+    )
+    assert captured["cancelled"] is True
+
+
 def test_clarify_media_failure_does_not_fall_back_to_unseen_confirmation(monkeypatch):
     class OfficialMediaAdapter:
         @staticmethod

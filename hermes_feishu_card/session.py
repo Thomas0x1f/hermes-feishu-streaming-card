@@ -327,7 +327,11 @@ class CardSession:
             self.status = "failed"
             error = event.data.get("error")
             self.answer_text = error if isinstance(error, str) else "消息处理失败"
-        if event.event != "interaction.requested":
+        if event.event not in {
+            "thinking.delta",
+            "answer.delta",
+            "interaction.requested",
+        }:
             for image_key in _media_image_keys(event.data.get("media_image_keys")):
                 if image_key not in self.media_image_keys:
                     self.media_image_keys.append(image_key)

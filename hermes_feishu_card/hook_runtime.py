@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_EVENT_URL = "http://127.0.0.1:8765/events"
 DEFAULT_TIMEOUT_SECONDS = 0.8
 TERMINAL_TIMEOUT_SECONDS = 10.0
+INTERACTION_DELIVERY_TIMEOUT_SECONDS = 10.0
 _NOTICE_UNCERTAIN_WARNING = (
     "⚠️ 一条运行提示的卡片投递结果无法确认，请稍后查看 /hfc status。"
 )
@@ -4860,6 +4861,7 @@ def _post_interaction_event(
     timeout: float,
 ) -> dict[str, Any] | None | object:
     loop = local_vars.get("_hfc_loop")
+    future = None
     if loop is not None:
         try:
             if loop.is_running():
@@ -4868,6 +4870,10 @@ def _post_interaction_event(
                     loop,
                 )
                 return future.result(timeout=max(1.0, timeout + 1.0))
+        except TimeoutError:
+            if future is not None:
+                future.cancel()
+            return _POST_FAILED
         except Exception:
             return _POST_FAILED
     try:
@@ -4879,6 +4885,8 @@ def _post_interaction_event(
 def _timeout_for_event(config: RuntimeConfig, event_name: str) -> float:
     if event_name in {"message.completed", "message.failed"}:
         return max(config.timeout_seconds, TERMINAL_TIMEOUT_SECONDS)
+    if event_name == "interaction.requested":
+        return max(config.timeout_seconds, INTERACTION_DELIVERY_TIMEOUT_SECONDS)
     return config.timeout_seconds
 
 
