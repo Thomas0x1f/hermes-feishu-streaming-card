@@ -2,7 +2,7 @@
 
 [中文](release-readiness.md) | [English](release-readiness.en.md)
 
-当前发布候选为 `4.0.17`。它修复并行同名工具的事件关联、调用计数和重复耗时显示；V3.9.1 已于 2026-07-11 发布，V4.0.16 及更早版本也已发布。
+当前发布候选为 `4.0.20`。它修复 Issue #153 中已有卡片 notice 的异步 ACK 语义，并为真实 PATCH 失败补充脱敏可观测性；V3.9.1 已于 2026-07-11 发布，V4.0.19 及更早版本也已发布。
 
 ## 已具备
 
@@ -144,6 +144,27 @@ python3 -m hermes_feishu_card.cli restore --hermes-dir ~/.hermes/hermes-agent --
 - tag 后验证 macOS、Linux、Windows 与 checksums 四个 assets。
 
 `v3.9.0` tag 的 release-assets workflow 会发布 4 个 assets：macOS tarball、Linux tarball、Windows zip 和 checksums 文件，分别为 `hermes-feishu-card-v3.9.0-macos.tar.gz`、`hermes-feishu-card-v3.9.0-linux.tar.gz`、`hermes-feishu-card-v3.9.0-windows.zip`、`hermes-feishu-card-v3.9.0-checksums.txt`。
+
+## V4.0.20 发布门禁
+
+- 已有卡片 notice 必须只在 `applied=true` 且异步 PATCH 已排队时返回 `accepted`；hook 据此接管并抑制误报：**已通过 hook/server 回归**。
+- 独立 notice 初始 create/reply 继续使用三态投递语义；不把排队等同于送达，也不等待每次 PATCH：**已通过既有投递回归**。
+- PATCH 内部重试耗尽后 `notice_update_failures` 增加一次，`last_update_error` 只保留异常类型和白名单 `status_code` / `api_code`：**已通过故障注入与脱敏断言**。
+- 最终全量自动化：**已通过（`1517 passed, 4 skipped`）**；sdist/wheel、隔离 `site-packages` import `4.0.20`、公开 tagged installer 与 Release assets 在发布流程中复核。
+
+## V4.0.19 发布门禁
+
+- Hermes venv Python 默认不带 `--user`，system Python fallback 保持 user install：**已通过 installer 回归**。
+- pip 安装失败保留真实退出码并阻止 setup：**已通过红灯/绿灯回归**。
+- fresh Hermes venv 不设置 `HFC_PIP_USER` 完成安装，并从 venv `site-packages` 导入目标版本：**已通过真实安装 smoke**。
+- 最终全量自动化、sdist/wheel、公开 tagged installer 与 Release assets 在发布流程中复核。
+
+## V4.0.18 发布门禁
+
+- Hermes adapter 使用 `extra_ua_tags` 时检查真实 SDK 构造签名；旧 adapter 不触发安装，兼容的新 SDK 不强制降级：**已通过 CLI/diagnostics 回归**。
+- `doctor` 只读输出 `feishu_sdk_incompatible`；`setup/install` 安装 `lark-oapi==1.6.8` 后必须复检通过：**已通过红灯/绿灯集成测试**。
+- 真实 Hermes v0.19.0 Gateway 从 `lark-oapi 1.5.3` 修复到 `1.6.8` 后恢复 `✓ feishu connected`，214 个 runtime 包依赖兼容：**已通过**。
+- 最终全量自动化：**已通过（`1511 passed, 4 skipped`）**；sdist/wheel、隔离 `site-packages` import `4.0.18`、公开 tagged installer 与 Release assets 在发布流程中复核。
 
 ## V4.0.17 发布门禁
 

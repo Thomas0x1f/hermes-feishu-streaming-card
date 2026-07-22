@@ -2,6 +2,22 @@
 
 自动化测试不能完全证明 Feishu/Lark 客户端体验。涉及卡片 UX、topic、系统提示、命令卡片的版本，发布前需要真实飞书 smoke。
 
+## V4.0.20 notice 异步 ACK 语义
+
+- 已有卡片收到 `system.notice` 时，`/events` 只在事件已应用且 PATCH 任务已排队后返回 `delivery.outcome=accepted`；hook 不再发送“投递结果无法确认”的灰色误报。
+- 独立 notice 的首次 create/reply 仍需确认 `delivered` / `not_sent` / `unknown`，不得用 `accepted` 替代实际初始投递结果。
+- 故障注入让 notice PATCH 的内部重试耗尽后，`notice_update_failures` 增加一次，`last_update_error` 只包含异常类型与白名单 `status_code` / `api_code`，不包含响应正文、token、URL 或凭据。
+
+2026-07-22 发布候选证据：本地真实 aiohttp `/events` 链路与 Hermes hook 回归确认 `accepted + applied=true` 会被接管，缺少 `applied` 的 accepted ACK 会 fail-open；模拟 Feishu 503/API 9499 的三次 PATCH 均失败后，异步失败指标增加一次且诊断未泄露注入的私密 token。该协议修复不改变卡片视觉结构，不把自动化写成飞书客户端视觉复验；公开版安装后将复核两台 Mac 的 runtime 来源与 Gateway/sidecar 状态。
+
+## V4.0.18 Hermes Feishu SDK 兼容门禁
+
+- Hermes Gateway 进程存活不能单独证明 Feishu 在线；日志必须出现 `✓ feishu connected`，且不能持续出现 `extra_ua_tags` 构造错误。
+- Hermes adapter 使用 `extra_ua_tags` 时，`doctor --json/--explain` 必须显示 `feishu_sdk`；不兼容时给出 `feishu_sdk_incompatible`。
+- `setup/install` 修复后必须复检 `lark_oapi.ws.Client` 构造签名，并重启 Gateway 才视为恢复。
+
+2026-07-22 验收结果：真实 Hermes v0.19.0 Gateway 进程仍在运行，但 Feishu connector 因 `lark-oapi 1.5.3` 不接受 `extra_ua_tags` 而持续失败。将 Gateway venv 修复到 `lark-oapi 1.6.8` 后，构造签名检查通过，`uv pip check` 确认 214 个包兼容，Gateway 与 sidecar 保持运行，日志恢复 `✓ feishu connected` 且未再出现新的参数错误。自动化使用同一失败条件完成红灯/绿灯回归。
+
 ## V4.0.17 并行同名工具事件关联
 
 - 两个并行同名工具必须渲染为两条独立事件，不能重复显示任一查询摘要或参数。

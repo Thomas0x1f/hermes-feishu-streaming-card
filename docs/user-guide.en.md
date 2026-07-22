@@ -203,7 +203,7 @@ Full release notes: [docs/release-notes-v3.8.10.md](release-notes-v3.8.10.md).
 V3.8.9 fixes Feishu/Lark topic reply flows where the first card appears, but later `answer.delta`, `thinking.delta`, `tool.updated`, or `system.notice` events can miss the same card because Hermes switches to a different internal streaming `message_id`. In that state, system notices can also appear both inside the card timeline and as separate gray native messages.
 
 - **One card keeps updating inside the topic**: the sidecar maps later topic events back to the active card session through `reply_to_message_id`.
-- **No duplicate gray notices after cardification**: when a session-scoped `system.notice` is accepted into the card, the sidecar returns `applied: true`; if card delivery briefly times out, recognized Hermes system notices are still suppressed instead of being resent as gray native text.
+- **No duplicate gray notices after cardification**: once a session-scoped `system.notice` is applied and queued for asynchronous PATCH, the sidecar returns `applied: true` with `delivery.outcome: accepted`. The hook no longer mistakes that queued state for unknown delivery; real asynchronous failures remain visible through `notice_update_failures` and a redacted `last_update_error`.
 - **Hermes v0.18.x Relay metadata support**: the hook runtime preserves Relay `source.message_id` as the original topic reply anchor.
 
 ![Feishu topic reply card continuity and reasoning/tool timeline showcase](assets/feishu-topic-card-showcase-v389.png)
@@ -460,7 +460,7 @@ Example:
 ```bash
 export FEISHU_APP_ID=cli_xxx
 export FEISHU_APP_SECRET=xxx
-export HFC_VERSION=v4.0.17
+export HFC_VERSION=v4.0.20
 bash install-docker.sh --profile-id child --event-url http://hfc-sidecar:8765/events
 ```
 
@@ -689,6 +689,7 @@ The Hermes hook converts `message.started` / `thinking.delta` / `answer.delta` /
 - **No thinking / not streaming**: check Hermes `streaming.enabled: true` + `streaming.transport: edit`, confirm model exposes reasoning deltas. Don't blindly enable `show_reasoning`.
 - **No real Feishu cards**: without credentials, the sidecar uses a no-op client. In multi-profile mode, check each profile's `feishu` config.
 - **Hook installed but cards never arrive**: run `doctor --explain` and check `Runtime import`. If Hermes runtime cannot import `hook_runtime`, rerun `setup` or `install --hermes-dir ... --yes`.
+- **Gateway is running but Feishu never responds**: run `doctor --explain` and check `Feishu SDK`. If it reports `feishu_sdk_incompatible`, rerun `setup` or `install --hermes-dir ... --yes` so the installer can repair the SDK, then restart Hermes Gateway.
 - **Duplicate cards**: inspect `/health` metrics (`events_received`, `feishu_send_successes`). V3.3.0 per-message lock + `profile_id:message_id` keys ensure one card per message.
 - **Multi-profile route is unclear**: run `status --config ...` and inspect `routing.last_route`, `profile.<id>.events`, and `profile.<id>.last_profile_source`, then verify directly with `smoke-feishu-card --profile-id ...` or `bots test --profile-id ...`.
 - **Gray native text**: after sidecar accepts `message.completed`, Hermes hook suppresses native text; fail-open on sidecar unavailable. V3.3.0 fixes non-Feishu platforms being swallowed.
@@ -702,6 +703,9 @@ The Hermes hook converts `message.started` / `thinking.delta` / `answer.delta` /
 
 | Version | Date | Highlights |
 |---------|------|-----------|
+| [v4.0.20](release-notes-v4.0.20.en.md) | 2026-07-22 | Issue #153: queued notice ACKs use `accepted`, with redacted metrics and codes for real PATCH failures |
+| [v4.0.19](release-notes-v4.0.19.en.md) | 2026-07-22 | Avoids `pip --user` inside the Hermes venv and stops immediately with the real pip failure |
+| [v4.0.18](release-notes-v4.0.18.en.md) | 2026-07-22 | Checks the Hermes Feishu SDK constructor capability, repairs stale `lark-oapi`, and exposes operations guidance |
 | [v4.0.17](release-notes-v4.0.17.en.md) | 2026-07-22 | Correlates parallel same-name tools by real call ID and reports one count and duration per invocation |
 | [v4.0.16](release-notes-v4.0.16.en.md) | 2026-07-22 | Deduplicates loading state, removes the empty body placeholder after tools start, and restores real tool durations |
 | [v4.0.15](release-notes-v4.0.15.en.md) | 2026-07-22 | Issue #141: compact tool-event styling, same-card loading animation, and CLI protection when Hermes upgrades remove the hook |
