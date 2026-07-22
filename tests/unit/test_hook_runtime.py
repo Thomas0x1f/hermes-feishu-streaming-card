@@ -4905,6 +4905,216 @@ def test_clarify_without_choices_falls_back_to_native_when_card_unavailable(monk
     assert result is None
 
 
+class _FakeClarifyEntry:
+    def __init__(self):
+        self.event = threading.Event()
+        self.response = None
+
+
+def _install_fake_tools(monkeypatch, *, gateway=None, interrupted=False):
+    tools_mod = types.ModuleType("tools")
+    interrupt_mod = types.ModuleType("tools.interrupt")
+    interrupt_mod.is_interrupted = lambda: interrupted
+    tools_mod.interrupt = interrupt_mod
+    monkeypatch.setitem(sys.modules, "tools", tools_mod)
+    monkeypatch.setitem(sys.modules, "tools.interrupt", interrupt_mod)
+    if gateway is not None:
+        tools_mod.clarify_gateway = gateway
+        monkeypatch.setitem(sys.modules, "tools.clarify_gateway", gateway)
+
+
+def _fake_clarify_gateway(entry):
+    module = types.ModuleType("tools.clarify_gateway")
+    module.calls = {"register": [], "wait": []}
+
+    def register(*, clarify_id, session_key, question, choices):
+        module.calls["register"].append(
+            {
+                "clarify_id": clarify_id,
+                "session_key": session_key,
+                "question": question,
+                "choices": choices,
+            }
+        )
+        return entry
+
+    def wait_for_response(clarify_id, timeout):
+        module.calls["wait"].append((clarify_id, timeout))
+        return entry.response
+
+    module.register = register
+    module.wait_for_response = wait_for_response
+    return module
+
+
+def _clarify_card_runtime(monkeypatch, *, poll_status="pending", poll_extra=None):
+    """Route the real interaction poll loop through fakes and capture posts."""
+    monkeypatch.setenv("HERMES_FEISHU_CARD_EVENT_URL", "http://sidecar.test/events")
+    posted = []
+
+    def fake_post(local_vars, url, payload, timeout):
+        posted.append(payload)
+        return {"ok": True, "applied": True}
+
+    def fake_get(url, timeout):
+        result = {"ok": True, "status": poll_status}
+        if poll_extra:
+            result.update(poll_extra)
+        return result
+
+    monkeypatch.setattr(hook_runtime, "_post_interaction_event", fake_post)
+    monkeypatch.setattr(hook_runtime, "_get_json_sync", fake_get)
+    return posted
+
+
+def test_clarify_text_reply_resolves_card_interaction(monkeypatch):
+    entry = _FakeClarifyEntry()
+    entry.response = "帮我加一个导出 CSV 的按钮"
+    entry.event.set()
+    gateway = _fake_clarify_gateway(entry)
+    _install_fake_tools(monkeypatch, gateway=gateway)
+    posted = _clarify_card_runtime(monkeypatch)
+
+    result = hook_runtime.request_clarify_response_from_hermes_locals(
+        {"chat_id": "oc_abc", "message_id": "msg_1", "session_key": "sess-1"},
+        interaction_id="clarify-text-1",
+        question="请描述你的需求",
+        choices=None,
+        timeout_seconds=1,
+    )
+
+    assert result == "帮我加一个导出 CSV 的按钮"
+    assert gateway.calls["register"] == [
+        {
+            "clarify_id": "clarify-text-1",
+            "session_key": "sess-1",
+            "question": "请描述你的需求",
+            "choices": None,
+        }
+    ]
+    assert [payload["event"] for payload in posted] == [
+        "interaction.requested",
+        "interaction.completed",
+    ]
+    completed = posted[-1]["data"]
+    assert completed["interaction_id"] == "clarify-text-1"
+    assert completed["choice"] == "帮我加一个导出 CSV 的按钮"
+    assert completed["choice_label"] == "帮我加一个导出 CSV 的按钮"
+
+
+def test_clarify_with_choices_registers_labels_for_number_mapping(monkeypatch):
+    entry = _FakeClarifyEntry()
+    entry.response = "保留并补索引"
+    entry.event.set()
+    gateway = _fake_clarify_gateway(entry)
+    _install_fake_tools(monkeypatch, gateway=gateway)
+    posted = _clarify_card_runtime(monkeypatch)
+
+    result = hook_runtime.request_clarify_response_from_hermes_locals(
+        {"chat_id": "oc_abc", "message_id": "msg_1", "session_key": "sess-1"},
+        interaction_id="clarify-2",
+        question="怎么处理空文件？",
+        choices=["删除空文件", "保留并补索引"],
+        timeout_seconds=1,
+    )
+
+    assert result == "保留并补索引"
+    assert gateway.calls["register"][0]["choices"] == ["删除空文件", "保留并补索引"]
+    assert [payload["event"] for payload in posted] == [
+        "interaction.requested",
+        "interaction.completed",
+    ]
+
+
+def test_clarify_card_submit_clears_text_channel(monkeypatch):
+    entry = _FakeClarifyEntry()
+    gateway = _fake_clarify_gateway(entry)
+    _install_fake_tools(monkeypatch, gateway=gateway)
+    _clarify_card_runtime(
+        monkeypatch,
+        poll_status="completed",
+        poll_extra={"interaction_id": "clarify-3", "choice": "保留"},
+    )
+
+    result = hook_runtime.request_clarify_response_from_hermes_locals(
+        {"chat_id": "oc_abc", "message_id": "msg_1", "session_key": "sess-1"},
+        interaction_id="clarify-3",
+        question="怎么处理？",
+        choices=["保留", "删除"],
+        timeout_seconds=1,
+    )
+
+    assert result == "保留"
+    assert gateway.calls["wait"] == [("clarify-3", 0.0)]
+
+
+def test_clarify_interrupt_returns_sentinel_and_fails_interaction(monkeypatch):
+    entry = _FakeClarifyEntry()
+    gateway = _fake_clarify_gateway(entry)
+    _install_fake_tools(monkeypatch, gateway=gateway, interrupted=True)
+    posted = _clarify_card_runtime(monkeypatch)
+
+    result = hook_runtime.request_clarify_response_from_hermes_locals(
+        {"chat_id": "oc_abc", "message_id": "msg_1", "session_key": "sess-1"},
+        interaction_id="clarify-4",
+        question="请描述你的需求",
+        choices=None,
+        timeout_seconds=1,
+    )
+
+    assert result == "[interrupted by a new user message]"
+    assert [payload["event"] for payload in posted] == [
+        "interaction.requested",
+        "interaction.failed",
+    ]
+    assert posted[-1]["data"]["error"] == "用户已发送新消息，交互取消"
+    assert gateway.calls["wait"] == [("clarify-4", 0.0)]
+
+
+def test_clarify_multi_select_does_not_open_text_channel(monkeypatch):
+    entry = _FakeClarifyEntry()
+    gateway = _fake_clarify_gateway(entry)
+    _install_fake_tools(monkeypatch, gateway=gateway)
+    _clarify_card_runtime(
+        monkeypatch,
+        poll_status="completed",
+        poll_extra={"choices": ["water_sign"], "choice_labels": ["水牌"]},
+    )
+
+    result = hook_runtime.request_clarify_response_from_hermes_locals(
+        {"chat_id": "oc_abc", "message_id": "msg_1", "session_key": "sess-1"},
+        interaction_id="materials-1",
+        question="[hfc:multi-select]请选择接待物料",
+        choices=["水牌::water_sign", "会议桌签::table_card"],
+        timeout_seconds=1,
+    )
+
+    assert json.loads(result) == ["water_sign"]
+    assert gateway.calls["register"] == []
+
+
+def test_clarify_text_channel_skipped_without_session_key(monkeypatch):
+    entry = _FakeClarifyEntry()
+    gateway = _fake_clarify_gateway(entry)
+    _install_fake_tools(monkeypatch, gateway=gateway)
+    _clarify_card_runtime(
+        monkeypatch,
+        poll_status="completed",
+        poll_extra={"choice": "保留"},
+    )
+
+    result = hook_runtime.request_clarify_response_from_hermes_locals(
+        {"chat_id": "oc_abc", "message_id": "msg_1"},
+        interaction_id="clarify-5",
+        question="怎么处理？",
+        choices=["保留"],
+        timeout_seconds=1,
+    )
+
+    assert result == "保留"
+    assert gateway.calls["register"] == []
+
+
 def test_clarify_multi_select_marker_returns_stable_values(monkeypatch):
     captured = {}
 

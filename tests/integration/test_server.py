@@ -5407,6 +5407,49 @@ async def test_text_input_interaction_submit_returns_text(client):
     assert len(feishu_client.updated) == updates_after_first_submit
 
 
+async def test_text_input_completed_via_events_endpoint_finishes_card(client):
+    """hook 的文本旁路通道通过 /events 补发 interaction.completed 收尾卡片。"""
+    test_client, feishu_client = client
+
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            1,
+            {
+                "interaction_id": "clarify-text-chat",
+                "kind": "text_input",
+                "prompt": "请描述你的需求",
+                "options": [],
+            },
+        ),
+    )
+
+    completed = await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.completed",
+            2,
+            {
+                "interaction_id": "clarify-text-chat",
+                "choice": "帮我加导出按钮",
+                "choice_label": "帮我加导出按钮",
+            },
+        ),
+    )
+    result = await test_client.get("/interactions/clarify-text-chat")
+
+    assert completed.status == 200
+    assert (await result.json())["status"] == "completed"
+    _message_id, completed_card = await wait_for_card_update(
+        feishu_client, "已回答：帮我加导出按钮"
+    )
+    assert "input" not in [
+        element.get("tag") for element in completed_card["body"]["elements"]
+    ]
+
+
 async def test_text_input_interaction_rejects_empty_text_without_completing(client):
     test_client, feishu_client = client
 

@@ -1014,6 +1014,7 @@ def request_interaction_from_hermes_locals(
     media_paths: list[str] | None = None,
     timeout_seconds: float | None = None,
     poll_interval_seconds: float | None = None,
+    escape: Any = None,
 ) -> dict[str, Any] | None:
     try:
         config = load_runtime_config()
@@ -1089,6 +1090,15 @@ def request_interaction_from_hermes_locals(
                 result = None
             if isinstance(result, dict) and result.get("status") in {"completed", "failed"}:
                 return result
+            if escape is not None:
+                try:
+                    escaped = escape()
+                except Exception:
+                    escaped = None
+                # 旁路通道命中时不在此收尾 sidecar 交互，由 caller 负责补
+                # interaction.completed / interaction.failed 事件。
+                if isinstance(escaped, dict):
+                    return escaped
             if time.monotonic() >= deadline:
                 failed_payload = build_event(
                     "interaction.failed",
@@ -4773,6 +4783,107 @@ def _clarify_media_from_question(
     return cleaned, image_paths, True
 
 
+_HFC_CLARIFY_INTERRUPTED = "[interrupted by a new user message]"
+
+
+def _hermes_interrupt_requested() -> bool:
+    try:
+        from tools.interrupt import is_interrupted
+    except Exception:
+        return False
+    try:
+        return bool(is_interrupted())
+    except Exception:
+        return False
+
+
+class _ClarifyTextChannel:
+    """卡片 clarify 的旁路文本通道。
+
+    在上游 ``clarify_gateway`` 注册同一个 pending 条目，让用户不点卡片、
+    直接在聊天里回复时，网关的 clarify 拦截通道能把文本 resolve 成答案，
+    而不是落入 busy/interrupt 分支打断当前 run。
+    """
+
+    def __init__(self, gateway_module: Any, clarify_id: str, entry: Any) -> None:
+        self._gateway = gateway_module
+        self._clarify_id = clarify_id
+        self._entry = entry
+
+    def poll_text(self) -> str | None:
+        entry = self._entry
+        if entry is None:
+            return None
+        try:
+            if not entry.event.is_set():
+                return None
+            text = str(
+                self._gateway.wait_for_response(self._clarify_id, 0.0) or ""
+            ).strip()
+        except Exception:
+            self._entry = None
+            return None
+        # resolve 后条目已被 wait_for_response 清理；空文本来自会话边界
+        # 取消（clear_session），按通道失效处理，继续走卡片路径。
+        self._entry = None
+        return text or None
+
+    def close(self) -> None:
+        if self._entry is None:
+            return
+        self._entry = None
+        try:
+            self._gateway.wait_for_response(self._clarify_id, 0.0)
+        except Exception:
+            pass
+
+
+def _open_clarify_text_channel(
+    local_vars: dict[str, Any],
+    *,
+    interaction_id: str,
+    question: str,
+    choice_labels: list[str],
+) -> _ClarifyTextChannel | None:
+    session_key = str(local_vars.get("session_key") or "").strip()
+    if not session_key:
+        return None
+    try:
+        from tools import clarify_gateway
+    except Exception:
+        return None
+    try:
+        entry = clarify_gateway.register(
+            clarify_id=interaction_id,
+            session_key=session_key,
+            question=question,
+            choices=choice_labels or None,
+        )
+    except Exception:
+        return None
+    return _ClarifyTextChannel(clarify_gateway, interaction_id, entry)
+
+
+def _post_clarify_terminal_event(
+    local_vars: dict[str, Any],
+    event_name: str,
+    extra_locals: dict[str, Any],
+) -> None:
+    try:
+        config = load_runtime_config()
+        payload = build_event(event_name, {**local_vars, **extra_locals})
+        if payload is None:
+            return
+        _post_interaction_event(
+            local_vars,
+            config.event_url,
+            payload,
+            _timeout_for_event(config, payload["event"]),
+        )
+    except Exception:
+        pass
+
+
 def request_clarify_response_from_hermes_locals(
     local_vars: dict[str, Any],
     *,
@@ -4827,15 +4938,66 @@ def request_clarify_response_from_hermes_locals(
     else:
         # 无 choices 的 clarify 视为自由文本提问，卡片渲染 textarea 输入框
         kind = "text_input"
-    result = request_interaction_from_hermes_locals(
-        local_vars,
-        kind=kind,
-        interaction_id=interaction_id,
-        prompt=normalized_question,
-        options=options,
-        media_paths=media_paths,
-        timeout_seconds=timeout_seconds,
+    # multi_select 的返回值是结构化 JSON 数组，自由文本无法映射，保持卡片专属。
+    text_channel = (
+        _open_clarify_text_channel(
+            local_vars,
+            interaction_id=interaction_id,
+            question=normalized_question,
+            choice_labels=[option["label"] for option in options],
+        )
+        if not is_multi_select
+        else None
     )
+
+    def escape() -> dict[str, Any] | None:
+        if _hermes_interrupt_requested():
+            return {"status": "interrupted"}
+        if text_channel is not None:
+            text = text_channel.poll_text()
+            if text:
+                return {"status": "text_reply", "text": text}
+        return None
+
+    try:
+        result = request_interaction_from_hermes_locals(
+            local_vars,
+            kind=kind,
+            interaction_id=interaction_id,
+            prompt=normalized_question,
+            options=options,
+            media_paths=media_paths,
+            timeout_seconds=timeout_seconds,
+            escape=escape,
+        )
+    finally:
+        if text_channel is not None:
+            text_channel.close()
+    if isinstance(result, dict) and result.get("status") == "text_reply":
+        text = str(result.get("text") or "").strip()
+        _post_clarify_terminal_event(
+            local_vars,
+            "interaction.completed",
+            {
+                "_hfc_interaction_id": interaction_id,
+                "_hfc_interaction_kind": kind,
+                "_hfc_interaction_prompt": normalized_question,
+                "_hfc_interaction_choice": text,
+            },
+        )
+        return text
+    if isinstance(result, dict) and result.get("status") == "interrupted":
+        _post_clarify_terminal_event(
+            local_vars,
+            "interaction.failed",
+            {
+                "_hfc_interaction_id": interaction_id,
+                "_hfc_interaction_kind": kind,
+                "_hfc_interaction_prompt": normalized_question,
+                "error": "用户已发送新消息，交互取消",
+            },
+        )
+        return _HFC_CLARIFY_INTERRUPTED
     if isinstance(result, dict) and result.get("status") == "completed":
         if is_multi_select:
             selected = result.get("choices")
@@ -5655,6 +5817,13 @@ def _event_data(
         if event_name == "interaction.failed":
             data["error"] = (
                 _first_string(local_vars, ("error",)) or "交互请求失败"
+            )
+        if event_name == "interaction.completed":
+            choice = _first_string(local_vars, ("_hfc_interaction_choice",)) or ""
+            data["choice"] = choice
+            data["choice_label"] = (
+                _first_string(local_vars, ("_hfc_interaction_choice_label",))
+                or choice
             )
         return data
     if event_name == "tool.updated":
