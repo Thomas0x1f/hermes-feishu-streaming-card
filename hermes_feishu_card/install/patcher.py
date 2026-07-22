@@ -249,6 +249,23 @@ def _apply_queued_complete_patch(content: str) -> str:
         newline = _line_ending(line) or _detect_newline(content)
         hook = _render_queued_complete_hook_block(indent, newline)
         return "".join(lines[:index] + hook + lines[index:])
+
+    # v4.0.17+ Hermes 把发送分支重构为 _delivery_result 取值 + intentional-
+    # silence 过滤（if/elif 链），上面的旧锚点整体失配；改为锚定过滤链入口，
+    # 注入块插在 if/elif 链之前（try/except 已闭合，语法安全）。
+    target = 'if _intentional_silence:'
+    for index, line in enumerate(lines):
+        if _strip_line_ending(line).strip() != target:
+            continue
+        lookback = lines[max(0, index - 24) : index]
+        if not any(
+            "first_response = _delivery_result.get(" in item for item in lookback
+        ):
+            continue
+        indent = _leading_whitespace(_strip_line_ending(line))
+        newline = _line_ending(line) or _detect_newline(content)
+        hook = _render_queued_complete_hook_block(indent, newline)
+        return "".join(lines[:index] + hook + lines[index:])
     return content
 
 
@@ -1653,7 +1670,10 @@ def _render_queued_complete_hook_block(indent: str, newline: str):
             f"{inner_indent}from hermes_feishu_card.hook_runtime "
             f"import native_media_only_response as _hfc_media_only{newline}"
         ),
-        f"{inner_indent}if first_response and not _already_streamed:{newline}",
+        (
+            f"{inner_indent}if first_response and not _already_streamed "
+            f"and not locals().get(\"_intentional_silence\"):{newline}"
+        ),
         f"{deeper_indent}_hfc_completed_locals = {{{newline}",
         f"{deeper_indent}    **locals(),{newline}",
         f"{deeper_indent}    \"answer\": first_response,{newline}",

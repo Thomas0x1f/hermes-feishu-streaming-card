@@ -1669,6 +1669,57 @@ def test_apply_complete_patch_migrates_stale_block_before_already_sent_branch():
     ast.parse(patched)
 
 
+def test_queued_complete_patch_matches_intentional_silence_refactor():
+    """v4.0.17+ 上游把发送分支重构为 _delivery_result 取值 + intentional-
+    silence 过滤（if/elif 链），旧锚点整体失配；patch 必须锚定新结构，
+    否则排队 follow-up 场景会重复发出原生文本。"""
+    content = (
+        "async def _drain_queue(self):\n"
+        "    result = {}\n"
+        "    response = {}\n"
+        "    _delivery_result = response if isinstance(response, dict) else (result or {})\n"
+        "    _previewed = bool(_delivery_result.get('response_previewed'))\n"
+        "    first_response = _delivery_result.get('final_response', '')\n"
+        "    _already_streamed = _stream_confirmed_final_delivery(\n"
+        "        _sc,\n"
+        "        first_response,\n"
+        "        previewed=_previewed,\n"
+        "    )\n"
+        "    try:\n"
+        "        from gateway.response_filters import is_intentional_silence_agent_result\n"
+        "        _intentional_silence = is_intentional_silence_agent_result(\n"
+        "            _delivery_result, first_response,\n"
+        "        )\n"
+        "    except Exception:\n"
+        "        _intentional_silence = False\n"
+        "    if _intentional_silence:\n"
+        "        pass\n"
+        "    elif first_response and not _already_streamed:\n"
+        "        await adapter.send('chat', first_response)\n"
+    )
+
+    patched = patcher._apply_queued_complete_patch(content)
+
+    assert patcher.QUEUED_COMPLETE_PATCH_BEGIN in patched
+    assert (
+        'if first_response and not _already_streamed '
+        'and not locals().get("_intentional_silence"):'
+    ) in patched
+    lines = patched.splitlines()
+    marker_line = next(
+        index
+        for index, line in enumerate(lines)
+        if patcher.QUEUED_COMPLETE_PATCH_BEGIN in line
+    )
+    silence_line = next(
+        index
+        for index, line in enumerate(lines)
+        if line.strip() == "if _intentional_silence:"
+    )
+    assert marker_line < silence_line
+    ast.parse(patched)
+
+
 def test_queued_complete_patch_tolerates_interleaved_stream_confirmation():
     """Newer Hermes interleaves a multi-line _stream_confirmed_final_delivery
     call between the first_response assignment and the anchor line; the patch
