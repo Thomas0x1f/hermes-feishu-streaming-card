@@ -438,7 +438,8 @@ async def _interaction_action(
     token = str(value.get("token") or "").strip()
     choice = str(value.get("choice") or "").strip()
     if (
-        action not in {"interaction.select", "interaction.multi_select"}
+        action
+        not in {"interaction.select", "interaction.multi_select", "interaction.text_input"}
         or not interaction_id
         or not token
     ):
@@ -462,31 +463,50 @@ async def _interaction_action(
         return web.json_response(
             {"ok": False, "error": "interaction forbidden"}, status=403
         )
+    toast_text = (
+        "已提交"
+        if interaction is not None and interaction.kind == "text_input"
+        else "已选择"
+    )
     if interaction is not None and interaction.status == "completed":
         return web.json_response(
             {
                 "ok": True,
-                "toast": {"type": "success", "content": "已选择"},
+                "toast": {"type": "success", "content": toast_text},
                 "card": _render_session_card(request, session),
             }
         )
-    expected_action = (
-        "interaction.multi_select"
-        if interaction is not None and interaction.kind == "multi_select"
-        else "interaction.select"
-    )
+    if interaction is not None and interaction.kind == "multi_select":
+        expected_action = "interaction.multi_select"
+    elif interaction is not None and interaction.kind == "text_input":
+        expected_action = "interaction.text_input"
+    else:
+        expected_action = "interaction.select"
     if action != expected_action:
         return web.json_response(
             {"ok": False, "error": "invalid action"}, status=400
         )
     user_name = _extract_operator_name(payload)
     is_multi_select = interaction is not None and interaction.kind == "multi_select"
+    is_text_input = interaction is not None and interaction.kind == "text_input"
     allowed_labels = (
         {option.value: option.label for option in interaction.options}
         if interaction is not None
         else {}
     )
-    if is_multi_select:
+    if is_text_input:
+        text = _extract_text_input_value(payload)
+        if not text:
+            return web.json_response(
+                {"ok": False, "error": "invalid input"}, status=400
+            )
+        data = {
+            "interaction_id": interaction_id,
+            "choice": text,
+            "choice_label": text,
+            "user_name": user_name,
+        }
+    elif is_multi_select:
         selected = _extract_multi_select_choices(payload)
         if not selected or any(item not in allowed_labels for item in selected):
             return web.json_response(
@@ -534,7 +554,7 @@ async def _interaction_action(
     return web.json_response(
         {
             "ok": True,
-            "toast": {"type": "success", "content": "已选择"},
+            "toast": {"type": "success", "content": toast_text},
             "card": _render_session_card(request, session),
         }
     )
@@ -2780,6 +2800,18 @@ def _extract_multi_select_choices(payload: dict[str, Any]) -> list[str]:
         if normalized and normalized not in choices:
             choices.append(normalized)
     return choices
+
+
+def _extract_text_input_value(payload: dict[str, Any]) -> str:
+    event = payload.get("event") if isinstance(payload, dict) else None
+    action = event.get("action") if isinstance(event, dict) else None
+    if not isinstance(action, dict):
+        action = payload.get("action") if isinstance(payload, dict) else None
+    form_value = action.get("form_value") if isinstance(action, dict) else None
+    raw_text = form_value.get("hfc_text") if isinstance(form_value, dict) else None
+    if not isinstance(raw_text, str):
+        return ""
+    return raw_text.strip()
 
 
 def _extract_callback_chat_id(payload: dict[str, Any]) -> str:

@@ -3470,6 +3470,7 @@ def _hfc_on_feishu_card_action_trigger(self: Any, data: Any) -> Any:
         "resume_picker",
         "interaction.select",
         "interaction.multi_select",
+        "interaction.text_input",
     ):
         if _hfc_is_duplicate_card_action(self, data):
             return _hfc_empty_feishu_callback_response(self)
@@ -3483,6 +3484,8 @@ def _hfc_on_feishu_card_action_trigger(self: Any, data: Any) -> Any:
     if action == "interaction.select":
         return _hfc_handle_interaction_select_action(self, data, action_value)
     if action == "interaction.multi_select":
+        return _hfc_handle_interaction_select_action(self, data, action_value)
+    if action == "interaction.text_input":
         return _hfc_handle_interaction_select_action(self, data, action_value)
     if action == "operations.select":
         return _hfc_handle_operations_select_action(self, data, action_value)
@@ -3635,14 +3638,20 @@ def _hfc_handle_interaction_select_action(
     """
     action = str(action_value.get("hfc_action") or "interaction.select").strip()
     is_multi_select = action == "interaction.multi_select"
+    is_text_input = action == "interaction.text_input"
     _hfc_info(f"inline card action received: {action}")
     interaction_id = str(action_value.get("interaction_id") or "").strip()
     token = str(action_value.get("token") or "").strip()
     choice = str(action_value.get("choice") or action_value.get("hfc_choice") or "").strip()
     choice_label = str(action_value.get("choice_label") or choice).strip()
     form_choices = _hfc_multi_select_choices_from_data(data) if is_multi_select else []
-    if not interaction_id or not token or (is_multi_select and not form_choices) or (
-        not is_multi_select and not choice
+    form_text = _hfc_text_input_value_from_data(data) if is_text_input else ""
+    if (
+        not interaction_id
+        or not token
+        or (is_multi_select and not form_choices)
+        or (is_text_input and not form_text)
+        or (not is_multi_select and not is_text_input and not choice)
     ):
         _hfc_info(f"{action} ignored: missing interaction_id/token/choice")
         return _hfc_empty_feishu_callback_response(adapter)
@@ -3673,6 +3682,8 @@ def _hfc_handle_interaction_select_action(
     forwarded_action: dict[str, Any] = {"value": forwarded_value}
     if is_multi_select:
         forwarded_action["form_value"] = {"hfc_choices": form_choices}
+    elif is_text_input:
+        forwarded_action["form_value"] = {"hfc_text": form_text}
     else:
         forwarded_value["choice"] = choice
         forwarded_value["choice_label"] = choice_label
@@ -3698,6 +3709,16 @@ def _hfc_handle_interaction_select_action(
         return _hfc_raw_feishu_callback_response(adapter, result["card"])
     _hfc_info(f"{action} forwarded but no card returned")
     return _hfc_empty_feishu_callback_response(adapter)
+
+
+def _hfc_text_input_value_from_data(data: Any) -> str:
+    event_obj = getattr(data, "event", None)
+    action_obj = getattr(event_obj, "action", None)
+    form_value = getattr(action_obj, "form_value", {}) or {}
+    raw_text = form_value.get("hfc_text") if isinstance(form_value, dict) else None
+    if not isinstance(raw_text, str):
+        return ""
+    return raw_text.strip()
 
 
 def _hfc_multi_select_choices_from_data(data: Any) -> list[str]:
@@ -4364,6 +4385,16 @@ async def _hfc_handle_feishu_card_action_event(self: Any, data: Any) -> None:
             action_value,
         )
         return
+    if action == "interaction.text_input":
+        if _hfc_is_duplicate_card_action(self, data):
+            return
+        await asyncio.to_thread(
+            _hfc_handle_interaction_select_action,
+            self,
+            data,
+            action_value,
+        )
+        return
     if action == "operations.select":
         _hfc_info("background operations.select claimed by HFC")
         return
@@ -4762,11 +4793,11 @@ def request_clarify_response_from_hermes_locals(
     )
     if media_required and not media_paths:
         return _HFC_CLARIFY_MEDIA_UNAVAILABLE
-    if not choices:
-        return _HFC_MULTI_SELECT_UNAVAILABLE if is_multi_select else None
+    if not choices and is_multi_select:
+        return _HFC_MULTI_SELECT_UNAVAILABLE
     options = []
     seen_values: set[str] = set()
-    for index, choice in enumerate(list(choices)):
+    for index, choice in enumerate(list(choices or [])):
         label = str(choice).strip()
         value = label
         if is_multi_select and _HFC_MULTI_SELECT_CHOICE_SEPARATOR in label:
@@ -4787,11 +4818,18 @@ def request_clarify_response_from_hermes_locals(
                 }
             )
             seen_values.add(value)
-    if not options:
+    if choices and not options:
         return _HFC_MULTI_SELECT_UNAVAILABLE if is_multi_select else None
+    if is_multi_select:
+        kind = "multi_select"
+    elif options:
+        kind = "clarify"
+    else:
+        # 无 choices 的 clarify 视为自由文本提问，卡片渲染 textarea 输入框
+        kind = "text_input"
     result = request_interaction_from_hermes_locals(
         local_vars,
-        kind="multi_select" if is_multi_select else "clarify",
+        kind=kind,
         interaction_id=interaction_id,
         prompt=normalized_question,
         options=options,

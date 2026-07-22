@@ -4856,6 +4856,55 @@ def test_request_interaction_timeout_marks_sidecar_interaction_failed(monkeypatc
     assert posted[-1]["data"]["error"] == "交互请求超时"
 
 
+def test_clarify_without_choices_requests_text_input_card(monkeypatch):
+    captured = {}
+
+    def fake_request(local_vars, **kwargs):
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "status": "completed",
+            "interaction_id": "clarify-text-1",
+            "choice": "帮我加一个导出 CSV 的按钮",
+            "choice_label": "帮我加一个导出 CSV 的按钮",
+        }
+
+    monkeypatch.setattr(
+        hook_runtime,
+        "request_interaction_from_hermes_locals",
+        fake_request,
+    )
+
+    result = hook_runtime.request_clarify_response_from_hermes_locals(
+        {},
+        interaction_id="clarify-text-1",
+        question="请描述你的需求",
+        choices=None,
+    )
+
+    assert result == "帮我加一个导出 CSV 的按钮"
+    assert captured["kind"] == "text_input"
+    assert captured["prompt"] == "请描述你的需求"
+    assert captured["options"] == []
+
+
+def test_clarify_without_choices_falls_back_to_native_when_card_unavailable(monkeypatch):
+    monkeypatch.setattr(
+        hook_runtime,
+        "request_interaction_from_hermes_locals",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = hook_runtime.request_clarify_response_from_hermes_locals(
+        {},
+        interaction_id="clarify-text-1",
+        question="请描述你的需求",
+        choices=[],
+    )
+
+    assert result is None
+
+
 def test_clarify_multi_select_marker_returns_stable_values(monkeypatch):
     captured = {}
 
@@ -7603,6 +7652,125 @@ def test_interaction_multi_select_forwards_form_values_to_sidecar(monkeypatch):
     }
     assert response.card.type == "raw"
     assert response.card.data["header"]["template"] == "green"
+
+
+def test_interaction_text_input_forwards_form_text_to_sidecar(monkeypatch):
+    class FakeCallBackCard:
+        def __init__(self):
+            self.type = None
+            self.data = None
+
+    class FakeP2Response:
+        def __init__(self):
+            self.card = None
+
+    class DummyFeishuAdapter:
+        name = "feishu"
+
+        def __init__(self):
+            self._loop = object()
+
+        def _on_card_action_trigger(self, data):
+            return "original"
+
+    DummyFeishuAdapter.__module__ = hook_runtime.__name__
+    monkeypatch.setattr(
+        hook_runtime, "P2CardActionTriggerResponse", FakeP2Response, raising=False
+    )
+    monkeypatch.setattr(hook_runtime, "CallBackCard", FakeCallBackCard, raising=False)
+
+    posted = {}
+
+    def fake_post(url, payload, timeout):
+        posted["url"] = url
+        posted["payload"] = payload
+        return {"ok": True, "card": {"header": {"template": "green"}}}
+
+    monkeypatch.setattr(hook_runtime, "_post_json_sync_response", fake_post)
+    monkeypatch.setattr(
+        hook_runtime,
+        "load_runtime_config",
+        lambda: SimpleNamespace(event_url="http://127.0.0.1:8765/events"),
+    )
+
+    data = SimpleNamespace(
+        event=SimpleNamespace(
+            action=SimpleNamespace(
+                value={
+                    "hfc_action": "interaction.text_input",
+                    "interaction_id": "clarify-text-1",
+                    "token": "tok-1",
+                },
+                form_value={"hfc_text": "  帮我加导出按钮  "},
+            ),
+            context=SimpleNamespace(open_chat_id="oc_abc"),
+            operator=SimpleNamespace(open_id="ou_user", user_name="Bailey"),
+        )
+    )
+
+    response = hook_runtime._hfc_on_feishu_card_action_trigger(
+        DummyFeishuAdapter(), data
+    )
+
+    assert posted["url"] == "http://127.0.0.1:8765/card/actions"
+    assert posted["payload"]["event"]["action"] == {
+        "value": {
+            "hfc_action": "interaction.text_input",
+            "interaction_id": "clarify-text-1",
+            "token": "tok-1",
+        },
+        "form_value": {"hfc_text": "帮我加导出按钮"},
+    }
+    assert response.card.type == "raw"
+    assert response.card.data["header"]["template"] == "green"
+
+
+def test_interaction_text_input_ignores_empty_form_text(monkeypatch):
+    class FakeP2Response:
+        def __init__(self):
+            self.card = None
+
+    class DummyFeishuAdapter:
+        name = "feishu"
+
+        def _on_card_action_trigger(self, data):
+            return "original"
+
+    DummyFeishuAdapter.__module__ = hook_runtime.__name__
+    monkeypatch.setattr(
+        hook_runtime, "P2CardActionTriggerResponse", FakeP2Response, raising=False
+    )
+
+    def fail_post(url, payload, timeout):
+        raise AssertionError("empty text must not POST to the sidecar")
+
+    monkeypatch.setattr(hook_runtime, "_post_json_sync_response", fail_post)
+    monkeypatch.setattr(
+        hook_runtime,
+        "load_runtime_config",
+        lambda: SimpleNamespace(event_url="http://127.0.0.1:8765/events"),
+    )
+
+    data = SimpleNamespace(
+        event=SimpleNamespace(
+            action=SimpleNamespace(
+                value={
+                    "hfc_action": "interaction.text_input",
+                    "interaction_id": "clarify-text-1",
+                    "token": "tok-1",
+                },
+                form_value={"hfc_text": "   "},
+            ),
+            context=SimpleNamespace(open_chat_id="oc_abc"),
+            operator=SimpleNamespace(open_id="ou_user", user_name="Bailey"),
+        )
+    )
+
+    response = hook_runtime._hfc_on_feishu_card_action_trigger(
+        DummyFeishuAdapter(), data
+    )
+
+    assert response.card is None
 
 
 def test_interaction_select_ignores_incomplete_action(monkeypatch):

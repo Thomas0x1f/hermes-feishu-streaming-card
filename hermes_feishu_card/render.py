@@ -420,6 +420,51 @@ def _render_interaction_elements(
         )
         return elements
 
+    if interaction.status == "pending" and interaction.kind == "text_input":
+        elements.append(
+            {
+                "tag": "form",
+                "name": "hfc_text_input_form",
+                "element_id": "interaction_text_input_form",
+                "elements": [
+                    {
+                        "tag": "input",
+                        "name": "hfc_text",
+                        "element_id": "interaction_text_input",
+                        "input_type": "multiline_text",
+                        "rows": 3,
+                        "auto_resize": True,
+                        "required": True,
+                        "placeholder": {
+                            "tag": "plain_text",
+                            "content": "请输入回答",
+                        },
+                    },
+                    {
+                        "tag": "button",
+                        "name": "hfc_text_input_submit",
+                        "element_id": "interaction_text_input_submit",
+                        "text": {"tag": "plain_text", "content": "提交回答"},
+                        "type": "primary",
+                        "size": "medium",
+                        "width": "default",
+                        "form_action_type": "submit",
+                        "behaviors": [
+                            {
+                                "type": "callback",
+                                "value": {
+                                    "hfc_action": "interaction.text_input",
+                                    "interaction_id": interaction.interaction_id,
+                                    "token": interaction.callback_token,
+                                },
+                            }
+                        ],
+                    },
+                ],
+            }
+        )
+        return elements
+
     if interaction.status == "pending":
         for index, option in enumerate(interaction.options):
             elements.append(
@@ -452,7 +497,8 @@ def _render_interaction_elements(
         else:
             choice = interaction.choice_label or interaction.choice or "已完成"
         user = f" by {interaction.user_name}" if interaction.user_name else ""
-        content = f"已选择：{choice}{user}"
+        verb = "已回答" if interaction.kind == "text_input" else "已选择"
+        content = f"{verb}：{choice}{user}"
     else:
         content = interaction.error or "交互请求失败"
     elements.append(

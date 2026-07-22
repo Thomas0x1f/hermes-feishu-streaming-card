@@ -5340,6 +5340,169 @@ async def test_multi_select_interaction_submit_returns_stable_values(client):
     assert len(feishu_client.updated) == updates_after_first_submit
 
 
+async def test_text_input_interaction_submit_returns_text(client):
+    test_client, feishu_client = client
+
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    requested = await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            1,
+            {
+                "interaction_id": "clarify-text-1",
+                "kind": "text_input",
+                "prompt": "请描述你的需求",
+                "options": [],
+            },
+        ),
+    )
+    assert requested.status == 200
+
+    interaction_card = feishu_client.updated[-1][1]
+    form = next(
+        element
+        for element in interaction_card["body"]["elements"]
+        if element.get("tag") == "form"
+    )
+    text_input = next(
+        element for element in form["elements"] if element.get("tag") == "input"
+    )
+    assert text_input["input_type"] == "multiline_text"
+    submit = next(
+        element for element in form["elements"] if element.get("tag") == "button"
+    )
+    action_value = submit["behaviors"][0]["value"]
+
+    callback_payload = {
+        "event": {
+            "operator": {"open_id": "ou_bailey", "name": "Bailey"},
+            "context": {"open_chat_id": "oc_abc"},
+            "action": {
+                "value": action_value,
+                "form_value": {"hfc_text": "帮我加一个导出 CSV 的按钮\n放在列表右上角"},
+            },
+        }
+    }
+    callback = await test_client.post("/card/actions", json=callback_payload)
+    result = await test_client.get("/interactions/clarify-text-1")
+
+    assert callback.status == 200
+    assert (await callback.json())["ok"] is True
+    assert result.status == 200
+    assert await result.json() == {
+        "ok": True,
+        "status": "completed",
+        "choice": "帮我加一个导出 CSV 的按钮\n放在列表右上角",
+        "choice_label": "帮我加一个导出 CSV 的按钮\n放在列表右上角",
+        "interaction_id": "clarify-text-1",
+    }
+    completed_card = str(feishu_client.updated[-1][1])
+    assert "已回答：帮我加一个导出 CSV 的按钮" in completed_card
+
+    updates_after_first_submit = len(feishu_client.updated)
+    duplicate = await test_client.post("/card/actions", json=callback_payload)
+    assert duplicate.status == 200
+    assert (await duplicate.json())["ok"] is True
+    assert len(feishu_client.updated) == updates_after_first_submit
+
+
+async def test_text_input_interaction_rejects_empty_text_without_completing(client):
+    test_client, feishu_client = client
+
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            1,
+            {
+                "interaction_id": "clarify-text-2",
+                "kind": "text_input",
+                "prompt": "请描述你的需求",
+                "options": [],
+            },
+        ),
+    )
+    interaction_card = feishu_client.updated[-1][1]
+    form = next(
+        element
+        for element in interaction_card["body"]["elements"]
+        if element.get("tag") == "form"
+    )
+    submit = next(
+        element for element in form["elements"] if element.get("tag") == "button"
+    )
+    action_value = submit["behaviors"][0]["value"]
+
+    for form_value in ({"hfc_text": "   "}, {}, {"hfc_text": ["not-a-string"]}):
+        callback = await test_client.post(
+            "/card/actions",
+            json={
+                "event": {
+                    "operator": {"open_id": "ou_bailey", "name": "Bailey"},
+                    "context": {"open_chat_id": "oc_abc"},
+                    "action": {"value": action_value, "form_value": form_value},
+                }
+            },
+        )
+        assert callback.status == 400
+
+    result = await test_client.get("/interactions/clarify-text-2")
+    assert (await result.json())["status"] == "pending"
+
+
+async def test_text_input_rejects_scalar_select_action_without_completing(client):
+    test_client, feishu_client = client
+
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            1,
+            {
+                "interaction_id": "clarify-text-3",
+                "kind": "text_input",
+                "prompt": "请描述你的需求",
+                "options": [],
+            },
+        ),
+    )
+    interaction_card = feishu_client.updated[-1][1]
+    form = next(
+        element
+        for element in interaction_card["body"]["elements"]
+        if element.get("tag") == "form"
+    )
+    submit = next(
+        element for element in form["elements"] if element.get("tag") == "button"
+    )
+    token = submit["behaviors"][0]["value"]["token"]
+
+    callback = await test_client.post(
+        "/card/actions",
+        json={
+            "event": {
+                "operator": {"open_id": "ou_bailey", "name": "Bailey"},
+                "context": {"open_chat_id": "oc_abc"},
+                "action": {
+                    "value": {
+                        "hfc_action": "interaction.select",
+                        "interaction_id": "clarify-text-3",
+                        "choice": "whatever",
+                        "token": token,
+                    }
+                },
+            }
+        },
+    )
+    result = await test_client.get("/interactions/clarify-text-3")
+
+    assert callback.status == 400
+    assert (await result.json())["status"] == "pending"
+
+
 async def test_group_multi_select_rejects_non_initiator_without_completing(client):
     test_client, feishu_client = client
 

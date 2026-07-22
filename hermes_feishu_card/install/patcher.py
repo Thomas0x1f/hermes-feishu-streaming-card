@@ -1948,7 +1948,7 @@ def _render_clarify_hook_block(indent: str, newline: str):
             f"import request_clarify_response_from_hermes_locals as _hfc_request_clarify{newline}"
         ),
         f"{inner_indent}from uuid import uuid4 as _hfc_uuid4{newline}",
-        f"{inner_indent}if choices and _run_still_current():{newline}",
+        f"{inner_indent}if _run_still_current():{newline}",
         f"{deeper_indent}_hfc_clarify_response = _hfc_request_clarify({{{newline}",
         f"{deeper_indent}    **locals(),{newline}",
         f"{deeper_indent}    \"source\": source,{newline}",

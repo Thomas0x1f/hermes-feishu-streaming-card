@@ -658,6 +658,100 @@ def test_render_pending_multi_select_as_form_with_submit():
     }
 
 
+def test_render_pending_text_input_as_form_with_textarea():
+    from hermes_feishu_card.events import SidecarEvent
+
+    session = CardSession(conversation_id="chat-1", message_id="msg-1", chat_id="oc_abc")
+    session.apply(
+        SidecarEvent(
+            schema_version="1",
+            event="interaction.requested",
+            conversation_id="chat-1",
+            message_id="msg-1",
+            chat_id="oc_abc",
+            platform="feishu",
+            sequence=1,
+            created_at=0.0,
+            data={
+                "interaction_id": "clarify-text-1",
+                "kind": "text_input",
+                "prompt": "请描述你的需求",
+                "options": [],
+            },
+        )
+    )
+
+    card = render_card(session)
+
+    form = next(
+        element for element in card["body"]["elements"] if element.get("tag") == "form"
+    )
+    text_input = next(
+        element for element in form["elements"] if element.get("tag") == "input"
+    )
+    submit = next(
+        element for element in form["elements"] if element.get("tag") == "button"
+    )
+    assert form["name"] == "hfc_text_input_form"
+    assert text_input["name"] == "hfc_text"
+    assert text_input["input_type"] == "multiline_text"
+    assert text_input["required"] is True
+    assert submit["form_action_type"] == "submit"
+    assert submit["behaviors"][0]["value"] == {
+        "hfc_action": "interaction.text_input",
+        "interaction_id": "clarify-text-1",
+        "token": session.active_interaction.callback_token,
+    }
+
+
+def test_render_completed_text_input_shows_answer_text():
+    from hermes_feishu_card.events import SidecarEvent
+
+    session = CardSession(conversation_id="chat-1", message_id="msg-1", chat_id="oc_abc")
+    session.apply(
+        SidecarEvent(
+            schema_version="1",
+            event="interaction.requested",
+            conversation_id="chat-1",
+            message_id="msg-1",
+            chat_id="oc_abc",
+            platform="feishu",
+            sequence=1,
+            created_at=0.0,
+            data={
+                "interaction_id": "clarify-text-1",
+                "kind": "text_input",
+                "prompt": "请描述你的需求",
+                "options": [],
+            },
+        )
+    )
+    session.apply(
+        SidecarEvent(
+            schema_version="1",
+            event="interaction.completed",
+            conversation_id="chat-1",
+            message_id="msg-1",
+            chat_id="oc_abc",
+            platform="feishu",
+            sequence=2,
+            created_at=0.0,
+            data={
+                "interaction_id": "clarify-text-1",
+                "choice": "帮我加一个导出 CSV 的按钮",
+                "choice_label": "帮我加一个导出 CSV 的按钮",
+                "user_name": "Bailey",
+            },
+        )
+    )
+
+    card = render_card(session)
+
+    assert not any(element.get("tag") == "form" for element in card["body"]["elements"])
+    assert "已回答：帮我加一个导出 CSV 的按钮" in str(card)
+    assert "Bailey" in str(card)
+
+
 def test_render_pending_interaction_as_text_choices_for_localhost_mode():
     from hermes_feishu_card.events import SidecarEvent
 
