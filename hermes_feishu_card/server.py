@@ -2499,6 +2499,11 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                     task,
                 )
             )
+        elif _interaction_pending(session) and not event.event.startswith("interaction."):
+            # 交互等待人工期间不 PATCH 卡片：整卡更新会重置未提交的表单
+            # 状态。事件已 apply 进内存，交互完成（interaction.* 或终态）
+            # 触发的下一次渲染会把积压的状态一并带出。
+            current_task = None
         else:
             current_task = controller.schedule(_render_and_update, terminal=False)
         post_lock_task = current_task
@@ -2728,9 +2733,18 @@ def _card_animation_is_current(
     session_key: str,
     session: CardSession,
 ) -> bool:
+    # 交互（多选/输入框）等待人工期间停止动画：整卡 PATCH 会重置飞书
+    # 客户端未提交的表单状态，0.8s 心跳会不断抹掉用户正在进行的输入。
+    if _interaction_pending(session):
+        return False
     return app[SESSIONS_KEY].get(session_key) is session and (
         _is_initial_loading(session) or _has_running_tool(session)
     )
+
+
+def _interaction_pending(session: CardSession) -> bool:
+    interaction = session.active_interaction
+    return interaction is not None and interaction.status == "pending"
 
 
 def _has_running_tool(session: CardSession) -> bool:

@@ -4678,6 +4678,111 @@ async def test_card_animation_stops_after_update_failure(monkeypatch):
         await test_client.close()
 
 
+async def test_pending_interaction_suppresses_card_animation(monkeypatch):
+    monkeypatch.setattr(sidecar_server, "CARD_ANIMATION_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(sidecar_server, "CARD_ANIMATION_MAX_UPDATES", 50)
+    feishu_client = FakeFeishuClient()
+    app = create_app(feishu_client, card_config={"flush_interval_ms": 0})
+    test_client = TestClient(TestServer(app))
+    await test_client.start_server()
+    try:
+        await test_client.post(
+            "/events",
+            json=event_payload("message.started", 0),
+        )
+        await test_client.post(
+            "/events",
+            json=event_payload(
+                "tool.updated",
+                1,
+                {
+                    "tool_id": "clarify",
+                    "name": "clarify",
+                    "status": "running",
+                    "detail": "等待人工确认",
+                },
+            ),
+        )
+        await wait_for_card_update(feishu_client, "等待人工确认")
+        await test_client.post(
+            "/events",
+            json=event_payload(
+                "interaction.requested",
+                2,
+                {
+                    "interaction_id": "clarify-1",
+                    "kind": "multi_select",
+                    "prompt": "请选择接待物料",
+                    "options": [
+                        {"label": "水牌", "value": "water_sign"},
+                        {"label": "台卡", "value": "desk_card"},
+                    ],
+                },
+            ),
+        )
+        await wait_for_card_update(feishu_client, "请选择接待物料")
+        updates_after_interaction = len(feishu_client.updated)
+        await _REAL_ASYNCIO_SLEEP(0.08)
+
+        # 交互等待人工期间动画心跳必须停止，否则整卡 PATCH 会重置
+        # 飞书客户端未提交的表单选择。
+        assert len(feishu_client.updated) == updates_after_interaction
+    finally:
+        await test_client.close()
+
+
+async def test_pending_interaction_defers_non_interaction_updates(client):
+    test_client, feishu_client = client
+
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            1,
+            {
+                "interaction_id": "clarify-2",
+                "kind": "multi_select",
+                "prompt": "请选择接待物料",
+                "options": [
+                    {"label": "水牌", "value": "water_sign"},
+                    {"label": "台卡", "value": "desk_card"},
+                ],
+            },
+        ),
+    )
+    await wait_for_card_update(feishu_client, "请选择接待物料")
+    updates_after_interaction = len(feishu_client.updated)
+
+    deferred = await test_client.post(
+        "/events",
+        json=event_payload("answer.delta", 2, {"text": "后台推进中"}),
+    )
+
+    assert deferred.status == 200
+    assert (await deferred.json())["applied"] is True
+    await _REAL_ASYNCIO_SLEEP(0.05)
+    # 事件进入内存但不 PATCH 卡片，避免重置未提交的表单状态。
+    assert len(feishu_client.updated) == updates_after_interaction
+
+    completed = await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.completed",
+            3,
+            {
+                "interaction_id": "clarify-2",
+                "choice": "water_sign",
+                "choice_label": "水牌",
+            },
+        ),
+    )
+
+    assert completed.status == 200
+    # 交互完成后的渲染把积压的内容一并带出。
+    await wait_for_card_update(feishu_client, "后台推进中")
+
+
 async def test_topic_stream_event_with_reply_anchor_updates_existing_card(client):
     test_client, feishu_client = client
 
