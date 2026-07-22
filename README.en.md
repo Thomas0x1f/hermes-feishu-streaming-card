@@ -123,7 +123,7 @@ streaming:
 
 Do not set `display.platforms.feishu.streaming: false`. Do not treat `display.show_reasoning` as required for this plugin; it can append reasoning blocks to the final answer and disrupt the streaming card experience. The plugin consumes Hermes `thinking.delta` / `answer.delta` directly.
 
-The compatibility matrix covers older Hermes starting at `v2026.4.23` and Hermes 0.13.0+/0.14.0/0.15.x/0.17.x/0.18.x. `doctor` prefers `VERSION` or a Git tag, and can fall back to verified `gateway/run.py` anchors when version metadata is missing or unparseable. After upgrading Hermes or this plugin, rerun `setup` or `install --hermes-dir ... --yes`.
+The compatibility matrix covers older Hermes starting at `v2026.4.23` and Hermes 0.13.0+/0.14.0/0.15.x/0.17.x/0.18.x. `doctor` prefers `VERSION` or a Git tag, and can fall back to verified `gateway/run.py` anchors when version metadata is missing or unparseable. A Hermes upgrade can replace the injected `gateway/run.py`; `status` / `start` use `HERMES_DIR` from the config-adjacent `.env` to detect that stale state and print a safe recovery command. After confirming an intentional upgrade, run the suggested `install --accept-hermes-upgrade --yes`, then `hermes gateway start`; user edits or incomplete evidence remain fail-closed behind `doctor --explain`.
 
 ## Docker Container Install
 
@@ -132,7 +132,7 @@ For an existing Hermes container:
 ```bash
 export FEISHU_APP_ID=cli_xxx
 export FEISHU_APP_SECRET=xxx
-export HFC_VERSION=v4.0.14
+export HFC_VERSION=v4.0.15
 bash install-docker.sh
 ```
 
@@ -173,6 +173,7 @@ High-frequency stream tuning usually needs no change. For DeepSeek burst, token-
 ![Feishu topic reply card continuity and reasoning/tool timeline showcase](docs/assets/feishu-topic-card-showcase-v389.png)
 | Version | Highlights |
 |---|---|
+| [v4.0.15](docs/release-notes-v4.0.15.en.md) | Fixes Issue #141 with a compact semantic tool timeline and real loading animation; CLI detects Hermes upgrades that removed the hook |
 | [v4.0.14](docs/release-notes-v4.0.14.en.md) | Fixes Issue #142 so orphaned long-task heartbeats stay running, update one card per original message anchor, and still complete on the final event |
 | [v4.0.13](docs/release-notes-v4.0.13.en.md) | Routes every non-empty Hermes slash-command feedback message through a standalone command card, updates one card for multi-message feedback, keeps manual `/compress` progress/results in place, and falls back to exact native text on failure |
 | [v4.0.12](docs/release-notes-v4.0.12.en.md) | Issue #133 adds visible context-compaction phases and configurable body/reasoning/tool/notice/footer text sizes; Issue #136 loads selected-env credentials and exposes degraded Noop delivery |

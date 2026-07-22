@@ -459,7 +459,7 @@ Example:
 ```bash
 export FEISHU_APP_ID=cli_xxx
 export FEISHU_APP_SECRET=xxx
-export HFC_VERSION=v4.0.14
+export HFC_VERSION=v4.0.15
 bash install-docker.sh --profile-id child --event-url http://hfc-sidecar:8765/events
 ```
 
@@ -659,9 +659,9 @@ Ensure Hermes `config.yaml` has `streaming.enabled: true` and `streaming.transpo
 | `setup --repair ... --yes` / `--no-repair` | Automatically repair known-safe state, or explicitly opt out |
 | `restore --hermes-dir ... --yes` | Restore original Hermes files |
 | `uninstall --hermes-dir ... --yes` | Uninstall and restore |
-| `start --config ...` | Start sidecar; prefer an independent systemd user service on Linux |
+| `start --config ...` | Start sidecar; when `HERMES_DIR` is configured, first refuse a silent start if an upgrade removed the hook |
 | `stop --config ...` | Stop sidecar after validating its PID/token and recorded process manager identity |
-| `status --config ...` | Sidecar status, routing, profile diagnostics, and metrics |
+| `status --config ...` | Sidecar, routing, profile diagnostics, metrics, and Hermes hook install status |
 | `smoke-feishu-card --profile-id ... --chat-id ...` | Send a real Feishu smoke card for a specific profile |
 | `bots list|show|add|remove --config ...` | Manage bot registry |
 | `bots test --profile-id ... --chat-id ...` | Run a real Feishu bot smoke for a specific profile/bot |
@@ -701,6 +701,7 @@ The Hermes hook converts `message.started` / `thinking.delta` / `answer.delta` /
 
 | Version | Date | Highlights |
 |---------|------|-----------|
+| [v4.0.15](release-notes-v4.0.15.en.md) | 2026-07-22 | Issue #141: compact tool-event styling, same-card loading animation, and CLI protection when Hermes upgrades remove the hook |
 | [v4.0.14](release-notes-v4.0.14.en.md) | 2026-07-20 | Issue #142: orphaned long-task heartbeats stay running, reuse one card per original message anchor, and complete on the final event |
 | [v4.0.13](release-notes-v4.0.13.en.md) | 2026-07-20 | Cardifies every non-empty Hermes slash-command feedback message, updates one card for multi-message feedback, and shows manual `/compress` progress and terminal results in place |
 | [v4.0.12](release-notes-v4.0.12.en.md) | 2026-07-18 | Issues #133/#136: visible context-compaction phases, five text-size roles with PC/mobile mappings, selected-env credentials, and degraded Noop health/failure metrics |
