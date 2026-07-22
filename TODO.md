@@ -2,9 +2,33 @@
 
 当前 active runtime 是 `hermes_feishu_card/`。legacy adapter、dual mode、旧 `sidecar/`、旧 `patch/` 和 `installer_v2.py` 不是 active runtime，仅保留作历史参考。
 
-## V3.8 / V3.9 / V3.10 / V4.0 系列路线：V3.8.0 / V3.8.1 / V3.8.2 / V3.8.3 / V3.8.4 / V3.8.5 / V3.8.6 / V3.8.7 / V3.8.8 / V3.8.9 / V3.8.10 / V3.8.11 / V3.8.12 / V3.8.13 / V3.8.14 / V3.8.15 / V3.8.16 / V3.8.17 / V3.8.18 / V3.9.0 / V3.9.1 / V3.10.0 / V4.0.0 / V4.0.1 / V4.0.2 / V4.0.3 / V4.0.4 / V4.0.5 / V4.0.6 / V4.0.7 / V4.0.8 / V4.0.9 / V4.0.10 / V4.0.11 / V4.0.12 / V4.0.13 / V4.0.14
+## V3.8 / V3.9 / V3.10 / V4.0 系列路线：V3.8.0 / V3.8.1 / V3.8.2 / V3.8.3 / V3.8.4 / V3.8.5 / V3.8.6 / V3.8.7 / V3.8.8 / V3.8.9 / V3.8.10 / V3.8.11 / V3.8.12 / V3.8.13 / V3.8.14 / V3.8.15 / V3.8.16 / V3.8.17 / V3.8.18 / V3.9.0 / V3.9.1 / V3.10.0 / V4.0.0 / V4.0.1 / V4.0.2 / V4.0.3 / V4.0.4 / V4.0.5 / V4.0.6 / V4.0.7 / V4.0.8 / V4.0.9 / V4.0.10 / V4.0.11 / V4.0.12 / V4.0.13 / V4.0.14 / V4.0.15 / V4.0.16 / V4.0.17
 
 详细路线见 [docs/superpowers/specs/2026-06-30-v3-8-design.md](docs/superpowers/specs/2026-06-30-v3-8-design.md) 和 [docs/superpowers/plans/2026-06-30-v3-8-card-ux-stability.md](docs/superpowers/plans/2026-06-30-v3-8-card-ux-stability.md)。
+
+### V4.0.17：并行同名工具事件关联热修（发布候选）
+
+- [x] 使用 Hermes `tool_start_callback` / `tool_complete_callback` 的真实 `call_id` 关联 started/completed。
+- [x] 两个并行 `web_search` 保留各自查询摘要、参数和耗时，不再发生详情串线。
+- [x] 工具调用次数按 invocation 计数，不再把 started/completed 各算一次。
+- [x] 渲染时清除详情中的全部 `耗时:` 行，只在工具标题保留一个耗时。
+- [x] 无稳定回调锚点的旧 Hermes 继续使用既有 fail-open fallback；当前 Hermes patch 可编译、幂等并可还原。
+
+### V4.0.16：加载态去重与真实工具耗时（发布候选）
+
+- [x] 初始 Header 仅显示 `Hermes Agent`，正文保留动画“正在加载上下文…”。
+- [x] 工具开始后 subtitle 显示当前动作；没有模型正文时移除加载占位。
+- [x] 读取 Hermes `kwargs.duration`，缺失时用 started/completed 事件时间兜底，terminal-only 不伪造耗时。
+- [x] 工具完成时保留 started 事件的查询摘要与参数，并继续使用紧凑时间线首行耗时。
+- [x] 全量测试、包构建、隔离安装、公开 tagged installer 和本机运行来源进入发布门禁。
+
+### V4.0.15：工具事件视觉与 Hermes 升级防护（发布候选）
+
+- [x] Issue #141：工具事件改为状态/工具/耗时首行加参数/结果/失败详情次行的紧凑时间线。
+- [x] 首事件前显示“正在加载上下文…”同卡 spinner，运行中工具复用动画；正文、工具终态或消息终态及时停止。
+- [x] 动画走既有串行 PATCH、终态 drain、topic/reply anchor 与失败停止边界，不创建重复卡片。
+- [x] `status` / `start` 主动识别经过验证的 Hermes 升级覆盖并给出显式恢复；用户改动继续 fail-closed。
+- [x] 真实 Hermes 配置模型飞书验证、升级闭环模拟、全量自动化与包验证均纳入发布门禁。
 
 ### V4.0.14：长任务 heartbeat 卡片生命周期热修（发布候选）
 
