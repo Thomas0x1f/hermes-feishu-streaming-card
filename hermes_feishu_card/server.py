@@ -19,7 +19,12 @@ from typing import Any, Callable, Dict
 from aiohttp import web
 
 from .bots import RouteResult
-from .config import load_config, merge_card_config, resolve_operations_hermes_root
+from .config import (
+    load_config,
+    merge_card_config,
+    read_env_file_hermes_home,
+    resolve_operations_hermes_root,
+)
 from .diagnostics import DiagnosticFinding, DiagnosticReport, build_diagnostic_report
 from .events import EventValidationError, SidecarEvent
 from .event_auth import EventAuthenticationError, EventProofVerifier
@@ -101,6 +106,7 @@ FLUSH_CONTROLLERS_KEY = web.AppKey("flush_controllers", dict)
 CARD_ANIMATION_TASKS_KEY = web.AppKey("card_animation_tasks", dict)
 CLEANUP_TASK_KEY = web.AppKey("cleanup_task", asyncio.Task)
 MEDIA_IMAGE_KEY_CACHE_KEY = web.AppKey("media_image_key_cache", dict)
+MEDIA_HOME_FROM_ENV_FILE_KEY = web.AppKey("media_home_from_env_file", str)
 MEDIA_IMAGE_KEY_CACHE_LOCK_KEY = web.AppKey("media_image_key_cache_lock", asyncio.Lock)
 UPDATE_MAX_ATTEMPTS = 3
 UPDATE_MIN_INTERVAL_SECONDS = 0.2
@@ -257,6 +263,7 @@ def create_app(
     app[OPERATIONS_HERMES_ROOT_KEY] = resolve_operations_hermes_root(
         operations_hermes_root, config_path=operations_config
     )
+    app[MEDIA_HOME_FROM_ENV_FILE_KEY] = read_env_file_hermes_home(operations_env_file)
     app[OPERATIONS_DELIVERIES_KEY] = {}
     if valid_transport_root:
         app[OPERATIONS_TRANSPORT_ROOT_KEY] = operations_transport_root_secret
@@ -2139,9 +2146,10 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
         except Exception as exc:
             media_kind = "clarify" if event.event == "interaction.requested" else "card"
             logger.warning(
-                "%s media upload failed: %s",
+                "%s media upload failed: %s: %s",
                 media_kind,
                 exc.__class__.__name__,
+                exc,
             )
             metrics.events_rejected += 1
             return web.json_response(
@@ -2516,7 +2524,13 @@ async def _prepare_event_media(
     if len(raw_paths) > MAX_CARD_MEDIA_IMAGES:
         raise ValueError("too many card media images")
 
-    hermes_home = os.environ.get("HERMES_HOME", "").strip()
+    # 媒体白名单根是数据/工作区根（HERMES_HOME），而不是 Hermes 源码安装
+    # 目录：sidecar 进程环境缺 HERMES_HOME 时回退到 env 文件里的值，最后
+    # 才落到 operations root 保底。
+    hermes_home = (
+        os.environ.get("HERMES_HOME", "").strip()
+        or app[MEDIA_HOME_FROM_ENV_FILE_KEY]
+    )
     allowed_root = (
         Path(hermes_home).expanduser().resolve()
         if hermes_home

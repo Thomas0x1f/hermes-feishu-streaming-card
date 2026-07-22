@@ -5110,6 +5110,46 @@ async def test_completed_media_reuses_preuploaded_image_key_and_renders_once(
     assert serialized.count("![生成图片](img_v2_1)") == 1
 
 
+async def test_clarify_media_allows_workspace_under_env_file_hermes_home(
+    tmp_path, monkeypatch
+):
+    """sidecar 进程环境缺 HERMES_HOME 时，媒体白名单根回退到 env 文件里的值。"""
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"HERMES_HOME={tmp_path}\n", encoding="utf-8")
+    image_path = tmp_path / "workspace" / "water_sign_r2.png"
+    image_path.parent.mkdir()
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nimage-bytes")
+
+    feishu_client = FakeFeishuClient()
+    app = create_app(feishu_client, operations_env_file=env_file)
+    test_client = TestClient(TestServer(app))
+    await test_client.start_server()
+    try:
+        await test_client.post("/events", json=event_payload("message.started", 0))
+        requested = await test_client.post(
+            "/events",
+            json=event_payload(
+                "interaction.requested",
+                1,
+                {
+                    "interaction_id": "water-sign-r2",
+                    "kind": "clarify",
+                    "prompt": "请确认水牌 r2",
+                    "options": [{"label": "接受", "value": "accept"}],
+                    "media_paths": [str(image_path)],
+                },
+            ),
+        )
+        requested_body = await requested.json()
+    finally:
+        await test_client.close()
+
+    assert requested.status == 200
+    assert requested_body["applied"] is True
+    assert feishu_client.uploaded_images == [str(image_path.resolve())]
+
+
 async def test_unrelated_clarify_does_not_render_preuploaded_running_media(
     client, monkeypatch, tmp_path
 ):

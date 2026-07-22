@@ -172,6 +172,13 @@ def resolve_operations_hermes_root(
     return Path.home() / ".hermes" / "hermes-agent"
 
 
+def read_env_file_hermes_home(env_file: str | Path | None) -> str:
+    """Read HERMES_HOME from an env file for callers whose process env lacks it."""
+    if env_file is None:
+        return ""
+    return _read_dotenv(Path(env_file).expanduser()).get("HERMES_HOME", "").strip()
+
+
 def load_config(
     path: str | Path,
     *,
