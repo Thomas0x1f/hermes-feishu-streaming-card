@@ -4743,6 +4743,10 @@ _HFC_MULTI_SELECT_UNAVAILABLE = (
 _HFC_CLARIFY_MEDIA_UNAVAILABLE = (
     "[hfc clarify media unavailable; do not confirm media the user could not see]"
 )
+_HFC_CLARIFY_TIMEOUT = (
+    "[hfc clarify timed out with no user response; the card (including any media) "
+    "was delivered — re-ask when appropriate, do not report a media failure]"
+)
 _HFC_CLARIFY_IMAGE_EXTENSIONS = {
     ".bmp",
     ".gif",
@@ -5006,6 +5010,10 @@ def request_clarify_response_from_hermes_locals(
                 return json.dumps(values, ensure_ascii=False) if values else None
         choice = str(result.get("choice") or "").strip()
         return choice or None
+    if isinstance(result, dict) and result.get("status") == "timeout":
+        # 超时是"人没回"，不是"图挂了"——卡片（含媒体）已成功投递，
+        # 不能落进下面的 media unavailable 兜底造成误报。
+        return _HFC_CLARIFY_TIMEOUT
     if media_paths:
         return _HFC_CLARIFY_MEDIA_UNAVAILABLE
     if is_multi_select:

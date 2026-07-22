@@ -5217,6 +5217,55 @@ def test_clarify_uses_hermes_media_parser_and_forwards_safe_image(monkeypatch):
     assert captured["media_paths"] == ["/opt/data/workspace/master.png"]
 
 
+def test_clarify_timeout_with_media_reports_timeout_not_media_failure(monkeypatch):
+    class OfficialMediaAdapter:
+        @staticmethod
+        def extract_media(content):
+            return [("/opt/data/workspace/master.png", False)], "请确认主视觉"
+
+        @staticmethod
+        def filter_media_delivery_paths(media_files):
+            return media_files
+
+    monkeypatch.setattr(
+        hook_runtime,
+        "request_interaction_from_hermes_locals",
+        lambda local_vars, **kwargs: {
+            "ok": False,
+            "status": "timeout",
+            "interaction_id": "visual-2",
+        },
+    )
+
+    result = hook_runtime.request_clarify_response_from_hermes_locals(
+        {"_hfc_status_adapter": OfficialMediaAdapter()},
+        interaction_id="visual-2",
+        question="请确认主视觉\nMEDIA:/opt/data/workspace/master.png",
+        choices=["确认", "修改"],
+    )
+
+    # 超时是"人没回"，绝不能被当成"媒体加载失败"上报给 agent。
+    assert result == hook_runtime._HFC_CLARIFY_TIMEOUT
+    assert result != hook_runtime._HFC_CLARIFY_MEDIA_UNAVAILABLE
+
+
+def test_clarify_timeout_without_media_reports_timeout(monkeypatch):
+    monkeypatch.setattr(
+        hook_runtime,
+        "request_interaction_from_hermes_locals",
+        lambda local_vars, **kwargs: {"ok": False, "status": "timeout"},
+    )
+
+    result = hook_runtime.request_clarify_response_from_hermes_locals(
+        {},
+        interaction_id="plain-1",
+        question="请选择城市",
+        choices=["北京", "天津"],
+    )
+
+    assert result == hook_runtime._HFC_CLARIFY_TIMEOUT
+
+
 def test_clarify_media_waits_for_a_slow_delivery_ack(monkeypatch):
     captured = {}
 
