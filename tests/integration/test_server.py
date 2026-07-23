@@ -133,10 +133,8 @@ class FakeFeishuClient:
     def __init__(self):
         self.sent = []
         self.updated = []
-        self.deleted = []
         self.uploaded_images = []
         self.fail_send = False
-        self.fail_delete = False
         self.send_delay = 0.0
         self.update_failures_remaining = 0
         self.update_error_message = "update unavailable"
@@ -157,11 +155,6 @@ class FakeFeishuClient:
             self.update_failures_remaining -= 1
             raise RuntimeError(self.update_error_message)
         self.updated.append((message_id, card))
-
-    async def delete_message(self, message_id):
-        if self.fail_delete:
-            raise RuntimeError("delete unavailable")
-        self.deleted.append(message_id)
 
     async def upload_image(self, image_path):
         self.uploaded_images.append(str(image_path))
@@ -8304,25 +8297,7 @@ async def test_conversation_bumped_recreates_card_at_bottom(client):
     assert (await resp.json())["ok"] is True
     assert len(feishu_client.sent) == 2
 
-    # The displaced card is recalled outright.
-    for _ in range(100):
-        if "feishu-message-1" in feishu_client.deleted:
-            break
-        await asyncio.sleep(0.02)
-    assert "feishu-message-1" in feishu_client.deleted
-
-
-async def test_displaced_card_recall_failure_falls_back_to_pointer(client):
-    test_client, feishu_client = client
-    feishu_client.fail_delete = True
-    await test_client.post("/events", json=event_payload("message.started", 0))
-    await test_client.post(
-        "/conversation/bumped", json={"chat_id": "oc_abc"}
-    )
-    await test_client.post(
-        "/events",
-        json=event_payload("message.completed", 1, {"answer": "done"}),
-    )
+    # The displaced card eventually receives the retire pointer patch.
     retired = []
     for _ in range(100):
         retired = [
@@ -8333,7 +8308,7 @@ async def test_displaced_card_recall_failure_falls_back_to_pointer(client):
         if retired:
             break
         await asyncio.sleep(0.02)
-    assert retired, "recall failure should fall back to a pointer patch"
+    assert retired, "displaced card should be retired with a pointer patch"
     assert "已移至下方" in json.dumps(retired[-1], ensure_ascii=False)
 
 
@@ -8383,12 +8358,19 @@ async def test_outbound_bump_rebottoms_completed_card(client, monkeypatch):
         await asyncio.sleep(0.02)
     assert len(feishu_client.sent) == 2
 
-    # 旧终态卡直接撤回，不留指针。
+    # 旧终态卡换成灰色指针小卡。
+    retired = []
     for _ in range(100):
-        if "feishu-message-1" in feishu_client.deleted:
+        retired = [
+            card
+            for message_id, card in feishu_client.updated
+            if message_id == "feishu-message-1"
+        ]
+        if retired:
             break
         await asyncio.sleep(0.02)
-    assert "feishu-message-1" in feishu_client.deleted
+    assert retired, "displaced card should be retired with a pointer patch"
+    assert "已移至下方" in json.dumps(retired[-1], ensure_ascii=False)
 
 
 async def test_new_session_retires_older_completed_card(client):
@@ -8410,7 +8392,7 @@ async def test_new_session_retires_older_completed_card(client):
     assert (await resp.json())["displaced"] == 1
 
 
-async def test_conversation_bumped_recreates_immediately_without_new_event(
+async def test_streaming_bump_defers_recreate_until_attention_moment(
     client, monkeypatch
 ):
     monkeypatch.setattr(sidecar_server, "_RECREATE_DEBOUNCE_SECONDS", 0.05)
@@ -8418,32 +8400,69 @@ async def test_conversation_bumped_recreates_immediately_without_new_event(
     await test_client.post("/events", json=event_payload("message.started", 0))
     assert len(feishu_client.sent) == 1
 
+    # 流式中途被顶开：只打标记，不立即重建。
     resp = await test_client.post(
         "/conversation/bumped", json={"chat_id": "oc_abc"}
     )
     assert (await resp.json())["displaced"] == 1
+    await asyncio.sleep(0.15)
+    assert len(feishu_client.sent) == 1
 
-    # No further events: the re-create task fired by the bump endpoint alone
-    # must send the fresh bottom card.
-    for _ in range(100):
-        if len(feishu_client.sent) >= 2:
-            break
-        await asyncio.sleep(0.02)
+    # 流式增量不是注意时刻，仍不置底。
+    await test_client.post(
+        "/events", json=event_payload("answer.delta", 1, {"answer": "hi"})
+    )
+    await asyncio.sleep(0.05)
+    assert len(feishu_client.sent) == 1
+
+    # 消息完成是注意时刻：此刻才在底部重建。
+    await test_client.post(
+        "/events", json=event_payload("message.completed", 2, {"answer": "done"})
+    )
     assert len(feishu_client.sent) == 2
 
 
-async def test_conversation_bump_bursts_coalesce_into_one_recreate(
+async def test_clarify_is_an_attention_moment_for_rebottom(client):
+    test_client, feishu_client = client
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    assert len(feishu_client.sent) == 1
+
+    await test_client.post("/conversation/bumped", json={"chat_id": "oc_abc"})
+
+    # clarify（等待用户选择）也是注意时刻：置底重建。
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            1,
+            {
+                "interaction_id": "pick-1",
+                "kind": "select",
+                "prompt": "选哪个？",
+                "options": [{"label": "A", "value": "a"}],
+            },
+        ),
+    )
+    assert len(feishu_client.sent) == 2
+
+
+async def test_outbound_bump_bursts_coalesce_into_one_recreate(
     client, monkeypatch
 ):
     monkeypatch.setattr(sidecar_server, "_RECREATE_DEBOUNCE_SECONDS", 0.15)
     test_client, feishu_client = client
     await test_client.post("/events", json=event_payload("message.started", 0))
+    await test_client.post(
+        "/events", json=event_payload("message.completed", 1, {"answer": "done"})
+    )
     assert len(feishu_client.sent) == 1
 
-    # A bot turn firing several messages back-to-back bumps repeatedly;
-    # the debounce must coalesce them into a single re-create.
+    # 一轮机器人回复连发数条消息（回执+附件），逐条 bump 终态卡；
+    # 防抖必须把它们合并成一次底部重建。
     for _ in range(4):
-        await test_client.post("/conversation/bumped", json={"chat_id": "oc_abc"})
+        await test_client.post(
+            "/conversation/bumped", json={"chat_id": "oc_abc", "source": "outbound"}
+        )
         await asyncio.sleep(0.02)
     await asyncio.sleep(0.4)
     assert len(feishu_client.sent) == 2

@@ -1803,6 +1803,7 @@ async def _conversation_bumped(request: web.Request) -> web.Response:
     source = str(payload.get("source") or "inbound").strip().lower()
     sessions: Dict[str, CardSession] = request.app[SESSIONS_KEY]
     displaced_keys: list[str] = []
+    recreate_keys: list[str] = []
     for key, session in sessions.items():
         if session.chat_id != chat_id:
             continue
@@ -1810,7 +1811,8 @@ async def _conversation_bumped(request: web.Request) -> web.Response:
             # Terminal cards: outbound messages (receipts, delivery files)
             # still push the final card back to the bottom; once the user
             # speaks again the card is history and must not chase the new
-            # message downward.
+            # message downward.  No further render will come, so re-create
+            # on a debounce right here.
             if session.bump_retired:
                 continue
             if source != "outbound":
@@ -1818,16 +1820,19 @@ async def _conversation_bumped(request: web.Request) -> web.Response:
                 continue
             session.displaced = True
             displaced_keys.append(key)
+            recreate_keys.append(key)
             continue
+        # Streaming cards only get flagged; the re-create happens at the
+        # next completion or clarify render, not mid-stream.
         if not session.displaced:
             session.displaced = True
         displaced_keys.append(key)
-    # Re-create displaced cards after a short debounce: a bot turn often
-    # lands several messages back-to-back (a receipt plus attachments), and
-    # each fires a bump — coalesce them into one re-create at the tail so
+    # Re-create displaced terminal cards after a short debounce: a bot turn
+    # often lands several messages back-to-back (a receipt plus attachments),
+    # and each fires a bump — coalesce them into one re-create at the tail so
     # the card drops below the last message instead of thrashing.
     debounce: Dict[str, asyncio.Task] = request.app[RECREATE_DEBOUNCE_KEY]
-    for key in displaced_keys:
+    for key in recreate_keys:
         pending = debounce.get(key)
         if pending is not None and not pending.done():
             continue
@@ -1915,14 +1920,7 @@ async def _recreate_card_at_bottom(
 async def _retire_displaced_card(
     app: web.Application, message_id: str, bot_id: str | None
 ) -> None:
-    """Recall a displaced card; fall back to a pointer patch if recall fails."""
-    try:
-        await _client_for_bot(app, bot_id).delete_message(message_id)
-        return
-    except Exception:
-        logger.warning(
-            "displaced card recall failed; patching pointer instead", exc_info=True
-        )
+    """Swap a displaced card for a small pointer to the re-created one."""
     card = {
         "schema": "2.0",
         "config": {"update_multi": True},
@@ -2684,7 +2682,13 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
             # A displaced re-create may have moved the live card since this
             # closure captured feishu_message_id — always patch the current one.
             target_message_id = feishu_message_ids.get(session_key) or feishu_message_id
-            if latest_session.displaced:
+            # 置底只在需要用户注意的时刻发生：终态（最终回答）或 clarify
+            # （等待用户选择）；流式中途被顶开只记 displaced，不跳卡。
+            if latest_session.displaced and (
+                is_terminal
+                or event.event == "interaction.requested"
+                or latest_session.status in {"completed", "failed"}
+            ):
                 recreated = await _recreate_card_at_bottom(
                     request.app,
                     session_key,
