@@ -4414,8 +4414,12 @@ async def _hfc_handle_feishu_card_action_event(self: Any, data: Any) -> None:
         await original(self, data)
 
 
-def _hfc_notify_conversation_bumped(chat_id: str) -> None:
-    """Tell the sidecar a new inbound message landed in ``chat_id``.
+def _hfc_notify_conversation_bumped(chat_id: str, source: str = "inbound") -> None:
+    """Tell the sidecar a new message landed in ``chat_id``.
+
+    ``source`` is "inbound" for user messages and "outbound" for bot-sent
+    messages (receipts, delivery files); the sidecar treats terminal cards
+    differently per source.
 
     Streaming cards still updating in that chat are now displaced (no longer
     the bottom-most message); the sidecar re-creates them at the bottom on
@@ -4428,7 +4432,9 @@ def _hfc_notify_conversation_bumped(chat_id: str) -> None:
         config = load_runtime_config()
         base = _summary_base_url(config.event_url)
         result = _post_json_sync_response(
-            f"{base}/conversation/bumped", {"chat_id": chat_id}, 2.0
+            f"{base}/conversation/bumped",
+            {"chat_id": chat_id, "source": source},
+            2.0,
         )
         displaced = result.get("displaced") if isinstance(result, dict) else "?"
         _hfc_warn(f"conversation bumped: displaced={displaced}")
@@ -4450,7 +4456,7 @@ async def _hfc_handle_message_event_data(self: Any, data: Any) -> Any:
     if chat_id and sender_type not in {"bot", "app"}:
         try:
             asyncio.get_running_loop().run_in_executor(
-                None, _hfc_notify_conversation_bumped, chat_id
+                None, _hfc_notify_conversation_bumped, chat_id, "inbound"
             )
         except Exception:
             pass
@@ -4491,7 +4497,7 @@ def _hfc_wrap_outbound_bump(adapter_type: type, method_name: str) -> None:
             success = bool(getattr(result, "success", True))
             if success and isinstance(chat_id, str) and chat_id.startswith("oc_"):
                 asyncio.get_running_loop().run_in_executor(
-                    None, _hfc_notify_conversation_bumped, chat_id
+                    None, _hfc_notify_conversation_bumped, chat_id, "outbound"
                 )
         except Exception:
             pass

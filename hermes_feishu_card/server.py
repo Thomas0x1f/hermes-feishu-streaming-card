@@ -1800,12 +1800,24 @@ async def _conversation_bumped(request: web.Request) -> web.Response:
         return web.json_response(
             {"ok": False, "error": "chat_id is required"}, status=400
         )
+    source = str(payload.get("source") or "inbound").strip().lower()
     sessions: Dict[str, CardSession] = request.app[SESSIONS_KEY]
     displaced_keys: list[str] = []
     for key, session in sessions.items():
         if session.chat_id != chat_id:
             continue
         if session.status in {"completed", "failed"}:
+            # Terminal cards: outbound messages (receipts, delivery files)
+            # still push the final card back to the bottom; once the user
+            # speaks again the card is history and must not chase the new
+            # message downward.
+            if session.bump_retired:
+                continue
+            if source != "outbound":
+                session.bump_retired = True
+                continue
+            session.displaced = True
+            displaced_keys.append(key)
             continue
         if not session.displaced:
             session.displaced = True
@@ -1823,7 +1835,7 @@ async def _conversation_bumped(request: web.Request) -> web.Response:
             _debounced_render_displaced(request.app, key)
         )
     logger.warning(
-        "conversation bumped: %d live session(s) displaced", len(displaced_keys)
+        "conversation bumped (%s): %d session(s) displaced", source, len(displaced_keys)
     )
     return web.json_response({"ok": True, "displaced": len(displaced_keys)})
 
@@ -1844,8 +1856,6 @@ async def _render_displaced_now(app: web.Application, session_key: str) -> None:
     sessions: Dict[str, CardSession] = app[SESSIONS_KEY]
     session = sessions.get(session_key)
     if session is None or not session.displaced:
-        return
-    if session.status in {"completed", "failed"}:
         return
     card = _render_session_card_for_app(app, session)
     bot_id = app[MESSAGE_BOT_IDS_KEY].get(session_key)
@@ -1905,7 +1915,14 @@ async def _recreate_card_at_bottom(
 async def _retire_displaced_card(
     app: web.Application, message_id: str, bot_id: str | None
 ) -> None:
-    """Swap a displaced card for a small pointer to the re-created one."""
+    """Recall a displaced card; fall back to a pointer patch if recall fails."""
+    try:
+        await _client_for_bot(app, bot_id).delete_message(message_id)
+        return
+    except Exception:
+        logger.warning(
+            "displaced card recall failed; patching pointer instead", exc_info=True
+        )
     card = {
         "schema": "2.0",
         "config": {"update_multi": True},
@@ -3667,9 +3684,12 @@ async def _abandon_stale_sessions_for_chat(
             continue
         if sess.chat_id != chat_id:
             continue
-        if sess.conversation_id != new_conversation_id:
-            continue
         if sess.status in {"completed", "failed"}:
+            # A new turn is opening its own card below — older terminal cards
+            # are history and must stop re-bottoming on outbound bumps.
+            sess.bump_retired = True
+            continue
+        if sess.conversation_id != new_conversation_id:
             continue
         if sess.delivery_kind == "notice":
             continue

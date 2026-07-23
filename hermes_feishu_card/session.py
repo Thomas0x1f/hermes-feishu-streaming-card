@@ -94,6 +94,9 @@ class CardSession:
     # The next render re-creates the card at the bottom instead of patching
     # the displaced one, so live updates always stay in view.
     displaced: bool = False
+    # Terminal cards stay eligible for outbound re-bottoms (delivery files,
+    # receipts) until the user speaks again or a newer turn opens its card.
+    bump_retired: bool = False
     reply_to_message_id: str = ""
     notice_title: str = ""
     notice_level: str = "info"

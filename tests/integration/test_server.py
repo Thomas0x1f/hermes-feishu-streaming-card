@@ -133,8 +133,10 @@ class FakeFeishuClient:
     def __init__(self):
         self.sent = []
         self.updated = []
+        self.deleted = []
         self.uploaded_images = []
         self.fail_send = False
+        self.fail_delete = False
         self.send_delay = 0.0
         self.update_failures_remaining = 0
         self.update_error_message = "update unavailable"
@@ -155,6 +157,11 @@ class FakeFeishuClient:
             self.update_failures_remaining -= 1
             raise RuntimeError(self.update_error_message)
         self.updated.append((message_id, card))
+
+    async def delete_message(self, message_id):
+        if self.fail_delete:
+            raise RuntimeError("delete unavailable")
+        self.deleted.append(message_id)
 
     async def upload_image(self, image_path):
         self.uploaded_images.append(str(image_path))
@@ -8297,7 +8304,25 @@ async def test_conversation_bumped_recreates_card_at_bottom(client):
     assert (await resp.json())["ok"] is True
     assert len(feishu_client.sent) == 2
 
-    # The displaced card eventually receives the retire pointer patch.
+    # The displaced card is recalled outright.
+    for _ in range(100):
+        if "feishu-message-1" in feishu_client.deleted:
+            break
+        await asyncio.sleep(0.02)
+    assert "feishu-message-1" in feishu_client.deleted
+
+
+async def test_displaced_card_recall_failure_falls_back_to_pointer(client):
+    test_client, feishu_client = client
+    feishu_client.fail_delete = True
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    await test_client.post(
+        "/conversation/bumped", json={"chat_id": "oc_abc"}
+    )
+    await test_client.post(
+        "/events",
+        json=event_payload("message.completed", 1, {"answer": "done"}),
+    )
     retired = []
     for _ in range(100):
         retired = [
@@ -8308,7 +8333,7 @@ async def test_conversation_bumped_recreates_card_at_bottom(client):
         if retired:
             break
         await asyncio.sleep(0.02)
-    assert retired, "displaced card should be retired with a pointer patch"
+    assert retired, "recall failure should fall back to a pointer patch"
     assert "已移至下方" in json.dumps(retired[-1], ensure_ascii=False)
 
 
@@ -8318,16 +8343,71 @@ async def test_conversation_bumped_rejects_missing_chat_id(client):
     assert resp.status == 400
 
 
-async def test_conversation_bumped_ignores_completed_sessions(client):
+async def test_inbound_bump_retires_completed_sessions(client):
     test_client, feishu_client = client
     await test_client.post("/events", json=event_payload("message.started", 0))
     await test_client.post(
         "/events", json=event_payload("message.completed", 1, {"answer": "x"})
     )
+    # 用户再次发言：终态卡退役，不置底。
     resp = await test_client.post(
-        "/conversation/bumped", json={"chat_id": "oc_abc"}
+        "/conversation/bumped", json={"chat_id": "oc_abc", "source": "inbound"}
     )
     assert (await resp.json())["displaced"] == 0
+    # 退役后连出站消息也不再把它顶下来。
+    resp = await test_client.post(
+        "/conversation/bumped", json={"chat_id": "oc_abc", "source": "outbound"}
+    )
+    assert (await resp.json())["displaced"] == 0
+    assert len(feishu_client.sent) == 1
+
+
+async def test_outbound_bump_rebottoms_completed_card(client, monkeypatch):
+    monkeypatch.setattr(sidecar_server, "_RECREATE_DEBOUNCE_SECONDS", 0.05)
+    test_client, feishu_client = client
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    await test_client.post(
+        "/events", json=event_payload("message.completed", 1, {"answer": "done"})
+    )
+    assert len(feishu_client.sent) == 1
+
+    # 出站消息（回执/交付文件）落在终态卡下方：卡片仍要置底重建。
+    resp = await test_client.post(
+        "/conversation/bumped", json={"chat_id": "oc_abc", "source": "outbound"}
+    )
+    assert (await resp.json())["displaced"] == 1
+
+    for _ in range(100):
+        if len(feishu_client.sent) >= 2:
+            break
+        await asyncio.sleep(0.02)
+    assert len(feishu_client.sent) == 2
+
+    # 旧终态卡直接撤回，不留指针。
+    for _ in range(100):
+        if "feishu-message-1" in feishu_client.deleted:
+            break
+        await asyncio.sleep(0.02)
+    assert "feishu-message-1" in feishu_client.deleted
+
+
+async def test_new_session_retires_older_completed_card(client):
+    test_client, feishu_client = client
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    await test_client.post(
+        "/events", json=event_payload("message.completed", 1, {"answer": "old"})
+    )
+    # 新一轮开卡：旧终态卡退役。
+    msg2 = {"conversation_id": "conversation-1", "message_id": "hermes-message-2"}
+    await test_client.post("/events", json=event_payload("message.started", 0, **msg2))
+    await test_client.post(
+        "/events", json=event_payload("message.completed", 1, {"answer": "new"}, **msg2)
+    )
+    # 出站 bump 只置底最新一轮的终态卡，旧卡不复活。
+    resp = await test_client.post(
+        "/conversation/bumped", json={"chat_id": "oc_abc", "source": "outbound"}
+    )
+    assert (await resp.json())["displaced"] == 1
 
 
 async def test_conversation_bumped_recreates_immediately_without_new_event(
