@@ -4414,6 +4414,94 @@ async def _hfc_handle_feishu_card_action_event(self: Any, data: Any) -> None:
         await original(self, data)
 
 
+def _hfc_notify_conversation_bumped(chat_id: str) -> None:
+    """Tell the sidecar a new inbound message landed in ``chat_id``.
+
+    Streaming cards still updating in that chat are now displaced (no longer
+    the bottom-most message); the sidecar re-creates them at the bottom on
+    their next render. Best effort — a missed bump only means the card keeps
+    patching in place.
+    """
+    if not chat_id:
+        return
+    try:
+        config = load_runtime_config()
+        base = _summary_base_url(config.event_url)
+        result = _post_json_sync_response(
+            f"{base}/conversation/bumped", {"chat_id": chat_id}, 2.0
+        )
+        displaced = result.get("displaced") if isinstance(result, dict) else "?"
+        _hfc_warn(f"conversation bumped: displaced={displaced}")
+    except Exception as exc:
+        _hfc_warn(f"conversation bump failed: {exc.__class__.__name__}: {exc}")
+
+
+async def _hfc_handle_message_event_data(self: Any, data: Any) -> Any:
+    """Wrapper for the Feishu adapter's inbound message handler.
+
+    Fires a conversation-bumped notification for non-bot senders, then
+    delegates to the original handler untouched.
+    """
+    event = getattr(data, "event", None)
+    message = getattr(event, "message", None)
+    sender = getattr(event, "sender", None)
+    chat_id = str(getattr(message, "chat_id", "") or "")
+    sender_type = str(getattr(sender, "sender_type", "") or "").lower()
+    if chat_id and sender_type not in {"bot", "app"}:
+        try:
+            asyncio.get_running_loop().run_in_executor(
+                None, _hfc_notify_conversation_bumped, chat_id
+            )
+        except Exception:
+            pass
+    original = getattr(type(self), "_hfc_original_handle_message_event_data", None)
+    if callable(original):
+        return await original(self, data)
+    return None
+
+
+_HFC_OUTBOUND_BUMP_METHODS = (
+    "send",
+    "send_image",
+    "send_image_file",
+    "send_document",
+    "send_video",
+    "send_voice",
+    "send_animation",
+)
+
+
+def _hfc_wrap_outbound_bump(adapter_type: type, method_name: str) -> None:
+    """Wrap an adapter outbound method to bump the chat after a send.
+
+    Bot-sent messages (receipts, MEDIA attachments, kanban notices) displace
+    a live streaming card just like user messages do; the sidecar coalesces
+    rapid bumps and re-creates the card below the newest message.
+    """
+    flag = f"_hfc_outbound_bump_wrapped_{method_name}"
+    if getattr(adapter_type, flag, False):
+        return
+    original = getattr(adapter_type, method_name, None)
+    if not callable(original):
+        return
+
+    async def _bump_after_send(self, chat_id, *args, __hfc_orig=original, **kwargs):
+        result = await __hfc_orig(self, chat_id, *args, **kwargs)
+        try:
+            success = bool(getattr(result, "success", True))
+            if success and isinstance(chat_id, str) and chat_id.startswith("oc_"):
+                asyncio.get_running_loop().run_in_executor(
+                    None, _hfc_notify_conversation_bumped, chat_id
+                )
+        except Exception:
+            pass
+        return result
+
+    _bump_after_send.__name__ = f"_hfc_bump_{method_name}"
+    setattr(adapter_type, method_name, _bump_after_send)
+    setattr(adapter_type, flag, True)
+
+
 def _hfc_refresh_feishu_event_handler(adapter: Any) -> bool:
     if getattr(adapter, "_hfc_command_card_event_handler_refreshed", False) or getattr(
         adapter,
@@ -4676,6 +4764,37 @@ def install_feishu_command_card_adapter_methods(runner: Any, event: Any = None) 
                     adapter_ready = True
             elif callable(getattr(adapter_type, "_handle_card_action_event", None)):
                 adapter_ready = True
+
+            current_msg_handler = adapter_type.__dict__.get(
+                "_handle_message_event_data"
+            )
+            if current_msg_handler is _hfc_handle_message_event_data:
+                setattr(adapter_type, "_hfc_inbound_bump_wrapped", True)
+            elif not getattr(adapter_type, "_hfc_inbound_bump_wrapped", False):
+                original_msg_handler = current_msg_handler or getattr(
+                    adapter_type, "_handle_message_event_data", None
+                )
+                if callable(original_msg_handler):
+                    setattr(
+                        adapter_type,
+                        "_hfc_original_handle_message_event_data",
+                        original_msg_handler,
+                    )
+                    setattr(
+                        adapter_type,
+                        "_handle_message_event_data",
+                        _hfc_handle_message_event_data,
+                    )
+                    setattr(adapter_type, "_hfc_inbound_bump_wrapped", True)
+                    _hfc_warn("inbound bump wrap installed on feishu adapter")
+                else:
+                    _hfc_warn(
+                        "inbound bump wrap skipped: _handle_message_event_data "
+                        "not found on adapter type"
+                    )
+
+            for _bump_method in _HFC_OUTBOUND_BUMP_METHODS:
+                _hfc_wrap_outbound_bump(adapter_type, _bump_method)
 
             current_send = adapter_type.__dict__.get("send")
             if current_send is _hfc_send_with_native_command_result_card:
@@ -5141,7 +5260,12 @@ def _send_lock(url: str, payload: dict[str, Any]) -> asyncio.Lock | None:
     message_id = payload.get("message_id")
     if not isinstance(message_id, str) or not message_id:
         return None
-    loop = asyncio.get_running_loop()
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # Called from a context without a running loop (gateway drain,
+        # cross-thread submit) — skip ordering and let the send proceed.
+        return None
     key = (id(loop), url, message_id)
     with _SEND_LOCKS_GUARD:
         lock = _SEND_LOCKS.get(key)
@@ -5159,7 +5283,14 @@ async def _post_json(url: str, payload: dict[str, Any], timeout: float) -> None:
         headers=_post_headers(url, body),
         method="POST",
     )
-    loop = asyncio.get_running_loop()
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop (loop teardown / cross-thread call): block inline
+        # so the notice still goes out instead of surfacing an uncertain
+        # delivery warning to the user.
+        _open_request(req, timeout)
+        return
     await loop.run_in_executor(None, _open_request, req, timeout)
 
 
@@ -5171,7 +5302,10 @@ async def _post_json_response(url: str, payload: dict[str, Any], timeout: float)
         headers=_post_headers(url, body),
         method="POST",
     )
-    loop = asyncio.get_running_loop()
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return _open_json_request(req, timeout)
     return await loop.run_in_executor(None, _open_json_request, req, timeout)
 
 
