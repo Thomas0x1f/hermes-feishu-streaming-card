@@ -158,11 +158,11 @@ class FeishuClient:
         if not isinstance(card, dict):
             raise TypeError("card must be a dict")
 
-        receive_id = chat_id
-        if thread_id and not reply_to_message_id:
-            receive_id = thread_id
+        # create 接口的 receive_id_type 没有 thread_id 取值（只有 open_id/
+        # union_id/user_id/email/chat_id，其余报 99992402）。发进话题必须走
+        # reply(reply_in_thread=true)；无锚点时退化为主聊天，而不是必败请求。
         return {
-            "receive_id": receive_id,
+            "receive_id": chat_id,
             "msg_type": "interactive",
             "content": json.dumps(card, ensure_ascii=False),
         }
@@ -228,12 +228,11 @@ class FeishuClient:
                         },
                     )
                 else:
-                    receive_id_type = "thread_id" if thread_id else "chat_id"
                     body = await self._request_json(
                         "POST",
                         "/im/v1/messages",
                         token=token,
-                        params={"receive_id_type": receive_id_type},
+                        params={"receive_id_type": "chat_id"},
                         json_body=payload,
                     )
                 data = body.get("data")

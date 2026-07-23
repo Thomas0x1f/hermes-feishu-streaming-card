@@ -59,6 +59,10 @@ FEISHU_CLIENT_KEY = web.AppKey("feishu_client", Any)
 SESSIONS_KEY = web.AppKey("sessions", dict)
 FEISHU_MESSAGE_IDS_KEY = web.AppKey("feishu_message_ids", dict)
 SESSION_ALIASES_KEY = web.AppKey("session_aliases", dict)
+# thread_id (omt_…) → 话题内最新真实消息 id（om_…）。create 接口没有
+# thread_id 这种 receive_id_type，发进话题只能对话题内锚点消息 reply。
+THREAD_ANCHORS_KEY = web.AppKey("thread_anchors", dict)
+_THREAD_ANCHOR_CAPACITY = 1024
 CARD_SUMMARIES_KEY = web.AppKey("card_summaries", dict)
 CARD_SUMMARY_SESSION_KEYS_KEY = web.AppKey("card_summary_session_keys", dict)
 INTERACTION_RESULTS_KEY = web.AppKey("interaction_results", dict)
@@ -204,6 +208,7 @@ def create_app(
     app[SESSIONS_KEY] = {}
     app[FEISHU_MESSAGE_IDS_KEY] = {}
     app[SESSION_ALIASES_KEY] = {}
+    app[THREAD_ANCHORS_KEY] = {}
     # TODO: replace this short-lived in-process index with bounded shared storage.
     app[CARD_SUMMARIES_KEY] = {}
     app[CARD_SUMMARY_SESSION_KEYS_KEY] = {}
@@ -2101,6 +2106,32 @@ def _thread_id_for_event(event: SidecarEvent) -> str | None:
     return None
 
 
+def _record_thread_anchor(
+    app: web.Application, thread_id: Any, message_id: Any
+) -> None:
+    if not (
+        isinstance(thread_id, str)
+        and thread_id.startswith("omt_")
+        and isinstance(message_id, str)
+        and message_id.startswith("om_")
+    ):
+        return
+    anchors: Dict[str, str] = app[THREAD_ANCHORS_KEY]
+    anchors.pop(thread_id, None)
+    anchors[thread_id] = message_id
+    while len(anchors) > _THREAD_ANCHOR_CAPACITY:
+        anchors.pop(next(iter(anchors)))
+
+
+def _thread_anchor(app: web.Application, thread_id: str | None) -> str | None:
+    if not thread_id:
+        return None
+    if thread_id.startswith("om_"):
+        # 回复链伪话题：id 本身就是可作锚点的消息 id。
+        return thread_id
+    return app[THREAD_ANCHORS_KEY].get(thread_id)
+
+
 def _reply_to_message_id_for_event(event: SidecarEvent) -> str | None:
     data = event.data if isinstance(event.data, dict) else {}
     reply_to = data.get("reply_to_message_id")
@@ -2129,6 +2160,9 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
     message_bot_ids: Dict[str, str] = request.app[MESSAGE_BOT_IDS_KEY]
     _record_profile_diagnostics(request.app, event)
     _record_attachment_diagnostics(request.app, event)
+    _record_thread_anchor(
+        request.app, _thread_id_for_event(event), event.message_id
+    )
     incoming_event = event
     session_key = _resolve_session_key(request.app, incoming_event)
     session = sessions.get(session_key)
@@ -3225,6 +3259,8 @@ async def _send_card_for_app(
 ) -> CardDeliveryResult:
     metrics: SidecarMetrics = app[METRICS_KEY]
     metrics.feishu_send_attempts += 1
+    if thread_id and not reply_to_message_id:
+        reply_to_message_id = _thread_anchor(app, thread_id)
     if app[NOOP_MODE_KEY]:
         result = CardDeliveryResult(
             message_id=None,
@@ -3302,6 +3338,7 @@ async def _send_card_for_app(
         return result
     metrics.feishu_send_retries += retry_count
     metrics.feishu_send_successes += 1
+    _record_thread_anchor(app, thread_id, message_id)
     return CardDeliveryResult(
         message_id=message_id,
         outcome="delivered",

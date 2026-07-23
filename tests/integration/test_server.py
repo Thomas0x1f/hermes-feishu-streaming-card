@@ -1228,6 +1228,41 @@ async def test_hfc_help_command_sends_read_only_diagnostic_card(client):
     assert "omt_secret_thread" not in content
 
 
+async def test_topic_wake_turn_card_replies_via_recorded_thread_anchor(client):
+    # kanban 唤醒回合的合成消息没有真实 om_ id，卡片必须回复此前话题内
+    # 记录的锚点消息，否则 create(receive_id_type=thread_id) 必败 99992402。
+    test_client, feishu_client = client
+
+    first = await test_client.post(
+        "/events",
+        json=event_payload(
+            "message.started",
+            0,
+            conversation_id="omt_topic",
+            message_id="om_real_user_msg",
+            thread_id="omt_topic",
+        ),
+    )
+    assert first.status == 200
+
+    wake = await test_client.post(
+        "/events",
+        json=event_payload(
+            "message.started",
+            0,
+            conversation_id="omt_topic",
+            message_id="hfc_wake_turn",
+            thread_id="omt_topic",
+        ),
+    )
+    assert wake.status == 200
+
+    assert len(feishu_client.sent) == 2
+    _, _, thread_id, reply_to_message_id = feishu_client.sent[1]
+    assert thread_id == "omt_topic"
+    assert reply_to_message_id == "om_real_user_msg"
+
+
 async def test_hfc_command_request_returns_before_slow_feishu_send():
     class BlockingFeishuClient(FakeFeishuClient):
         def __init__(self):

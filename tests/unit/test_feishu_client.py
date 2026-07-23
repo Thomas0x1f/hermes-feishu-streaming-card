@@ -144,6 +144,18 @@ def test_build_message_payload_keeps_chat_id_for_thread_reply_anchor():
     assert json.loads(payload["content"]) == card
 
 
+def test_build_message_payload_never_uses_thread_id_as_receive_id():
+    # create 接口没有 thread_id 这种 receive_id_type；无 reply 锚点时必须
+    # 退化为主聊天 chat_id，而不是发出必败（99992402）的请求。
+    cfg = FeishuClientConfig(app_id="cli_a", app_secret="sec")
+    client = FeishuClient(cfg)
+    card = {"schema": "2.0", "header": {"title": "hello"}}
+
+    payload = client.build_message_payload("oc_abc", card, thread_id="omt_thread")
+
+    assert payload["receive_id"] == "oc_abc"
+
+
 def test_build_message_payload_preserves_non_ascii_content():
     cfg = FeishuClientConfig(app_id="cli_a", app_secret="sec")
     client = FeishuClient(cfg)
