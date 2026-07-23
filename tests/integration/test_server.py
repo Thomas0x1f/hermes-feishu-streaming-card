@@ -8452,15 +8452,85 @@ async def test_clarify_interaction_not_hijacked_by_rebottom(client):
     rendered = json.dumps(feishu_client.updated[-1][1], ensure_ascii=False)
     assert "北京" in rendered
 
-    # displaced 保留：交互结束的终态才落底。
+    # clarify resolved（interaction.completed）时检测到 displaced 标记 → 立即
+    # 置底重建，搬到底部新卡（后台异步）。
     await test_client.post(
         "/events",
         json=event_payload("interaction.completed", 2, {"interaction_id": "pick-1"}),
     )
-    await test_client.post(
-        "/events", json=event_payload("message.completed", 3, {"answer": "好的"})
-    )
+    for _ in range(100):
+        if len(feishu_client.sent) >= 2:
+            break
+        await asyncio.sleep(0.02)
     assert len(feishu_client.sent) == 2
+
+
+async def test_new_message_then_completed_reopens_card_and_keeps_rendering(client):
+    # 通用规则：新消息进来给正在更新的卡打「等待置底」标记；遇到安全的特殊
+    # 事件（interaction.completed）时检测到标记 → 立即置底重建 → 接着在底部
+    # 新卡继续渲染后面的（下一个 clarify 的选项卡）。
+    test_client, feishu_client = client
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            1,
+            {
+                "interaction_id": "q1",
+                "kind": "select",
+                "prompt": "公司？",
+                "options": [{"label": "平安", "value": "pa"}],
+            },
+        ),
+    )
+    assert len(feishu_client.sent) == 1
+
+    # 新消息进来（用户直接在聊天回复）→ 打 displaced 标记。
+    await test_client.post(
+        "/conversation/bumped", json={"chat_id": "oc_abc", "source": "inbound"}
+    )
+
+    # 特殊事件 interaction.completed → 检测到 displaced → 置底重建（后台异步）。
+    await test_client.post(
+        "/events",
+        json=event_payload("interaction.completed", 2, {"interaction_id": "q1"}),
+    )
+    for _ in range(100):
+        if len(feishu_client.sent) >= 2:
+            break
+        await asyncio.sleep(0.02)
+    assert len(feishu_client.sent) == 2
+
+    # 接着渲染后面的：下一个 clarify 在底部新卡（feishu-message-2）渲染选项，
+    # 不再发新卡（旧卡只收到「已移至下方」灰指针）。
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            3,
+            {
+                "interaction_id": "q2",
+                "kind": "select",
+                "prompt": "城市？",
+                "options": [{"label": "深圳", "value": "sz"}],
+            },
+        ),
+    )
+    rendered = ""
+    for _ in range(100):
+        new_card_updates = [
+            card
+            for mid, card in feishu_client.updated
+            if mid == "feishu-message-2"
+        ]
+        if new_card_updates:
+            rendered = json.dumps(new_card_updates[-1], ensure_ascii=False)
+            if "深圳" in rendered:
+                break
+        await asyncio.sleep(0.02)
+    assert len(feishu_client.sent) == 2
+    assert "深圳" in rendered
 
 
 async def test_outbound_bump_bursts_coalesce_into_one_recreate(

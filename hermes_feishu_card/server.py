@@ -2687,14 +2687,18 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
             # A displaced re-create may have moved the live card since this
             # closure captured feishu_message_id — always patch the current one.
             target_message_id = feishu_message_ids.get(session_key) or feishu_message_id
-            # 置底只在终态（最终回答）触发。clarify 的 interaction.requested
-            # 绝不走置底重建——重建会短路正常的选项卡渲染/表单保护，导致
-            # 用户直接在聊天回复上一个 clarify（触发 inbound bump 把本卡标记
-            # displaced）后，下一个 clarify 的选项卡渲染错乱、卡住。交互期间
-            # displaced 标记保留，等交互结束的终态再落底。
-            if latest_session.displaced and (
-                is_terminal or latest_session.status in {"completed", "failed"}
-            ) and not event.event.startswith("interaction."):
+            # 置底时机：终态（最终回答），以及 clarify resolved/取消
+            # （interaction.completed/failed）——用户直接在聊天回复上一个
+            # clarify 会触发 inbound bump 把本卡标记 displaced，此刻就把卡搬到
+            # 底部建新卡，后续的下一个 clarify 在底部新卡上继续。
+            # interaction.requested（带选项的 clarify）绝不走置底重建：重建会
+            # 短路正常的选项卡渲染/表单保护导致卡住（新卡在 resolved 时已落底，
+            # 选项本就渲染在底部，无需再搬）。
+            if latest_session.displaced and event.event != "interaction.requested" and (
+                is_terminal
+                or latest_session.status in {"completed", "failed"}
+                or event.event in {"interaction.completed", "interaction.failed"}
+            ):
                 recreated = await _recreate_card_at_bottom(
                     request.app,
                     session_key,
