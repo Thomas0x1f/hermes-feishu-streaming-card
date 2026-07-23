@@ -6647,7 +6647,20 @@ def _terminal_fallback_cache_key(
         token_key = (key[0], key[1], created_at_lifecycle_token)
         if token_key in _ACTIVE_FALLBACK_MESSAGE_IDS:
             return token_key
-        if _active_fallback_cache_keys(key):
+        # token 精确匹配失败时区分两种情况：同族（都是 created_at 时间戳）
+        # 不匹配可能是并发的另一回合，保持忽略等待各自的终结事件；跨族
+        # （started 用 evt 身份/untokened、completed 用 created_at，如 kanban
+        # 唤醒回合）永远不可能自愈——此时若只有唯一活跃 fallback 会话就
+        # 收敛到它，否则终结事件被丢弃，卡片永不闭合，后续回合会一直
+        # 复用同一张卡。
+        active_keys = _active_fallback_cache_keys(key)
+        if (
+            len(active_keys) == 1
+            and _lifecycle_token_family(active_keys[0][2])
+            != _lifecycle_token_family(created_at_lifecycle_token)
+        ):
+            return active_keys[0]
+        if active_keys:
             return _AMBIGUOUS_TERMINAL
         return None
 
@@ -6657,6 +6670,16 @@ def _terminal_fallback_cache_key(
     if len(active_keys) > 1:
         return _AMBIGUOUS_TERMINAL
     return None
+
+
+def _lifecycle_token_family(token: str | None) -> str:
+    if token is None:
+        return "none"
+    if token.startswith("evt:"):
+        return "evt"
+    if token.startswith("untokened:"):
+        return "untokened"
+    return "ts"
 
 
 def _active_fallback_cache_key(

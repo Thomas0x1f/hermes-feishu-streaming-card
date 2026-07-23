@@ -604,6 +604,56 @@ def test_build_event_uses_gateway_event_message_id_for_card_lifecycle():
     assert second_completed["message_id"] == "om_second"
 
 
+def test_terminal_cross_family_token_closes_single_active_fallback_session():
+    # kanban 唤醒回合：started 无 created_at、用 evt 身份 token，completed
+    # 带完成时刻 created_at——跨族 token 永远对不上。终结事件必须收敛到
+    # 唯一活跃 fallback 会话并闭合它，否则卡片永不终结、后续回合复用同一张卡。
+    gateway_event = SimpleNamespace()
+    local_vars = {"chat_id": "oc_abc", "conversation_id": "conv_abc"}
+
+    started = hook_runtime.build_event(
+        "message.started", {**local_vars, "event": gateway_event}
+    )
+    completed = hook_runtime.build_event(
+        "message.completed", {**local_vars, "created_at": 105.5}
+    )
+
+    assert started is not None
+    assert completed is not None
+    assert completed["message_id"] == started["message_id"]
+
+    # 会话已闭合：下一回合应开新卡，而不是复用上一张。
+    next_started = hook_runtime.build_event(
+        "message.started", {**local_vars, "event": SimpleNamespace()}
+    )
+    assert next_started["message_id"] != started["message_id"]
+
+
+def test_terminal_same_family_token_mismatch_still_ignored():
+    # 同族（都是 created_at）不匹配可能是并发的另一回合，保持旧语义忽略。
+    local_vars = {"chat_id": "oc_abc", "conversation_id": "conv_abc"}
+
+    hook_runtime.build_event("message.started", {**local_vars, "created_at": 100.0})
+
+    completed = hook_runtime.build_event(
+        "message.completed", {**local_vars, "created_at": 105.5}
+    )
+    assert completed is None
+
+
+def test_terminal_cross_family_token_stays_ambiguous_with_multiple_actives():
+    local_vars = {"chat_id": "oc_abc", "conversation_id": "conv_abc"}
+
+    event_a, event_b = SimpleNamespace(), SimpleNamespace()
+    hook_runtime.build_event("message.started", {**local_vars, "event": event_a})
+    hook_runtime.build_event("message.started", {**local_vars, "event": event_b})
+
+    completed = hook_runtime.build_event(
+        "message.completed", {**local_vars, "created_at": 105.5}
+    )
+    assert completed is None
+
+
 def test_build_event_uses_event_message_id_from_hermes_run_agent_started_hook():
     payload = hook_runtime.build_event(
         "message.started",
