@@ -1801,11 +1801,22 @@ async def _conversation_bumped(request: web.Request) -> web.Response:
             {"ok": False, "error": "chat_id is required"}, status=400
         )
     source = str(payload.get("source") or "inbound").strip().lower()
+    # 话题群里全群共享 chat_id：入站带 omt_ 话题号，出站带 om_ 回复锚点。
+    # 有其一即把置底限定在同一话题内，避免同群别的话题误顶本卡。
+    bump_thread = str(payload.get("thread_id") or "").strip()
+    bump_reply = str(payload.get("reply_to") or "").strip()
+    scoped = bool(bump_thread or bump_reply)
     sessions: Dict[str, CardSession] = request.app[SESSIONS_KEY]
     displaced_keys: list[str] = []
     recreate_keys: list[str] = []
     for key, session in sessions.items():
         if session.chat_id != chat_id:
+            continue
+        # 仅对"属于某话题"的卡做话题匹配；非话题卡（私聊/普通群）不受影响。
+        if scoped and session.thread_id and not (
+            (bump_thread and session.thread_id == bump_thread)
+            or (bump_reply and session.reply_to_message_id == bump_reply)
+        ):
             continue
         if session.status in {"completed", "failed"}:
             # Terminal cards: outbound messages (receipts, delivery files)
@@ -1840,7 +1851,10 @@ async def _conversation_bumped(request: web.Request) -> web.Response:
             _debounced_render_displaced(request.app, key)
         )
     logger.warning(
-        "conversation bumped (%s): %d session(s) displaced", source, len(displaced_keys)
+        "conversation bumped (%s, scoped=%s): %d session(s) displaced",
+        source,
+        scoped,
+        len(displaced_keys),
     )
     return web.json_response({"ok": True, "displaced": len(displaced_keys)})
 
@@ -2420,6 +2434,7 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
             conversation_id=event.conversation_id,
             message_id=event.message_id,
             chat_id=event.chat_id,
+            thread_id=_thread_id_for_event(event) or "",
         )
         sessions[session_key] = session
         applied = session.apply(event)
@@ -2511,6 +2526,7 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                 conversation_id=event.conversation_id,
                 message_id=event.message_id,
                 chat_id=event.chat_id,
+                thread_id=_thread_id_for_event(event) or "",
             )
             sessions[session_key] = session
             applied = session.apply(event)

@@ -90,6 +90,9 @@ class CardSession:
     media_image_keys: list[str] = field(default_factory=list)
     active_interaction: InteractionState | None = None
     delivery_kind: str = "chat"
+    # 话题群/回复链所属话题（omt_ 真话题或 om_ 回复链根）。用于把置底
+    # 检测限定在同一话题内，避免同群其它话题的消息误顶本卡。
+    thread_id: str = ""
     # Set when a newer message landed below the streaming card in the chat.
     # The next render re-creates the card at the bottom instead of patching
     # the displaced one, so live updates always stay in view.

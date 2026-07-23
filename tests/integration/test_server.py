@@ -8466,3 +8466,97 @@ async def test_outbound_bump_bursts_coalesce_into_one_recreate(
         await asyncio.sleep(0.02)
     await asyncio.sleep(0.4)
     assert len(feishu_client.sent) == 2
+
+
+async def test_inbound_bump_scoped_to_thread(client):
+    test_client, feishu_client = client
+    # 同一话题群（chat_id 共享），话题 A / B 各一张流式卡。
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "message.started", 0,
+            message_id="om_a1", thread_id="omt_a", conversation_id="omt_a",
+        ),
+    )
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "message.started", 0,
+            message_id="om_b1", thread_id="omt_b", conversation_id="omt_b",
+        ),
+    )
+    assert len(feishu_client.sent) == 2
+
+    # 话题 B 来了用户新消息：只顶话题 B 的卡。
+    resp = await test_client.post(
+        "/conversation/bumped",
+        json={"chat_id": "oc_abc", "source": "inbound", "thread_id": "omt_b"},
+    )
+    assert (await resp.json())["displaced"] == 1
+
+    # 话题 A 完成：没被顶，原地 patch，不新建。
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "message.completed", 1, {"answer": "a"},
+            message_id="om_a1", thread_id="omt_a", conversation_id="omt_a",
+        ),
+    )
+    assert len(feishu_client.sent) == 2
+    # 话题 B 完成：被顶过，置底新建。
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "message.completed", 1, {"answer": "b"},
+            message_id="om_b1", thread_id="omt_b", conversation_id="omt_b",
+        ),
+    )
+    assert len(feishu_client.sent) == 3
+
+
+async def test_outbound_bump_scoped_by_reply_to(client, monkeypatch):
+    monkeypatch.setattr(sidecar_server, "_RECREATE_DEBOUNCE_SECONDS", 0.05)
+    test_client, feishu_client = client
+    # 话题 A / B 各一张已完成卡。
+    for mid, th in (("om_a1", "omt_a"), ("om_b1", "omt_b")):
+        await test_client.post(
+            "/events",
+            json=event_payload(
+                "message.started", 0,
+                message_id=mid, thread_id=th, conversation_id=th,
+            ),
+        )
+        await test_client.post(
+            "/events",
+            json=event_payload(
+                "message.completed", 1, {"answer": "x"},
+                message_id=mid, thread_id=th, conversation_id=th,
+            ),
+        )
+    assert len(feishu_client.sent) == 2
+
+    # 机器人在话题 B 投递文件（回复 om_b1）：只置底话题 B 的终态卡。
+    resp = await test_client.post(
+        "/conversation/bumped",
+        json={"chat_id": "oc_abc", "source": "outbound", "reply_to": "om_b1"},
+    )
+    assert (await resp.json())["displaced"] == 1
+    for _ in range(100):
+        if len(feishu_client.sent) >= 3:
+            break
+        await asyncio.sleep(0.02)
+    assert len(feishu_client.sent) == 3
+    # 话题 A 的终态卡未被波及：不会有第 4 次发送。
+    await asyncio.sleep(0.1)
+    assert len(feishu_client.sent) == 3
+
+
+async def test_non_thread_session_ignores_thread_scope(client):
+    test_client, feishu_client = client
+    # 私聊/普通群：session 无 thread_id。
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    # 即便 bump 误带了某话题号，非话题卡仍照常被顶（维持原行为）。
+    resp = await test_client.post(
+        "/conversation/bumped", json={"chat_id": "oc_abc", "thread_id": "omt_zzz"}
+    )
+    assert (await resp.json())["displaced"] == 1
