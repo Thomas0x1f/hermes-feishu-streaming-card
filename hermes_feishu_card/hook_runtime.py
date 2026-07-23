@@ -4414,19 +4414,13 @@ async def _hfc_handle_feishu_card_action_event(self: Any, data: Any) -> None:
         await original(self, data)
 
 
-def _hfc_notify_conversation_bumped(
-    chat_id: str,
-    source: str = "inbound",
-    thread_id: str = "",
-    reply_to: str = "",
-) -> None:
+def _hfc_notify_conversation_bumped(chat_id: str, source: str = "inbound") -> None:
     """Tell the sidecar a new message landed in ``chat_id``.
 
     ``source`` is "inbound" for user messages and "outbound" for bot-sent
     messages (receipts, delivery files); the sidecar treats terminal cards
-    differently per source.  ``thread_id`` (omt_ topic id, inbound) and
-    ``reply_to`` (om_ anchor, outbound) scope the bump to a single topic in
-    a topic group so sibling topics are not re-bottomed by mistake.
+    differently per source.  Re-bottom is chat-scoped and stays in each
+    card's own context (private chat / group / topic) on re-create.
 
     Streaming cards still updating in that chat are now displaced (no longer
     the bottom-most message); the sidecar re-creates them at the bottom on
@@ -4440,12 +4434,7 @@ def _hfc_notify_conversation_bumped(
         base = _summary_base_url(config.event_url)
         result = _post_json_sync_response(
             f"{base}/conversation/bumped",
-            {
-                "chat_id": chat_id,
-                "source": source,
-                "thread_id": thread_id,
-                "reply_to": reply_to,
-            },
+            {"chat_id": chat_id, "source": source},
             2.0,
         )
         displaced = result.get("displaced") if isinstance(result, dict) else "?"
@@ -4464,16 +4453,11 @@ async def _hfc_handle_message_event_data(self: Any, data: Any) -> Any:
     message = getattr(event, "message", None)
     sender = getattr(event, "sender", None)
     chat_id = str(getattr(message, "chat_id", "") or "")
-    # 仅飞书真话题（omt_）参与话题隔离；私聊/普通群里的回复引用会带上
-    # 非话题的 root/parent 值，绝不能当话题，否则会把这些卡挡在置底之外。
-    thread_id = str(getattr(message, "thread_id", "") or "")
-    if not thread_id.startswith("omt_"):
-        thread_id = ""
     sender_type = str(getattr(sender, "sender_type", "") or "").lower()
     if chat_id and sender_type not in {"bot", "app"}:
         try:
             asyncio.get_running_loop().run_in_executor(
-                None, _hfc_notify_conversation_bumped, chat_id, "inbound", thread_id
+                None, _hfc_notify_conversation_bumped, chat_id, "inbound"
             )
         except Exception:
             pass
@@ -4492,22 +4476,6 @@ _HFC_OUTBOUND_BUMP_METHODS = (
     "send_voice",
     "send_animation",
 )
-
-
-def _hfc_reply_to_hint(args: tuple, kwargs: dict) -> str:
-    """Pull the outbound reply-to anchor (om_…) from a send call.
-
-    Prefer the ``reply_to`` keyword (how the gateway send path passes it);
-    fall back to scanning positional/keyword values for the first ``om_``
-    message id so per-method positional signatures don't break scoping.
-    """
-    candidate = kwargs.get("reply_to")
-    if isinstance(candidate, str) and candidate.startswith("om_"):
-        return candidate
-    for value in list(args) + list(kwargs.values()):
-        if isinstance(value, str) and value.startswith("om_"):
-            return value
-    return ""
 
 
 def _hfc_wrap_outbound_bump(adapter_type: type, method_name: str) -> None:
@@ -4529,14 +4497,8 @@ def _hfc_wrap_outbound_bump(adapter_type: type, method_name: str) -> None:
         try:
             success = bool(getattr(result, "success", True))
             if success and isinstance(chat_id, str) and chat_id.startswith("oc_"):
-                reply_to = _hfc_reply_to_hint(args, kwargs)
                 asyncio.get_running_loop().run_in_executor(
-                    None,
-                    _hfc_notify_conversation_bumped,
-                    chat_id,
-                    "outbound",
-                    "",
-                    reply_to,
+                    None, _hfc_notify_conversation_bumped, chat_id, "outbound"
                 )
         except Exception:
             pass

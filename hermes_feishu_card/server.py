@@ -1801,22 +1801,14 @@ async def _conversation_bumped(request: web.Request) -> web.Response:
             {"ok": False, "error": "chat_id is required"}, status=400
         )
     source = str(payload.get("source") or "inbound").strip().lower()
-    # 话题群里全群共享 chat_id：入站带 omt_ 话题号，出站带 om_ 回复锚点。
-    # 有其一即把置底限定在同一话题内，避免同群别的话题误顶本卡。
-    bump_thread = str(payload.get("thread_id") or "").strip()
-    bump_reply = str(payload.get("reply_to") or "").strip()
-    scoped = bool(bump_thread or bump_reply)
+    # 置底是朴素操作：卡所在 chat 有新消息，就把这张卡在它自己的上下文里
+    # 撤旧建新（重建时沿用卡自己的 chat_id/thread/reply_to，私聊建私聊、
+    # 群建群、话题建话题）。不做任何话题匹配/隔离。
     sessions: Dict[str, CardSession] = request.app[SESSIONS_KEY]
     displaced_keys: list[str] = []
     recreate_keys: list[str] = []
     for key, session in sessions.items():
         if session.chat_id != chat_id:
-            continue
-        # 仅对"属于某话题"的卡做话题匹配；非话题卡（私聊/普通群）不受影响。
-        if scoped and session.thread_id and not (
-            (bump_thread and session.thread_id == bump_thread)
-            or (bump_reply and session.reply_to_message_id == bump_reply)
-        ):
             continue
         if session.status in {"completed", "failed"}:
             # Terminal cards: outbound messages (receipts, delivery files)
@@ -1851,9 +1843,8 @@ async def _conversation_bumped(request: web.Request) -> web.Response:
             _debounced_render_displaced(request.app, key)
         )
     logger.warning(
-        "conversation bumped (%s, scoped=%s): %d session(s) displaced",
+        "conversation bumped (%s): %d session(s) displaced",
         source,
-        scoped,
         len(displaced_keys),
     )
     return web.json_response({"ok": True, "displaced": len(displaced_keys)})
@@ -2294,17 +2285,6 @@ def _thread_id_for_event(event: SidecarEvent) -> str | None:
     return None
 
 
-def _topic_thread_id_for_event(event: SidecarEvent) -> str:
-    """置底话题隔离用的话题号——仅认飞书真话题 ``omt_``。
-
-    私聊/普通群没有话题：它们的 conversation_id（≠ chat_id 的会话号）或
-    回复引用的 ``om_`` 锚点都不是话题，一律返回空串，让这些卡走全群级
-    置底、永不因话题不匹配被漏掉。真话题群（omt_）才参与跨话题隔离。
-    """
-    tid = _thread_id_for_event(event)
-    return tid if (tid and tid.startswith("omt_")) else ""
-
-
 def _record_thread_anchor(
     app: web.Application, thread_id: Any, message_id: Any
 ) -> None:
@@ -2445,7 +2425,6 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
             conversation_id=event.conversation_id,
             message_id=event.message_id,
             chat_id=event.chat_id,
-            thread_id=_topic_thread_id_for_event(event),
         )
         sessions[session_key] = session
         applied = session.apply(event)
@@ -2537,7 +2516,6 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                 conversation_id=event.conversation_id,
                 message_id=event.message_id,
                 chat_id=event.chat_id,
-                thread_id=_topic_thread_id_for_event(event),
             )
             sessions[session_key] = session
             applied = session.apply(event)
