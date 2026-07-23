@@ -8422,14 +8422,18 @@ async def test_streaming_bump_defers_recreate_until_attention_moment(
     assert len(feishu_client.sent) == 2
 
 
-async def test_clarify_is_an_attention_moment_for_rebottom(client):
+async def test_clarify_interaction_not_hijacked_by_rebottom(client):
+    # 用户直接在聊天回复上一个 clarify（触发 inbound bump 把本卡标记
+    # displaced）后，下一个 clarify 的 interaction.requested 绝不能被置底
+    # 重建劫持——必须在原位正常渲染出可点的选项卡，否则会卡住。
     test_client, feishu_client = client
     await test_client.post("/events", json=event_payload("message.started", 0))
     assert len(feishu_client.sent) == 1
 
-    await test_client.post("/conversation/bumped", json={"chat_id": "oc_abc"})
+    await test_client.post(
+        "/conversation/bumped", json={"chat_id": "oc_abc", "source": "inbound"}
+    )
 
-    # clarify（等待用户选择）也是注意时刻：置底重建。
     await test_client.post(
         "/events",
         json=event_payload(
@@ -8439,9 +8443,22 @@ async def test_clarify_is_an_attention_moment_for_rebottom(client):
                 "interaction_id": "pick-1",
                 "kind": "select",
                 "prompt": "选哪个？",
-                "options": [{"label": "A", "value": "a"}],
+                "options": [{"label": "北京", "value": "bj"}],
             },
         ),
+    )
+    # 不置底重建（不发新卡），选项卡在原位 PATCH 渲染出来。
+    assert len(feishu_client.sent) == 1
+    rendered = json.dumps(feishu_client.updated[-1][1], ensure_ascii=False)
+    assert "北京" in rendered
+
+    # displaced 保留：交互结束的终态才落底。
+    await test_client.post(
+        "/events",
+        json=event_payload("interaction.completed", 2, {"interaction_id": "pick-1"}),
+    )
+    await test_client.post(
+        "/events", json=event_payload("message.completed", 3, {"answer": "好的"})
     )
     assert len(feishu_client.sent) == 2
 

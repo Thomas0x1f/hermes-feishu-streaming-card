@@ -2687,13 +2687,14 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
             # A displaced re-create may have moved the live card since this
             # closure captured feishu_message_id — always patch the current one.
             target_message_id = feishu_message_ids.get(session_key) or feishu_message_id
-            # 置底只在需要用户注意的时刻发生：终态（最终回答）或 clarify
-            # （等待用户选择）；流式中途被顶开只记 displaced，不跳卡。
+            # 置底只在终态（最终回答）触发。clarify 的 interaction.requested
+            # 绝不走置底重建——重建会短路正常的选项卡渲染/表单保护，导致
+            # 用户直接在聊天回复上一个 clarify（触发 inbound bump 把本卡标记
+            # displaced）后，下一个 clarify 的选项卡渲染错乱、卡住。交互期间
+            # displaced 标记保留，等交互结束的终态再落底。
             if latest_session.displaced and (
-                is_terminal
-                or event.event == "interaction.requested"
-                or latest_session.status in {"completed", "failed"}
-            ):
+                is_terminal or latest_session.status in {"completed", "failed"}
+            ) and not event.event.startswith("interaction."):
                 recreated = await _recreate_card_at_bottom(
                     request.app,
                     session_key,
