@@ -4464,7 +4464,11 @@ async def _hfc_handle_message_event_data(self: Any, data: Any) -> Any:
     message = getattr(event, "message", None)
     sender = getattr(event, "sender", None)
     chat_id = str(getattr(message, "chat_id", "") or "")
+    # 仅飞书真话题（omt_）参与话题隔离；私聊/普通群里的回复引用会带上
+    # 非话题的 root/parent 值，绝不能当话题，否则会把这些卡挡在置底之外。
     thread_id = str(getattr(message, "thread_id", "") or "")
+    if not thread_id.startswith("omt_"):
+        thread_id = ""
     sender_type = str(getattr(sender, "sender_type", "") or "").lower()
     if chat_id and sender_type not in {"bot", "app"}:
         try:

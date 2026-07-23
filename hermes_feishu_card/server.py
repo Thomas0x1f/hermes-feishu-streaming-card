@@ -2294,6 +2294,17 @@ def _thread_id_for_event(event: SidecarEvent) -> str | None:
     return None
 
 
+def _topic_thread_id_for_event(event: SidecarEvent) -> str:
+    """置底话题隔离用的话题号——仅认飞书真话题 ``omt_``。
+
+    私聊/普通群没有话题：它们的 conversation_id（≠ chat_id 的会话号）或
+    回复引用的 ``om_`` 锚点都不是话题，一律返回空串，让这些卡走全群级
+    置底、永不因话题不匹配被漏掉。真话题群（omt_）才参与跨话题隔离。
+    """
+    tid = _thread_id_for_event(event)
+    return tid if (tid and tid.startswith("omt_")) else ""
+
+
 def _record_thread_anchor(
     app: web.Application, thread_id: Any, message_id: Any
 ) -> None:
@@ -2434,7 +2445,7 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
             conversation_id=event.conversation_id,
             message_id=event.message_id,
             chat_id=event.chat_id,
-            thread_id=_thread_id_for_event(event) or "",
+            thread_id=_topic_thread_id_for_event(event),
         )
         sessions[session_key] = session
         applied = session.apply(event)
@@ -2526,7 +2537,7 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                 conversation_id=event.conversation_id,
                 message_id=event.message_id,
                 chat_id=event.chat_id,
-                thread_id=_thread_id_for_event(event) or "",
+                thread_id=_topic_thread_id_for_event(event),
             )
             sessions[session_key] = session
             applied = session.apply(event)
@@ -2778,7 +2789,14 @@ async def _prepare_event_media(
     if not isinstance(raw_paths, list) or not raw_paths:
         return event
     if len(raw_paths) > MAX_CARD_MEDIA_IMAGES:
-        raise ValueError("too many card media images")
+        # 媒体超限不再整条拒绝（那会让 clarify/卡片彻底不展示）；截断到
+        # 上限，保证卡一定能出来。上游给纯文本 clarify 塞多图属其自身问题。
+        logger.warning(
+            "card media has %d images over limit %d; truncating to keep card visible",
+            len(raw_paths),
+            MAX_CARD_MEDIA_IMAGES,
+        )
+        raw_paths = raw_paths[:MAX_CARD_MEDIA_IMAGES]
 
     # 媒体白名单根是数据/工作区根（HERMES_HOME），而不是 Hermes 源码安装
     # 目录：sidecar 进程环境缺 HERMES_HOME 时回退到 env 文件里的值，最后

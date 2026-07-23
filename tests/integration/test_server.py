@@ -8560,3 +8560,77 @@ async def test_non_thread_session_ignores_thread_scope(client):
         "/conversation/bumped", json={"chat_id": "oc_abc", "thread_id": "omt_zzz"}
     )
     assert (await resp.json())["displaced"] == 1
+
+
+async def test_dm_conversation_id_never_pollutes_thread_scope(client):
+    # 私聊/普通群：conversation_id 是个 ≠ chat_id 的 om_ 会话号；它绝不能
+    # 被当成话题，否则带回复引用的入站消息会把卡挡在置底之外（真实回归）。
+    test_client, feishu_client = client
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "message.started", 0,
+            message_id="om_dm_msg1", conversation_id="om_dm_conv",
+        ),
+    )
+    assert len(feishu_client.sent) == 1
+
+    # 用户在私聊里回复引用某条消息，入站 bump 误带了 root/thread 值：仍须置底。
+    resp = await test_client.post(
+        "/conversation/bumped",
+        json={"chat_id": "oc_abc", "source": "inbound", "thread_id": "om_dm_conv"},
+    )
+    assert (await resp.json())["displaced"] == 1
+
+
+async def test_reply_chain_thread_id_not_treated_as_topic(client):
+    # om_ 回复链（伪话题）不参与话题隔离：私聊/普通群里照常全群置底。
+    test_client, feishu_client = client
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "message.started", 0,
+            message_id="om_root", thread_id="om_root", conversation_id="om_root",
+        ),
+    )
+    resp = await test_client.post(
+        "/conversation/bumped",
+        json={"chat_id": "oc_abc", "source": "inbound", "thread_id": "omt_other"},
+    )
+    # session.thread_id 为空（om_ 不算话题），bump 的 omt_ 不该把它挡掉。
+    assert (await resp.json())["displaced"] == 1
+
+
+async def test_over_limit_clarify_media_truncates_instead_of_rejecting(
+    client, monkeypatch, tmp_path
+):
+    # 媒体超限（>4 张）不再整条拒绝 clarify——卡片必须仍能展示出来。
+    test_client, feishu_client = client
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    imgs = []
+    for i in range(6):
+        p = workspace / f"m{i}.png"
+        p.write_bytes(b"\x89PNG\r\n\x1a\n" + bytes([i]))
+        imgs.append(str(p))
+
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    requested = await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            1,
+            {
+                "interaction_id": "vis-x",
+                "kind": "clarify",
+                "prompt": "开放日期是哪天？",
+                "media_paths": imgs,
+                "options": [{"label": "确认", "value": "ok"}],
+            },
+        ),
+    )
+    # 不再 502 拒绝；clarify 卡照常出来，只上传前 4 张。
+    assert requested.status == 200
+    assert (await requested.json())["ok"] is True
+    assert len(feishu_client.uploaded_images) == 4
