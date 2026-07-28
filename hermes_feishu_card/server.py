@@ -82,6 +82,7 @@ BOT_ROUTER_KEY = web.AppKey("bot_router", Any)
 ROUTING_DIAGNOSTICS_KEY = web.AppKey("routing_diagnostics", dict)
 PROFILE_DIAGNOSTICS_KEY = web.AppKey("profile_diagnostics", dict)
 PROCESS_TOKEN_KEY = web.AppKey("process_token", str)
+BOOT_NONCE_KEY = web.AppKey("boot_nonce", str)
 METRICS_KEY = web.AppKey("metrics", SidecarMetrics)
 NOOP_MODE_KEY = web.AppKey("noop_mode", bool)
 EVENT_AUTH_REQUIRED_KEY = web.AppKey("event_auth_required", bool)
@@ -227,6 +228,10 @@ def create_app(
     app[SESSION_CARD_CONFIGS_KEY] = {}
     app[BOT_ROUTER_KEY] = bot_router
     app[PROCESS_TOKEN_KEY] = process_token
+    # 掺入每次进程启动唯一的 nonce：delivery uuid 是确定性哈希，重启会把
+    # recreate_seq 归零，若不加盐，1 小时内重启后的发卡会被飞书 uuid 去重
+    # 成重启前的旧卡（返回已撤回的 message_id，后续 PATCH 全部 230011）。
+    app[BOOT_NONCE_KEY] = secrets.token_hex(8)
     app[METRICS_KEY] = SidecarMetrics()
     app[NOOP_MODE_KEY] = bool(noop_mode)
     app[EVENT_AUTH_REQUIRED_KEY] = bool(event_auth_required)
@@ -3760,7 +3765,7 @@ async def _send_card_for_app(
         bot_id=bot_id or "default",
         chat_id=chat_id,
         reply_to_message_id=reply_to_message_id or "",
-        session_key=delivery_key,
+        session_key=f"{app[BOOT_NONCE_KEY]}:{delivery_key}",
         delivery_kind=delivery_kind,
     )
     client = _client_for_bot(app, bot_id)

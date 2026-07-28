@@ -9076,6 +9076,34 @@ async def test_rebottom_survives_feishu_uuid_dedup():
         await test_client.close()
 
 
+async def test_sidecar_restart_survives_feishu_uuid_dedup():
+    # 回归：delivery uuid 是确定性哈希，sidecar 重启把 recreate_seq 归零，
+    # 去重窗口（约 1 小时）内重启后的发卡全部被飞书去重成重启前的旧卡
+    # （返回已撤回的 message_id，后续 PATCH 连环 230011）。每次进程启动
+    # 必须掺入唯一 nonce，重启后发卡不得与旧进程撞 uuid。
+    feishu_client = UuidDedupFeishuClient()
+    app = create_app(feishu_client)
+    test_client = TestClient(TestServer(app))
+    await test_client.start_server()
+    try:
+        await test_client.post("/events", json=event_payload("message.started", 0))
+        assert len(feishu_client.sent) == 1
+    finally:
+        await test_client.close()
+
+    # 模拟 sidecar 重启：新 app（内存清零），飞书侧去重索引仍在窗口内。
+    app2 = create_app(feishu_client)
+    test_client2 = TestClient(TestServer(app2))
+    await test_client2.start_server()
+    try:
+        await test_client2.post("/events", json=event_payload("message.started", 0))
+        # 必须真实新建消息，而不是去重返回重启前的旧卡 id。
+        assert len(feishu_client.sent) == 2
+        assert len(feishu_client.uuid_index) == 2
+    finally:
+        await test_client2.close()
+
+
 async def test_outbound_bump_bursts_coalesce_into_one_recreate(
     client, monkeypatch
 ):
