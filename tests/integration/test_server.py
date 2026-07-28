@@ -8607,6 +8607,68 @@ async def test_multi_clarify_chain_rebottoms_each_request_and_resolution(client)
     assert "深圳" in json.dumps(feishu_client.sent[-1][1], ensure_ascii=False)
 
 
+async def test_resolution_rebottom_survives_render_coalescing(client, monkeypatch):
+    # 回归：flush 合并只执行最新渲染闭包。resolved 后 agent 毫秒级恢复
+    # 输出时，interaction.completed 的闭包会被紧随的 answer.delta 顶掉
+    # ——置底/定格/分段一度因此丢失，"已选择"残留进后续新卡。副作用
+    # 现在由 session 待办标记驱动，被顶掉的闭包由顶替者补做。
+    test_client, feishu_client = client
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            1,
+            {
+                "interaction_id": "q1",
+                "kind": "select",
+                "prompt": "先做哪个？",
+                "options": [{"label": "方案A", "value": "a"}],
+            },
+        ),
+    )
+    await _wait_until(lambda: len(feishu_client.sent) == 2, attempts=300)
+
+    # resolved 与后续 delta 几乎同时到达：completed 的渲染闭包大概率被
+    # delta 的闭包合并顶掉。
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.completed",
+            2,
+            {"interaction_id": "q1", "choice": "a", "choice_label": "方案A"},
+        ),
+    )
+    await test_client.post(
+        "/events", json=event_payload("answer.delta", 3, {"text": "好的，开始执行"})
+    )
+
+    # 置底新卡仍然发生（由标记驱动，不依赖 completed 闭包存活）。
+    await _wait_until(lambda: len(feishu_client.sent) == 3, attempts=300)
+    # 旧卡定格为"已完成"快照，问答留存。
+    await _wait_until(
+        lambda: any(
+            mid == "feishu-message-2" and "已选择：方案A" in str(card)
+            for mid, card in feishu_client.updated
+        ),
+        attempts=300,
+    )
+    frozen = [
+        card for mid, card in feishu_client.updated if mid == "feishu-message-2"
+    ][-1]
+    assert frozen["header"]["template"] == "green"
+    # requested 与 resolved 成对渲染在同一张卡（feishu-message-2）上。
+    serialized_frozen = json.dumps(frozen, ensure_ascii=False)
+    assert "先做哪个" in serialized_frozen
+    assert "已选择：方案A" in serialized_frozen
+    # 新分段卡不含 clarify 问答，只有 resolved 之后的内容（resolved 后
+    # 已到达的 delta 不被分段重置吞掉，随重建 send 直接带出）。
+    new_segment = json.dumps(feishu_client.sent[-1][1], ensure_ascii=False)
+    assert "开始执行" in new_segment
+    assert "已选择" not in new_segment
+    assert "先做哪个" not in new_segment
+
+
 class UuidDedupFeishuClient(FakeFeishuClient):
     """模拟飞书 create message 的 uuid 幂等去重语义。
 

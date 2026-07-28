@@ -2755,6 +2755,29 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
     if applied and feishu_message_id is not None:
         if event_is_terminal:
             _store_card_summary(request.app, event, session, feishu_message_id)
+        # 置底待办标记（锁内）：渲染闭包会被 flush 合并只执行最新一个，
+        # clarify 发起/resolved 的置底、定格、分段不能依赖某个具体闭包
+        # 存活——打在 session 上，任何后续闭包执行时消费。
+        if session.delivery_kind == "chat":
+            if event.event == "interaction.requested":
+                # resolved 标记未消费时不覆盖：一次重建同时完成
+                # "定格旧问答 + 新卡渲染新选项"。
+                if session.pending_rebottom not in {"resolved", "cancelled"}:
+                    session.pending_rebottom = "requested"
+            elif event.event in {"interaction.completed", "interaction.failed"}:
+                # 定格快照与分段重置必须在此刻（锁内）完成：闭包异步执行
+                # 前 session 可能已推进——快照事后拍会拍错内容，分段事后
+                # 重置会把 resolved 之后已到达的增量一并清掉。
+                session.pending_rebottom = (
+                    "cancelled"
+                    if event.event == "interaction.failed"
+                    else "resolved"
+                )
+                session.pending_freeze_card = _completed_freeze_card(
+                    _render_session_card(request, session),
+                    failed=event.event == "interaction.failed",
+                )
+                session.reset_segment_after_interaction()
         is_terminal = event_is_terminal
         controller = _flush_controller_for_session(request.app, session_key)
         bot_id = message_bot_ids.get(session_key)
@@ -2777,46 +2800,34 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
             target_message_id = feishu_message_ids.get(session_key) or feishu_message_id
             # 置底时机（置底=撤旧建新；飞书只对新消息推送通知，PATCH 更新
             # 是静默的，置底是让用户收到通知的唯一手段）：
-            # - clarify 发起（interaction.requested）：无条件置底，用户收到
-            #   "等你选择"的推送。此刻表单还没有用户输入、无状态可丢；且重建
-            #   会立即清 displaced 标记，让 inbound bump 的防抖重建任务自动
-            #   失效，不再有 f4c224a 时代双重建竞争导致的选项卡错乱。
-            # - clarify resolved/取消（interaction.completed/failed）：无条件
-            #   置底，旧卡定格为"已选择：xxx"（freeze，不撤回不换指针），
-            #   每轮问答永久留在历史里，后续内容在底部新卡继续。
+            # - clarify 发起（pending_rebottom="requested"）：无条件置底，
+            #   用户收到"等你选择"的推送。
+            # - clarify resolved/取消（"resolved"/"cancelled"）：无条件置底，
+            #   旧卡定格为锁内预拍的"已完成"快照（问题+回答留存），session
+            #   分段重置，新卡只渲染 clarify 之后的内容。
             # - 终态（最终回答/失败）：无条件置底，用户收到"已完成"的推送。
-            # - 终态后补渲染：保持原状，仅被顶开（displaced）时置底。
+            # - 终态后补渲染：仅被顶开（displaced）时置底。
+            # 触发依据是 session 上的待办标记而不是本闭包捕获的 event——
+            # flush 合并只执行最新闭包，标记让副作用不随闭包被顶掉而丢失。
             # 无条件置底只针对主对话卡（chat）：notice/command 等辅助卡完成
             # 不值得为通知重建刷屏。
-            is_interaction_resolution = event.event in {
-                "interaction.completed",
-                "interaction.failed",
-            }
+            rebottom_reason = latest_session.pending_rebottom
             if (
                 (
                     latest_session.delivery_kind == "chat"
-                    and (
-                        event.event == "interaction.requested"
-                        or is_interaction_resolution
-                        or is_terminal
-                    )
+                    and (rebottom_reason or is_terminal)
                 )
                 or (
                     latest_session.displaced
                     and latest_session.status in {"completed", "failed"}
                 )
             ):
-                freeze_card = None
-                if is_interaction_resolution:
-                    # clarify resolved 分段：旧卡定格为"已完成"快照（问题
-                    # + 用户的回答），session 重置到新分段，新卡只渲染
-                    # clarify 之后的内容，不再重复携带问答。
-                    freeze_card = _completed_freeze_card(
-                        latest_card,
-                        failed=event.event == "interaction.failed",
-                    )
-                    latest_session.reset_segment_after_interaction()
-                    latest_card = _render_session_card(request, latest_session)
+                latest_session.pending_rebottom = ""
+                # clarify resolved 分段：快照与分段重置已在事件锁内完成，
+                # 这里只消费快照做定格；latest_card 即新分段渲染（含
+                # resolved 之后已到达的内容）。
+                freeze_card = latest_session.pending_freeze_card
+                latest_session.pending_freeze_card = None
                 recreated = await _recreate_card_at_bottom(
                     request.app,
                     session_key,

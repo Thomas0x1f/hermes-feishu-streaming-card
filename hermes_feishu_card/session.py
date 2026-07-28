@@ -99,6 +99,14 @@ class CardSession:
     # 首张卡的 message_id 且不更新内容——重建"成功"却没有新卡。每次重建
     # 递增序号让 uuid 唯一；单次发送内部的重试仍复用同一 uuid 保持幂等。
     recreate_seq: int = 0
+    # 待执行的置底原因（"requested"/"resolved"/"cancelled"）。渲染闭包会
+    # 被 flush 合并只执行最新一个，置底/定格/分段这类必须发生的副作用
+    # 不能挂在某个具体闭包上——事件处理时（锁内）打标记，任何后续闭包
+    # 执行时消费，闭包被顶掉也不丢副作用。
+    pending_rebottom: str = ""
+    # resolved 时刻（锁内）预渲染的定格快照。闭包异步执行时 session 可能
+    # 已推进（如下一个 clarify 已挂上），不能再事后渲染。
+    pending_freeze_card: dict | None = None
     # Terminal cards stay eligible for outbound re-bottoms (delivery files,
     # receipts) until the user speaks again or a newer turn opens its card.
     bump_retired: bool = False
@@ -356,7 +364,12 @@ class CardSession:
     def reset_segment_after_interaction(self) -> None:
         """clarify resolved 置底分段：问答定格在旧卡，新卡从 clarify 之后
         的内容重新开始渲染，不再携带之前的正文/时间线/工具记录。"""
-        self.active_interaction = None
+        # 已结束的交互随分段清除；若下一个 clarify 已经挂上（pending），
+        # 保留它让新卡渲染出选项。
+        if self.active_interaction is not None and (
+            self.active_interaction.status != "pending"
+        ):
+            self.active_interaction = None
         self.answer_text = ""
         self.thinking_text = ""
         self.answer_normalizer = StreamingTextNormalizer()
