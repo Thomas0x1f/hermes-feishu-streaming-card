@@ -8917,7 +8917,7 @@ async def test_rebottom_survives_feishu_uuid_dedup():
 
 
 async def test_sidecar_restart_survives_feishu_uuid_dedup():
-    # 回归：delivery uuid 是确定性哈希，sidecar 重启把 recreate_seq 归零，
+    # 回归：delivery uuid 是确定性哈希，sidecar 重启把 _RECREATE_SEQ 归零，
     # 去重窗口（约 1 小时）内重启后的发卡全部被飞书去重成重启前的旧卡
     # （返回已撤回的 message_id，后续 PATCH 连环 230011）。每次进程启动
     # 必须掺入唯一 nonce，重启后发卡不得与旧进程撞 uuid。
@@ -8942,6 +8942,65 @@ async def test_sidecar_restart_survives_feishu_uuid_dedup():
         assert len(feishu_client.uuid_index) == 2
     finally:
         await test_client2.close()
+
+
+async def test_rebottom_uuid_unique_for_sessions_merged_to_same_key():
+    # 回归（2026-07-28 生产事故）：同进程内先后两个 CardSession 经 alias
+    # 归并落到同一 session_key，per-session 重建序号各自从 1 起步会拼出
+    # 相同 delivery uuid，第二次重建被飞书幂等去重吞掉（send"成功"返回
+    # 第一张卡的 id）。重建序号必须进程级全局唯一。
+    feishu_client = UuidDedupFeishuClient()
+    app = create_app(feishu_client)
+    test_client = TestClient(TestServer(app))
+    await test_client.start_server()
+    card = {"schema": "2.0", "body": {"elements": []}}
+    try:
+        message_ids = []
+        for i in range(2):
+            session = CardSession("conversation-1", f"hermes-message-{i}", "oc_abc")
+            ok = await sidecar_server._recreate_card_at_bottom(
+                app,
+                "profile:merged-key",
+                session,
+                card,
+                None,
+                previous_message_id=None,
+            )
+            assert ok
+            message_ids.append(app[sidecar_server.FEISHU_MESSAGE_IDS_KEY]["profile:merged-key"])
+        # 两次重建必须是两条真实新消息，uuid 不得复用。
+        assert message_ids[0] != message_ids[1]
+        assert len(feishu_client.sent) == 2
+        assert len(feishu_client.uuid_index) == 2
+    finally:
+        await test_client.close()
+
+
+async def test_thread_rebottom_falls_back_to_previous_card_as_anchor():
+    # 回归：话题（omt_）内重建时锚点表（纯内存 + 容量淘汰）查不到锚点，
+    # 曾静默降级 create 发进群主流。旧卡自身一定在话题里，必须用它作
+    # reply 锚点把新卡留在话题内。
+    feishu_client = FakeFeishuClient()
+    app = create_app(feishu_client)
+    test_client = TestClient(TestServer(app))
+    await test_client.start_server()
+    try:
+        session = CardSession("conversation-1", "hermes-message-1", "oc_abc")
+        session.thread_id = "omt_topic1"
+        ok = await sidecar_server._recreate_card_at_bottom(
+            app,
+            "profile:threaded",
+            session,
+            {"schema": "2.0", "body": {"elements": []}},
+            None,
+            previous_message_id="om_prev_card",
+        )
+        assert ok
+        _, _, thread_id, reply_to = feishu_client.sent[-1]
+        assert thread_id == "omt_topic1"
+        assert reply_to == "om_prev_card"
+    finally:
+        await test_client.close()
 
 
 async def test_over_limit_clarify_media_truncates_instead_of_rejecting(

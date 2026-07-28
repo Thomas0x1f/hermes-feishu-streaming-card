@@ -5,6 +5,7 @@ from contextlib import suppress
 from concurrent.futures import Future, ThreadPoolExecutor
 import copy
 import hashlib
+import itertools
 import json
 import os
 from pathlib import Path
@@ -227,7 +228,7 @@ def create_app(
     app[BOT_ROUTER_KEY] = bot_router
     app[PROCESS_TOKEN_KEY] = process_token
     # 掺入每次进程启动唯一的 nonce：delivery uuid 是确定性哈希，重启会把
-    # recreate_seq 归零，若不加盐，1 小时内重启后的发卡会被飞书 uuid 去重
+    # _RECREATE_SEQ 归零，若不加盐，1 小时内重启后的发卡会被飞书 uuid 去重
     # 成重启前的旧卡（返回已撤回的 message_id，后续 PATCH 全部 230011）。
     app[BOOT_NONCE_KEY] = secrets.token_hex(8)
     app[METRICS_KEY] = SidecarMetrics()
@@ -1888,6 +1889,11 @@ async def _consume_pending_rebottom(
     return True
 
 
+# 置底重建全局序号：参与 delivery uuid，保证同进程内任意两次重建的 uuid
+# 不同（见 _recreate_card_at_bottom 内注释）。重启归零由 BOOT_NONCE 兜底。
+_RECREATE_SEQ = itertools.count(1)
+
+
 async def _recreate_card_at_bottom(
     app: web.Application,
     session_key: str,
@@ -1911,7 +1917,14 @@ async def _recreate_card_at_bottom(
     # delivery_key 必须每次重建都不同：飞书 create message 按 uuid 幂等
     # 去重（约 1 小时窗口），复用 session_key 会让重建被去重成第一张卡
     # ——send"成功"返回旧卡 id、内容不更新，选项卡/终态卡从未真正发出。
-    session.recreate_seq += 1
+    # 序号必须进程级全局：per-session 计数时，先后两个 CardSession 经
+    # alias 归并落到同一 session_key，会各自从 1 起步拼出相同 key 撞进
+    # 去重窗口（2026-07-28 生产事故）。
+    reply_anchor = session.reply_to_message_id or None
+    if not reply_anchor and session.thread_id:
+        # 话题内重建缺显式锚点时用旧卡自身作锚点：旧卡一定在该话题里，
+        # reply(reply_in_thread) 能把新卡留在话题内，不依赖易失的锚点表。
+        reply_anchor = previous_message_id or None
     delivery = await _send_card_for_app(
         app,
         session.chat_id,
@@ -1920,8 +1933,8 @@ async def _recreate_card_at_bottom(
         # 带上话题上下文：缺 thread_id 时 reply_in_thread=False，重建的
         # 新卡会落到群主流而不是原话题里。
         thread_id=session.thread_id or None,
-        reply_to_message_id=session.reply_to_message_id or None,
-        delivery_key=f"{session_key}#rb{session.recreate_seq}",
+        reply_to_message_id=reply_anchor,
+        delivery_key=f"{session_key}#rb{next(_RECREATE_SEQ)}",
         delivery_kind=session.delivery_kind,
     )
     if not delivery.delivered or not delivery.message_id:
@@ -3598,6 +3611,13 @@ async def _send_card_for_app(
     metrics.feishu_send_attempts += 1
     if thread_id and not reply_to_message_id:
         reply_to_message_id = _thread_anchor(app, thread_id)
+        if not reply_to_message_id:
+            # 锚点表是纯内存 + 容量淘汰，查不到时消息会降级发进群主流
+            # 而不是话题——不能再静默，留下现场便于排查话题漏卡。
+            logger.warning(
+                "thread anchor missing for %s; card falls back to main chat",
+                thread_id,
+            )
     if app[NOOP_MODE_KEY]:
         result = CardDeliveryResult(
             message_id=None,
