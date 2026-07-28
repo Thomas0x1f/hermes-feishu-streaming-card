@@ -1950,13 +1950,14 @@ async def _consume_pending_rebottom(
         and session.active_interaction is not None
         and reason != "requested"
     )
+    previous_id = app[FEISHU_MESSAGE_IDS_KEY].get(session_key)
     recreated = await _recreate_card_at_bottom(
         app,
         session_key,
         session,
         _render_session_card_for_app(app, session),
         app[MESSAGE_BOT_IDS_KEY].get(session_key),
-        previous_message_id=app[FEISHU_MESSAGE_IDS_KEY].get(session_key),
+        previous_message_id=previous_id,
         freeze_card=freeze_card,
         preserve_previous=preserve_previous,
     )
@@ -1964,6 +1965,14 @@ async def _consume_pending_rebottom(
         session.pending_rebottom = reason
         session.pending_freeze_card = freeze_card
         return False
+    logger.warning(
+        "clarify rebottom done: reason=%s new=%s prev=%s freeze=%s preserve=%s",
+        reason,
+        app[FEISHU_MESSAGE_IDS_KEY].get(session_key),
+        previous_id,
+        freeze_card is not None,
+        preserve_previous,
+    )
     if reason == "requested":
         # clarify 选项卡置底成功：加急提醒用户来选择。
         _urgent_clarify_card(
@@ -2073,9 +2082,19 @@ async def _freeze_resolved_card(
 ) -> None:
     """Freeze a resolved clarify card in place so the answer stays visible."""
     try:
-        await _update_card_for_app(app, message_id, card, bot_id)
-    except Exception:
-        logger.debug("freeze resolved card failed", exc_info=True)
+        updated = await _update_card_for_app(app, message_id, card, bot_id)
+        logger.warning(
+            "clarify card freeze %s: %s",
+            "ok" if updated else "FAILED",
+            message_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "clarify card freeze error: %s %s: %s",
+            message_id,
+            exc.__class__.__name__,
+            exc,
+        )
 
 
 async def _retire_displaced_card(

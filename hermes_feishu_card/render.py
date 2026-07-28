@@ -106,7 +106,12 @@ def render_card(
         primary_text = normalize_stream_text(session.answer_text)
     elif session.thinking_text:
         primary_text = normalize_stream_text(session.thinking_text)
-    elif session.latest_tool_preview or session.tools:
+    elif (
+        session.latest_tool_preview
+        or session.tools
+        or session.active_interaction is not None
+    ):
+        # 有交互（选项卡/定格卡）时问题本身就是主体，不显示加载占位。
         primary_text = ""
     else:
         primary_text = _spinner_text("正在加载上下文…")
