@@ -8706,6 +8706,63 @@ async def test_clarify_request_without_initiator_skips_urgent(client, monkeypatc
     assert feishu_client.urgent == []
 
 
+async def test_clarify_card_mixes_buttons_with_free_text_input(client):
+    # 混合交互：带选项的 clarify 卡同时渲染选项按钮和"其他意见"输入框；
+    # 自由文本提交与按钮点击都能 resolve，自由文本定格显示"已回答"。
+    test_client, feishu_client = client
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            1,
+            {
+                "interaction_id": "q1",
+                "kind": "select",
+                "prompt": "确认执行吗？",
+                "options": [{"label": "确认", "value": "yes"}],
+            },
+        ),
+    )
+    await _wait_until(lambda: len(feishu_client.sent) == 2, attempts=300)
+    card = feishu_client.sent[-1][1]
+    serialized = json.dumps(card, ensure_ascii=False)
+    # 按钮与自由文本输入框同时存在。
+    assert "interaction.select" in serialized
+    assert "interaction.text_input" in serialized
+    assert "有其他意见" in serialized
+
+    # 提交自由文本（不点按钮）。
+    form = next(
+        e
+        for e in card["body"]["elements"]
+        if e.get("element_id") == "interaction_free_text_form"
+    )
+    submit = next(e for e in form["elements"] if e.get("tag") == "button")
+    callback = await test_client.post(
+        "/card/actions",
+        json={
+            "event": {
+                "operator": {"open_id": "ou_x", "name": "Thomas"},
+                "context": {"open_chat_id": "oc_abc"},
+                "action": {
+                    "value": submit["behaviors"][0]["value"],
+                    "form_value": {"hfc_text": "先别执行，改用方案B"},
+                },
+            }
+        },
+    )
+    assert callback.status == 200
+    body = await callback.json()
+    assert body["ok"] is True
+    assert body["toast"]["content"] == "已提交"
+    # 定格快照显示"已回答：自由文本"。
+    snapshot = json.dumps(body["card"], ensure_ascii=False)
+    assert "已回答：先别执行，改用方案B" in snapshot
+    result = await test_client.get("/interactions/q1")
+    assert (await result.json())["choice"] == "先别执行，改用方案B"
+
+
 async def test_rebottom_stays_in_topic_thread(client):
     # 话题（thread）里的卡片置底重建后，新卡必须回到同一话题：session
     # 未记住 thread_id 时 reply_in_thread=False，新卡会落到群主流。

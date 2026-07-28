@@ -494,11 +494,7 @@ async def _interaction_action(
         return web.json_response(
             {"ok": False, "error": "interaction forbidden"}, status=403
         )
-    toast_text = (
-        "已提交"
-        if interaction is not None and interaction.kind == "text_input"
-        else "已选择"
-    )
+    toast_text = "已提交" if action == "interaction.text_input" else "已选择"
     if interaction is not None and interaction.status == "completed":
         # 重复点击：带上定格快照防止客户端回滚到 pending 态。
         payload = {
@@ -510,18 +506,21 @@ async def _interaction_action(
             payload["card"] = snapshot
         return web.json_response(payload)
     if interaction is not None and interaction.kind == "multi_select":
-        expected_action = "interaction.multi_select"
+        allowed_actions = {"interaction.multi_select"}
     elif interaction is not None and interaction.kind == "text_input":
-        expected_action = "interaction.text_input"
+        allowed_actions = {"interaction.text_input"}
     else:
-        expected_action = "interaction.select"
-    if action != expected_action:
+        # 混合交互：带选项的 clarify 既接受按钮选择，也接受"其他意见"
+        # 输入框的自由文本提交。
+        allowed_actions = {"interaction.select", "interaction.text_input"}
+    if action not in allowed_actions:
         return web.json_response(
             {"ok": False, "error": "invalid action"}, status=400
         )
     user_name = _extract_operator_name(payload)
-    is_multi_select = interaction is not None and interaction.kind == "multi_select"
-    is_text_input = interaction is not None and interaction.kind == "text_input"
+    # 输入形态按实际提交的 action 判定（混合交互下 kind 不再决定唯一形态）。
+    is_multi_select = action == "interaction.multi_select"
+    is_text_input = action == "interaction.text_input"
     allowed_labels = (
         {option.value: option.label for option in interaction.options}
         if interaction is not None

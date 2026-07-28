@@ -507,6 +507,50 @@ def _render_interaction_elements(
                     ],
                 }
             )
+        # 混合交互：确认时点按钮，有其他意见直接在输入框里写并提交。
+        elements.append(
+            {
+                "tag": "form",
+                "name": "hfc_text_input_form",
+                "element_id": "interaction_free_text_form",
+                "elements": [
+                    {
+                        "tag": "input",
+                        "name": "hfc_text",
+                        "element_id": "interaction_free_text_input",
+                        "input_type": "multiline_text",
+                        "width": "fill",
+                        "rows": 2,
+                        "auto_resize": True,
+                        "required": True,
+                        "placeholder": {
+                            "tag": "plain_text",
+                            "content": "有其他意见？直接输入…",
+                        },
+                    },
+                    {
+                        "tag": "button",
+                        "name": "hfc_text_input_submit",
+                        "element_id": "interaction_free_text_submit",
+                        "text": {"tag": "plain_text", "content": "提交意见"},
+                        "type": "default",
+                        "size": "medium",
+                        "width": "default",
+                        "form_action_type": "submit",
+                        "behaviors": [
+                            {
+                                "type": "callback",
+                                "value": {
+                                    "hfc_action": "interaction.text_input",
+                                    "interaction_id": interaction.interaction_id,
+                                    "token": interaction.callback_token,
+                                },
+                            }
+                        ],
+                    },
+                ],
+            }
+        )
         return elements
 
     if interaction.status == "completed":
@@ -515,7 +559,14 @@ def _render_interaction_elements(
         else:
             choice = interaction.choice_label or interaction.choice or "已完成"
         user = f" by {interaction.user_name}" if interaction.user_name else ""
-        verb = "已回答" if interaction.kind == "text_input" else "已选择"
+        # 自由文本回答（不匹配任何选项）显示"已回答"，点选项显示"已选择"。
+        option_labels = {option.label for option in interaction.options}
+        is_free_text = interaction.kind == "text_input" or (
+            interaction.kind != "multi_select"
+            and bool(interaction.choice_label)
+            and interaction.choice_label not in option_labels
+        )
+        verb = "已回答" if is_free_text else "已选择"
         content = f"{verb}：{choice}{user}"
     else:
         content = interaction.error or "交互请求失败"
