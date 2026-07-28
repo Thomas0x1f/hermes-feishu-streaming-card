@@ -2043,6 +2043,9 @@ async def _recreate_card_at_bottom(
         session.chat_id,
         card,
         bot_id,
+        # 带上话题上下文：缺 thread_id 时 reply_in_thread=False，重建的
+        # 新卡会落到群主流而不是原话题里。
+        thread_id=session.thread_id or None,
         reply_to_message_id=session.reply_to_message_id or None,
         delivery_key=f"{session_key}#rb{session.recreate_seq}",
         delivery_kind=session.delivery_kind,
@@ -2666,6 +2669,8 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
             )
             request.app[SESSION_CARD_CONFIGS_KEY][session_key] = session_card_config
             _refresh_session_display_status(request, session)
+            # 记住话题上下文：置底重建的新卡要回到同一话题里。
+            session.thread_id = _thread_id_for_event(event) or ""
             delivery = await _send_card(
                 request,
                 event.chat_id,

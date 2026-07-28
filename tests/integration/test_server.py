@@ -8706,6 +8706,65 @@ async def test_clarify_request_without_initiator_skips_urgent(client, monkeypatc
     assert feishu_client.urgent == []
 
 
+async def test_rebottom_stays_in_topic_thread(client):
+    # 话题（thread）里的卡片置底重建后，新卡必须回到同一话题：session
+    # 未记住 thread_id 时 reply_in_thread=False，新卡会落到群主流。
+    test_client, feishu_client = client
+    topic = {
+        "conversation_id": "omt_topic",
+        "message_id": "om_topic_user",
+        "thread_id": "omt_topic",
+    }
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "message.started",
+            0,
+            {"reply_to_message_id": "om_topic_user"},
+            **topic,
+        ),
+    )
+    assert len(feishu_client.sent) == 1
+    assert feishu_client.sent[0][2] == "omt_topic"  # thread_id
+
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            1,
+            {
+                "reply_to_message_id": "om_topic_user",
+                "interaction_id": "q1",
+                "kind": "select",
+                "prompt": "选哪个？",
+                "options": [{"label": "北京", "value": "bj"}],
+            },
+            **topic,
+        ),
+    )
+    await _wait_until(lambda: len(feishu_client.sent) == 2, attempts=300)
+    # 置底重建的选项卡仍在话题里。
+    assert feishu_client.sent[1][2] == "omt_topic"
+
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.completed",
+            2,
+            {
+                "reply_to_message_id": "om_topic_user",
+                "interaction_id": "q1",
+                "choice": "bj",
+                "choice_label": "北京",
+            },
+            **topic,
+        ),
+    )
+    await _wait_until(lambda: len(feishu_client.sent) == 3, attempts=300)
+    # resolved 分段的新卡也在话题里。
+    assert feishu_client.sent[2][2] == "omt_topic"
+
+
 async def test_clarify_tool_event_stays_out_of_new_segment(client):
     # hermes 把 clarify 本身作为工具调用：resolved 后 tool.updated
     # (name=clarify, completed) 晚于分段重置到达。它的呈现已由定格卡

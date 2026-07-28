@@ -111,6 +111,9 @@ class CardSession:
     # receipts) until the user speaks again or a newer turn opens its card.
     bump_retired: bool = False
     reply_to_message_id: str = ""
+    # 话题（thread）上下文：置底重建的新卡必须回到同一话题里，缺了它
+    # reply 接口的 reply_in_thread=False，新卡会落到群主流。
+    thread_id: str = ""
     notice_title: str = ""
     notice_level: str = "info"
     _tool_call_count: int = field(default=0)
