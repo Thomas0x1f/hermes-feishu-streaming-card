@@ -1898,6 +1898,9 @@ async def _recreate_card_at_bottom(
     """
     # Claim the flag up front so a concurrent event render does not also
     # re-create; on failure the caller falls back to patching the old card.
+    # 记住重建前是否被顶开：未被顶开（新卡紧随旧卡）时旧卡直接撤回，
+    # 被顶开时留灰色指针小卡帮用户定位。
+    was_displaced = session.displaced
     session.displaced = False
     delivery = await _send_card_for_app(
         app,
@@ -1916,16 +1919,46 @@ async def _recreate_card_at_bottom(
     feishu_message_ids: Dict[str, str] = app[FEISHU_MESSAGE_IDS_KEY]
     feishu_message_ids[session_key] = delivery.message_id
     if previous_message_id and previous_message_id != delivery.message_id:
+        # 卡片摘要跟着卡走：用户回复的是重建后的新卡，摘要必须能按新
+        # message_id 查到（旧卡已撤回/退役，旧键失去意义）。
+        summaries: Dict[str, dict[str, Any]] = app[CARD_SUMMARIES_KEY]
+        summary = summaries.pop(previous_message_id, None)
+        if summary is not None:
+            summary["message_id_hash"] = _diagnostic_id_hash(delivery.message_id)
+            summaries[delivery.message_id] = summary
+        summary_session_keys: Dict[str, str] = app[CARD_SUMMARY_SESSION_KEYS_KEY]
+        summary_session_key = summary_session_keys.pop(previous_message_id, None)
+        if summary_session_key is not None:
+            summary_session_keys[delivery.message_id] = summary_session_key
         asyncio.get_running_loop().create_task(
-            _retire_displaced_card(app, previous_message_id, bot_id)
+            _retire_displaced_card(
+                app, previous_message_id, bot_id, recall=not was_displaced
+            )
         )
     return True
 
 
 async def _retire_displaced_card(
-    app: web.Application, message_id: str, bot_id: str | None
+    app: web.Application,
+    message_id: str,
+    bot_id: str | None,
+    *,
+    recall: bool = False,
 ) -> None:
-    """Swap a displaced card for a small pointer to the re-created one."""
+    """Swap a displaced card for a small pointer to the re-created one.
+
+    recall=True（旧卡未被顶开、新卡紧随其后）时直接撤回旧卡，聊天不留
+    冗余指针；撤回失败回退为指针小卡。
+    """
+    if recall:
+        try:
+            await _client_for_bot(app, bot_id).delete_message(message_id)
+            return
+        except Exception:
+            logger.debug(
+                "retired card recall failed; patching pointer instead",
+                exc_info=True,
+            )
     card = {
         "schema": "2.0",
         "config": {"update_multi": True},
@@ -2687,17 +2720,30 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
             # A displaced re-create may have moved the live card since this
             # closure captured feishu_message_id — always patch the current one.
             target_message_id = feishu_message_ids.get(session_key) or feishu_message_id
-            # 置底时机：终态（最终回答），以及 clarify resolved/取消
-            # （interaction.completed/failed）——用户直接在聊天回复上一个
-            # clarify 会触发 inbound bump 把本卡标记 displaced，此刻就把卡搬到
-            # 底部建新卡，后续的下一个 clarify 在底部新卡上继续。
-            # interaction.requested（带选项的 clarify）绝不走置底重建：重建会
-            # 短路正常的选项卡渲染/表单保护导致卡住（新卡在 resolved 时已落底，
-            # 选项本就渲染在底部，无需再搬）。
-            if latest_session.displaced and event.event != "interaction.requested" and (
-                is_terminal
-                or latest_session.status in {"completed", "failed"}
-                or event.event in {"interaction.completed", "interaction.failed"}
+            # 置底时机（置底=撤旧建新；飞书只对新消息推送通知，PATCH 更新
+            # 是静默的，置底是让用户收到通知的唯一手段）：
+            # - clarify 发起（interaction.requested）：无条件置底，用户收到
+            #   "等你选择"的推送。此刻表单还没有用户输入、无状态可丢；且重建
+            #   会立即清 displaced 标记，让 inbound bump 的防抖重建任务自动
+            #   失效，不再有 f4c224a 时代双重建竞争导致的选项卡错乱。
+            # - 终态（最终回答/失败）：无条件置底，用户收到"已完成"的推送。
+            # - clarify resolved/取消（interaction.completed/failed）与终态后
+            #   补渲染：保持原状，仅被顶开（displaced）时置底。
+            # 无条件置底只针对主对话卡（chat）：notice/command 等辅助卡完成
+            # 不值得为通知重建刷屏。
+            if (
+                (
+                    latest_session.delivery_kind == "chat"
+                    and (event.event == "interaction.requested" or is_terminal)
+                )
+                or (
+                    latest_session.displaced
+                    and (
+                        latest_session.status in {"completed", "failed"}
+                        or event.event
+                        in {"interaction.completed", "interaction.failed"}
+                    )
+                )
             ):
                 recreated = await _recreate_card_at_bottom(
                     request.app,

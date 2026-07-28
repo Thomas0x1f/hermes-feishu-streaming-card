@@ -133,6 +133,7 @@ class FakeFeishuClient:
     def __init__(self):
         self.sent = []
         self.updated = []
+        self.deleted = []
         self.uploaded_images = []
         self.fail_send = False
         self.send_delay = 0.0
@@ -155,6 +156,9 @@ class FakeFeishuClient:
             self.update_failures_remaining -= 1
             raise RuntimeError(self.update_error_message)
         self.updated.append((message_id, card))
+
+    async def delete_message(self, message_id):
+        self.deleted.append(message_id)
 
     async def upload_image(self, image_path):
         self.uploaded_images.append(str(image_path))
@@ -572,10 +576,17 @@ def test_create_app_refuses_required_event_auth_without_private_root_secret():
 
 
 async def wait_for_card_update(feishu_client, expected_text, attempts=80):
+    # 终态/clarify 发起会置底重建（撤旧发新），最终渲染可能出现在 PATCH
+    # 流（updated）或重建新发的卡（sent）里，两边都认。
     for _ in range(attempts):
         for message_id, card in reversed(feishu_client.updated):
             if expected_text in str(card):
                 return message_id, card
+        for index, (_chat_id, card, _thread, _reply) in enumerate(
+            reversed(feishu_client.sent)
+        ):
+            if expected_text in str(card):
+                return f"feishu-message-{len(feishu_client.sent) - index}", card
         await _REAL_ASYNCIO_SLEEP(0.01)
     raise AssertionError(f"card update containing {expected_text!r} was not observed")
 
@@ -4111,22 +4122,25 @@ async def test_event_lifecycle_sends_then_updates_final_card(client):
     assert (await completed.json())["applied"] is True
 
     await wait_for_card_update(feishu_client, "最终答案")
-    assert len(feishu_client.sent) == 1
+    # 终态置底重建：最终答案以新卡（新消息→有飞书通知）发出，旧卡未被
+    # 顶开 → 直接撤回。
+    assert len(feishu_client.sent) == 2
     assert feishu_client.sent[0][0] == "oc_abc"
     assert len(feishu_client.updated) >= 1
     assert all(message_id == "feishu-message-1" for message_id, _ in feishu_client.updated)
-    assert "最终答案" in str(feishu_client.updated[-1][1])
+    assert "最终答案" in str(feishu_client.sent[-1][1])
+    await _wait_until(lambda: feishu_client.deleted == ["feishu-message-1"])
     health = await test_client.get("/health")
     metrics = (await health.json())["metrics"]
     assert metrics["events_received"] == 3
     assert metrics["events_applied"] == 3
     assert metrics["events_ignored"] == 0
     assert metrics["events_rejected"] == 0
-    assert metrics["feishu_send_attempts"] == 1
-    assert metrics["feishu_send_successes"] == 1
+    assert metrics["feishu_send_attempts"] == 2
+    assert metrics["feishu_send_successes"] == 2
     assert metrics["feishu_send_failures"] == 0
-    assert metrics["feishu_update_attempts"] == 2
-    assert metrics["feishu_update_successes"] == 2
+    assert metrics["feishu_update_attempts"] == 1
+    assert metrics["feishu_update_successes"] == 1
     assert metrics["feishu_update_failures"] == 0
     assert metrics["feishu_update_retries"] == 0
 
@@ -4247,13 +4261,11 @@ async def test_v4_interaction_restores_cached_preview_on_same_card(client):
     )
 
     assert response.status == 200
-    _, resumed = await wait_for_card_update(feishu_client, "已选择：允许一次")
+    resumed_mid, resumed = await wait_for_card_update(feishu_client, "已选择：允许一次")
     assert resumed["header"]["title"]["content"] == "Hermes Agent"
     assert resumed["header"]["subtitle"]["content"] == "正在读取：weather_client.py"
-    assert all(
-        message_id == "feishu-message-1"
-        for message_id, _card in feishu_client.updated
-    )
+    # clarify 发起时置底重建：交互后的渲染落在重建的新卡上。
+    assert resumed_mid == "feishu-message-2"
 
 
 async def test_v4_preview_burst_coalesces_and_late_preview_cannot_reopen_card(
@@ -4336,10 +4348,11 @@ async def test_completed_without_deltas_updates_started_card(client):
     assert await started.json() == DELIVERED_RESPONSE
     assert completed.status == 200
     assert await completed.json() == {"ok": True, "applied": True}
-    assert len(feishu_client.sent) == 1
+    # 终态置底重建：最终答案在新卡上发出，旧卡撤回，全程无 PATCH。
     await wait_for_card_update(feishu_client, "DeepSeek 一次性返回的最终答案")
-    assert len(feishu_client.updated) == 1
-    assert "DeepSeek 一次性返回的最终答案" in str(feishu_client.updated[-1][1])
+    assert len(feishu_client.sent) == 2
+    assert feishu_client.updated == []
+    assert "DeepSeek 一次性返回的最终答案" in str(feishu_client.sent[-1][1])
 
     health = await test_client.get("/health")
     body = await health.json()
@@ -4348,7 +4361,7 @@ async def test_completed_without_deltas_updates_started_card(client):
     session_snapshot = next(iter(body["sessions"].values()))
     assert session_snapshot["status"] == "completed"
     assert session_snapshot["answer_chars"] > 0
-    assert body["metrics"]["feishu_update_attempts"] == 1
+    assert body["metrics"]["feishu_update_attempts"] == 0
 
 
 async def test_card_config_controls_timeline_rendering():
@@ -4398,7 +4411,8 @@ async def test_card_config_controls_timeline_rendering():
     finally:
         await test_client.close()
 
-    card = feishu_client.updated[-1][1]
+    # 终态置底重建：最终卡是重建新发的消息。
+    card = feishu_client.sent[-1][1]
     timeline = next(
         item
         for item in card["body"]["elements"]
@@ -4460,7 +4474,8 @@ async def test_card_config_string_booleans_control_timeline_rendering(
     finally:
         await test_client.close()
 
-    card = feishu_client.updated[-1][1]
+    # 终态置底重建：最终卡是重建新发的消息。
+    card = feishu_client.sent[-1][1]
     content = str(card)
     if not expect_timeline:
         assert "auxiliary_timeline" not in content
@@ -5004,7 +5019,8 @@ async def test_topic_second_message_reusing_message_id_sends_new_card(client):
         ),
     )
     assert completed.status == 200
-    assert len(feishu_client.sent) == 1
+    # 终态置底重建：完成时撤旧卡、发新终态卡。
+    assert len(feishu_client.sent) == 2
 
     # Second turn in the SAME thread reuses the SAME message_id.
     started2 = await test_client.post(
@@ -5021,7 +5037,7 @@ async def test_topic_second_message_reusing_message_id_sends_new_card(client):
     assert started2.status == 200
     assert await started2.json() == DELIVERED_RESPONSE
     # A brand-new card must be sent for the second turn.
-    assert len(feishu_client.sent) == 2
+    assert len(feishu_client.sent) == 3
 
     # And the second turn's content must render on the new card.
     await test_client.post(
@@ -5102,7 +5118,9 @@ async def test_interaction_request_renders_buttons_and_callback_resolves(client)
         "applied": True,
         "interaction_mode": "callback",
     }
-    interaction_card = feishu_client.updated[-1][1]
+    # clarify 发起时置底重建：选项卡以新消息发出（触发飞书通知）。
+    assert len(feishu_client.sent) == 2
+    interaction_card = feishu_client.sent[-1][1]
     button = next(
         element
         for element in interaction_card["body"]["elements"]
@@ -5167,8 +5185,9 @@ async def test_clarify_media_uploads_and_renders_inside_same_card(
 
     assert requested.status == 200
     assert feishu_client.uploaded_images == [str(image_path.resolve())]
-    assert len(feishu_client.sent) == 1
-    interaction_card = feishu_client.updated[-1][1]
+    # clarify 发起时置底重建：选项卡以新消息发出（触发飞书通知）。
+    assert len(feishu_client.sent) == 2
+    interaction_card = feishu_client.sent[-1][1]
     serialized = json.dumps(interaction_card, ensure_ascii=False)
     assert "![待确认媒体](img_v2_1)" in serialized
     assert str(image_path) not in serialized
@@ -5446,8 +5465,9 @@ async def test_completed_media_directive_uploads_and_renders_inside_same_card(
 
     assert completed.status == 200
     assert feishu_client.uploaded_images == [str(image_path.resolve())]
-    assert len(feishu_client.sent) == 1
-    final_card = feishu_client.updated[-1][1]
+    # 终态置底重建：最终卡是重建新发的消息。
+    assert len(feishu_client.sent) == 2
+    final_card = feishu_client.sent[-1][1]
     serialized = json.dumps(final_card, ensure_ascii=False)
     assert "已生成图片" in serialized
     assert "![生成图片](img_v2_1)" in serialized
@@ -5540,7 +5560,7 @@ async def test_multi_select_interaction_submit_returns_stable_values(client):
     )
     assert requested.status == 200
 
-    interaction_card = feishu_client.updated[-1][1]
+    interaction_card = feishu_client.sent[-1][1]
     form = next(
         element
         for element in interaction_card["body"]["elements"]
@@ -5608,7 +5628,7 @@ async def test_text_input_interaction_submit_returns_text(client):
     )
     assert requested.status == 200
 
-    interaction_card = feishu_client.updated[-1][1]
+    interaction_card = feishu_client.sent[-1][1]
     form = next(
         element
         for element in interaction_card["body"]["elements"]
@@ -5716,7 +5736,7 @@ async def test_text_input_interaction_rejects_empty_text_without_completing(clie
             },
         ),
     )
-    interaction_card = feishu_client.updated[-1][1]
+    interaction_card = feishu_client.sent[-1][1]
     form = next(
         element
         for element in interaction_card["body"]["elements"]
@@ -5761,7 +5781,7 @@ async def test_text_input_rejects_scalar_select_action_without_completing(client
             },
         ),
     )
-    interaction_card = feishu_client.updated[-1][1]
+    interaction_card = feishu_client.sent[-1][1]
     form = next(
         element
         for element in interaction_card["body"]["elements"]
@@ -5817,7 +5837,7 @@ async def test_group_multi_select_rejects_non_initiator_without_completing(clien
             },
         ),
     )
-    interaction_card = feishu_client.updated[-1][1]
+    interaction_card = feishu_client.sent[-1][1]
     form = next(
         element
         for element in interaction_card["body"]["elements"]
@@ -5886,7 +5906,7 @@ async def test_multi_select_rejects_scalar_select_action_without_completing(clie
             },
         ),
     )
-    interaction_card = feishu_client.updated[-1][1]
+    interaction_card = feishu_client.sent[-1][1]
     form = next(
         element
         for element in interaction_card["body"]["elements"]
@@ -5944,7 +5964,8 @@ async def test_terminal_event_closes_pending_multi_select(client):
     )
     result = await test_client.get("/interactions/materials-terminal")
     await wait_for_card_update(feishu_client, "请改用文字回复。")
-    final_card = feishu_client.updated[-1][1]
+    # 终态置底重建：最终卡是重建新发的消息。
+    final_card = feishu_client.sent[-1][1]
 
     assert completed.status == 200
     assert await result.json() == {
@@ -5984,7 +6005,7 @@ async def test_multi_select_interaction_rejects_empty_or_unknown_values(
             },
         ),
     )
-    interaction_card = feishu_client.updated[-1][1]
+    interaction_card = feishu_client.sent[-1][1]
     form = next(
         element
         for element in interaction_card["body"]["elements"]
@@ -6011,7 +6032,8 @@ async def test_multi_select_interaction_rejects_empty_or_unknown_values(
     assert callback.status == 400
     assert (await callback.json()) == {"ok": False, "error": "invalid selection"}
     assert (await result.json())["status"] == "pending"
-    assert "multi_select_static" in str(feishu_client.updated[-1][1])
+    # 非法提交不触发重渲染：表单仍停留在置底重建发出的选项卡上。
+    assert "multi_select_static" in str(feishu_client.sent[-1][1])
 
 
 def test_interaction_operator_name_never_falls_back_to_feishu_ids():
@@ -6050,7 +6072,7 @@ async def test_interaction_request_uses_text_fallback_when_configured():
 
         assert requested.status == 200
         assert (await requested.json())["interaction_mode"] == "text"
-        interaction_card = feishu_client.updated[-1][1]
+        interaction_card = feishu_client.sent[-1][1]
         content = str(interaction_card)
         assert not any(
             element.get("tag") == "button"
@@ -6101,7 +6123,7 @@ async def test_native_text_fallback_interaction_is_not_applied_in_text_mode():
 
 
 async def test_completed_card_summary_can_be_looked_up_by_feishu_message_id(client):
-    test_client, _ = client
+    test_client, feishu_client = client
     long_answer = "最终答案" * 1000
 
     missing = await test_client.get("/messages/feishu-message-1/summary")
@@ -6121,19 +6143,24 @@ async def test_completed_card_summary_can_be_looked_up_by_feishu_message_id(clie
             {"answer": long_answer, "profile_id": "work"},
         ),
     )
-    found = await test_client.get("/messages/feishu-message-1/summary")
+    # 终态置底重建：摘要跟着新卡走——用户回复的是重建后的
+    # feishu-message-2，按新 id 必须能查到，旧 id 失效。
+    await _wait_until(lambda: len(feishu_client.sent) == 2)
+    found = await test_client.get("/messages/feishu-message-2/summary")
+    stale = await test_client.get("/messages/feishu-message-1/summary")
 
     assert missing.status == 404
     assert await missing.json() == {"ok": False, "error": "not found"}
     assert completed.status == 200
     assert await completed.json() == {"ok": True, "applied": True}
+    assert stale.status == 404
     assert found.status == 200
     body = await found.json()
     assert body["ok"] is True
     assert body["profile_id"] == "work"
     assert body["chat_id_hash"] == sidecar_server._diagnostic_id_hash("oc_abc")
     assert body["message_id_hash"] == sidecar_server._diagnostic_id_hash(
-        "feishu-message-1"
+        "feishu-message-2"
     )
     assert body["source_message_id_hash"] == sidecar_server._diagnostic_id_hash(
         "hermes-message-1"
@@ -6519,11 +6546,12 @@ async def test_terminal_after_compaction_clears_runtime_phase(client):
     )
 
     assert completed.status == 200
-    await _wait_until(lambda: len(feishu_client.updated) == 1)
+    # 终态置底重建：最终卡是重建新发的消息。
+    await _wait_until(lambda: len(feishu_client.sent) == 2)
     session = test_client.app[SESSIONS_KEY]["hermes-message-1"]
     assert session.status == "completed"
     assert session.runtime_phase_text == ""
-    assert "正在压缩上下文" not in str(feishu_client.updated[0][1])
+    assert "正在压缩上下文" not in str(feishu_client.sent[-1][1])
 
 
 async def test_system_notice_delivery_outcome_is_delivered_for_legacy_client(client):
@@ -7079,12 +7107,13 @@ async def test_parallel_message_sessions_update_their_own_feishu_cards(client):
     assert await late1.json() == {"ok": True, "applied": False}
     assert len(feishu_client.updated) == updates_before_late
 
-    assert [item[0] for item in feishu_client.sent] == ["oc_abc", "oc_abc"]
+    # 终态置底重建：msg1 完成时撤旧建新，多出第三条 send。
+    assert [item[0] for item in feishu_client.sent] == ["oc_abc", "oc_abc", "oc_abc"]
+    assert "第一条完成" in str(feishu_client.sent[-1][1])
     updates_by_message = {}
     for feishu_message_id, card in feishu_client.updated:
         updates_by_message.setdefault(feishu_message_id, []).append(str(card))
-    assert set(updates_by_message) == {"feishu-message-1", "feishu-message-2"}
-    assert any("第一条完成" in card for card in updates_by_message["feishu-message-1"])
+    assert any("第一条" in card for card in updates_by_message["feishu-message-1"])
     assert any(
         '<font color="blue">' in card and "**search** · 进行中" in card
         for card in updates_by_message["feishu-message-2"]
@@ -7115,18 +7144,19 @@ async def test_streaming_deltas_are_throttled_but_terminal_event_updates(client)
     assert completed.status == 200
     assert await completed.json() == {"ok": True, "applied": True}
 
-    assert len(feishu_client.sent) == 1
     await wait_for_card_update(feishu_client, "最终答案")
-    assert len(feishu_client.updated) == 3
+    # 终态置底重建：最终答案在新卡上发出，流式 delta 仍走 PATCH。
+    assert len(feishu_client.sent) == 2
+    assert len(feishu_client.updated) == 2
     assert "第一段" in str(feishu_client.updated[0][1])
-    assert "最终答案" in str(feishu_client.updated[-1][1])
+    assert "最终答案" in str(feishu_client.sent[-1][1])
     health = await test_client.get("/health")
     metrics = (await health.json())["metrics"]
     assert metrics["events_received"] == 4
     assert metrics["events_applied"] == 4
     assert metrics["events_rejected"] == 0
-    assert metrics["feishu_update_attempts"] == 3
-    assert metrics["feishu_update_successes"] == 3
+    assert metrics["feishu_update_attempts"] == 2
+    assert metrics["feishu_update_successes"] == 2
     assert metrics["terminal_drains"] == 1
 
 
@@ -7146,8 +7176,9 @@ async def test_terminal_event_with_stale_sequence_still_finalizes_card(client):
     assert completed.status == 200
     assert await completed.json() == {"ok": True, "applied": True}
     await wait_for_card_update(feishu_client, "最终答案")
-    assert "最终答案" in str(feishu_client.updated[-1][1])
-    assert "已完成" in str(feishu_client.updated[-1][1])
+    # 终态置底重建：最终卡是重建新发的消息。
+    assert "最终答案" in str(feishu_client.sent[-1][1])
+    assert "已完成" in str(feishu_client.sent[-1][1])
 
 
 async def test_concurrent_streaming_deltas_share_message_update_window(client):
@@ -7295,6 +7326,8 @@ async def test_terminal_event_ack_does_not_wait_for_slow_card_patch(client, monk
     await test_client.start_server()
     try:
         await test_client.post("/events", json=event_payload("message.started", 0))
+        # 终态置底重建走 send：让 send 也变慢，验证 ack 不等重建发送。
+        feishu_client.send_delay = 0.25
 
         started_at = asyncio.get_running_loop().time()
         completed = await test_client.post(
@@ -7306,14 +7339,14 @@ async def test_terminal_event_ack_does_not_wait_for_slow_card_patch(client, monk
         assert completed.status == 200
         assert await completed.json() == {"ok": True, "applied": True}
         assert elapsed < 0.12
-        assert elapsed < feishu_client.update_delay
-        assert feishu_client.updated == []
+        assert elapsed < feishu_client.send_delay
+        assert len(feishu_client.sent) == 1
 
-        for _ in range(40):
-            if feishu_client.updated:
+        for _ in range(80):
+            if len(feishu_client.sent) >= 2:
                 break
             await asyncio.sleep(0.01)
-        assert "最终答案" in str(feishu_client.updated[-1][1])
+        assert "最终答案" in str(feishu_client.sent[-1][1])
     finally:
         await test_client.close()
 
@@ -7369,8 +7402,9 @@ async def test_terminal_event_does_not_wait_for_update_window_without_pending_fl
     assert await completed.json() == {"ok": True, "applied": True}
     await wait_for_card_update(feishu_client, "最终答案")
     assert sleeps == []
-    assert len(feishu_client.updated) == 2
-    assert "最终答案" in str(feishu_client.updated[-1][1])
+    # 终态置底重建：delta 走 PATCH，最终答案在重建新卡上。
+    assert len(feishu_client.updated) == 1
+    assert "最终答案" in str(feishu_client.sent[-1][1])
 
 
 async def test_missing_feishu_message_id_returns_conflict_without_update(client):
@@ -7419,6 +7453,8 @@ async def test_terminal_update_failure_still_accepts_event_to_prevent_native_fal
     feishu_client.update_failures_remaining = sidecar_server.UPDATE_MAX_ATTEMPTS
 
     await test_client.post("/events", json=event_payload("message.started", 0))
+    # 终态置底重建 send 失败 → 回退 PATCH 旧卡（PATCH 也失败则重试）。
+    feishu_client.fail_send = True
     completed = await test_client.post(
         "/events",
         json=event_payload("message.completed", 1, {"answer": "最终答案"}),
@@ -7477,6 +7513,8 @@ async def test_terminal_update_failure_is_retried_in_background(client, monkeypa
     monkeypatch.setattr(sidecar_server.asyncio, "sleep", fake_sleep)
 
     await test_client.post("/events", json=event_payload("message.started", 0))
+    # 终态置底重建 send 失败 → 回退 PATCH 旧卡并在后台重试。
+    feishu_client.fail_send = True
     completed = await test_client.post(
         "/events",
         json=event_payload("message.completed", 1, {"answer": "最终答案"}),
@@ -7507,6 +7545,8 @@ async def test_terminal_retry_backoff_does_not_inflate_patch_latency_metric(
     monkeypatch.setattr(flush_module.time, "monotonic", lambda: now[0])
 
     await test_client.post("/events", json=event_payload("message.started", 0))
+    # 终态置底重建 send 失败 → 回退 PATCH 旧卡（覆盖重试退避的延迟统计）。
+    feishu_client.fail_send = True
     completed = await test_client.post(
         "/events",
         json=event_payload("message.completed", 1, {"answer": "最终答案"}),
@@ -7852,9 +7892,11 @@ async def test_update_reuses_original_bot_without_rerouting():
     assert started.status == 200
     assert completed.status == 200
     assert route_calls == 1
+    # 终态置底重建：重建 send 与旧卡撤回都必须复用原 bot，不重路由。
     assert factory.clients["default"].updated == []
-    assert len(factory.clients["sales"].updated) == 1
-    assert factory.clients["sales"].updated[0][0] == "feishu-message-1"
+    assert factory.clients["default"].sent == []
+    assert len(factory.clients["sales"].sent) == 2
+    assert "成交" in str(factory.clients["sales"].sent[-1][1])
 
 
 async def test_health_reports_safe_routing_diagnostics_without_secrets():
@@ -8324,6 +8366,8 @@ async def test_inbound_bump_retires_completed_sessions(client):
     await test_client.post(
         "/events", json=event_payload("message.completed", 1, {"answer": "x"})
     )
+    # 终态置底重建：完成即撤旧建新（sent==2）。
+    assert len(feishu_client.sent) == 2
     # 用户再次发言：终态卡退役，不置底。
     resp = await test_client.post(
         "/conversation/bumped", json={"chat_id": "oc_abc", "source": "inbound"}
@@ -8334,7 +8378,7 @@ async def test_inbound_bump_retires_completed_sessions(client):
         "/conversation/bumped", json={"chat_id": "oc_abc", "source": "outbound"}
     )
     assert (await resp.json())["displaced"] == 0
-    assert len(feishu_client.sent) == 1
+    assert len(feishu_client.sent) == 2
 
 
 async def test_outbound_bump_rebottoms_completed_card(client, monkeypatch):
@@ -8344,7 +8388,8 @@ async def test_outbound_bump_rebottoms_completed_card(client, monkeypatch):
     await test_client.post(
         "/events", json=event_payload("message.completed", 1, {"answer": "done"})
     )
-    assert len(feishu_client.sent) == 1
+    # 终态置底重建：完成即撤旧建新，终态卡现在是 feishu-message-2。
+    assert len(feishu_client.sent) == 2
 
     # 出站消息（回执/交付文件）落在终态卡下方：卡片仍要置底重建。
     resp = await test_client.post(
@@ -8353,18 +8398,18 @@ async def test_outbound_bump_rebottoms_completed_card(client, monkeypatch):
     assert (await resp.json())["displaced"] == 1
 
     for _ in range(100):
-        if len(feishu_client.sent) >= 2:
+        if len(feishu_client.sent) >= 3:
             break
         await asyncio.sleep(0.02)
-    assert len(feishu_client.sent) == 2
+    assert len(feishu_client.sent) == 3
 
-    # 旧终态卡换成灰色指针小卡。
+    # 被顶开的旧终态卡换成灰色指针小卡。
     retired = []
     for _ in range(100):
         retired = [
             card
             for message_id, card in feishu_client.updated
-            if message_id == "feishu-message-1"
+            if message_id == "feishu-message-2"
         ]
         if retired:
             break
@@ -8422,10 +8467,10 @@ async def test_streaming_bump_defers_recreate_until_attention_moment(
     assert len(feishu_client.sent) == 2
 
 
-async def test_clarify_interaction_not_hijacked_by_rebottom(client):
-    # 用户直接在聊天回复上一个 clarify（触发 inbound bump 把本卡标记
-    # displaced）后，下一个 clarify 的 interaction.requested 绝不能被置底
-    # 重建劫持——必须在原位正常渲染出可点的选项卡，否则会卡住。
+async def test_clarify_request_rebottoms_and_renders_options_on_new_card(client):
+    # clarify 发起（interaction.requested）无条件置底重建：选项卡以新消息
+    # 发到聊天底部（触发飞书推送通知），且重建即清 displaced 标记——
+    # inbound bump 的防抖重建任务随之失效，不会出现双重建竞争。
     test_client, feishu_client = client
     await test_client.post("/events", json=event_payload("message.started", 0))
     assert len(feishu_client.sent) == 1
@@ -8447,30 +8492,30 @@ async def test_clarify_interaction_not_hijacked_by_rebottom(client):
             },
         ),
     )
-    # 不置底重建（不发新卡），选项卡在原位 PATCH 渲染出来。
-    assert len(feishu_client.sent) == 1
-    rendered = json.dumps(feishu_client.updated[-1][1], ensure_ascii=False)
+    # 置底重建：选项卡在底部新卡上渲染，被顶开的旧卡换灰指针。
+    assert len(feishu_client.sent) == 2
+    rendered = json.dumps(feishu_client.sent[-1][1], ensure_ascii=False)
     assert "北京" in rendered
 
-    # clarify resolved（interaction.completed）时检测到 displaced 标记 → 立即
-    # 置底重建，搬到底部新卡（后台异步）。
+    # displaced 已被重建清除：clarify resolved（interaction.completed）
+    # 原地渲染，不再重复重建。
     await test_client.post(
         "/events",
         json=event_payload("interaction.completed", 2, {"interaction_id": "pick-1"}),
     )
-    for _ in range(100):
-        if len(feishu_client.sent) >= 2:
-            break
-        await asyncio.sleep(0.02)
+    await asyncio.sleep(0.1)
     assert len(feishu_client.sent) == 2
 
 
-async def test_new_message_then_completed_reopens_card_and_keeps_rendering(client):
-    # 通用规则：新消息进来给正在更新的卡打「等待置底」标记；遇到安全的特殊
-    # 事件（interaction.completed）时检测到标记 → 立即置底重建 → 接着在底部
-    # 新卡继续渲染后面的（下一个 clarify 的选项卡）。
+async def test_multi_clarify_chain_rebottoms_each_request_and_resolution(client):
+    # 多轮 clarify 链：每次 clarify 发起都置底新卡（触发通知）；用户在聊天
+    # 直接回复（inbound bump 打 displaced 标记）后，resolved 时也置底重建，
+    # 后续渲染在底部新卡继续。
     test_client, feishu_client = client
     await test_client.post("/events", json=event_payload("message.started", 0))
+    assert len(feishu_client.sent) == 1
+
+    # 第一个 clarify 发起 → 置底新卡（未被顶开的旧卡直接撤回）。
     await test_client.post(
         "/events",
         json=event_payload(
@@ -8484,26 +8529,28 @@ async def test_new_message_then_completed_reopens_card_and_keeps_rendering(clien
             },
         ),
     )
-    assert len(feishu_client.sent) == 1
+    assert len(feishu_client.sent) == 2
+    assert "平安" in json.dumps(feishu_client.sent[-1][1], ensure_ascii=False)
+    await _wait_until(lambda: "feishu-message-1" in feishu_client.deleted)
 
     # 新消息进来（用户直接在聊天回复）→ 打 displaced 标记。
     await test_client.post(
         "/conversation/bumped", json={"chat_id": "oc_abc", "source": "inbound"}
     )
 
-    # 特殊事件 interaction.completed → 检测到 displaced → 置底重建（后台异步）。
+    # interaction.completed → 检测到 displaced → 置底重建（后台异步），
+    # 被顶开的旧卡收到「已移至下方」灰指针。
     await test_client.post(
         "/events",
         json=event_payload("interaction.completed", 2, {"interaction_id": "q1"}),
     )
     for _ in range(100):
-        if len(feishu_client.sent) >= 2:
+        if len(feishu_client.sent) >= 3:
             break
         await asyncio.sleep(0.02)
-    assert len(feishu_client.sent) == 2
+    assert len(feishu_client.sent) == 3
 
-    # 接着渲染后面的：下一个 clarify 在底部新卡（feishu-message-2）渲染选项，
-    # 不再发新卡（旧卡只收到「已移至下方」灰指针）。
+    # 下一个 clarify 发起 → 再次置底新卡，选项在最新卡上渲染。
     await test_client.post(
         "/events",
         json=event_payload(
@@ -8517,20 +8564,12 @@ async def test_new_message_then_completed_reopens_card_and_keeps_rendering(clien
             },
         ),
     )
-    rendered = ""
     for _ in range(100):
-        new_card_updates = [
-            card
-            for mid, card in feishu_client.updated
-            if mid == "feishu-message-2"
-        ]
-        if new_card_updates:
-            rendered = json.dumps(new_card_updates[-1], ensure_ascii=False)
-            if "深圳" in rendered:
-                break
+        if len(feishu_client.sent) >= 4:
+            break
         await asyncio.sleep(0.02)
-    assert len(feishu_client.sent) == 2
-    assert "深圳" in rendered
+    assert len(feishu_client.sent) == 4
+    assert "深圳" in json.dumps(feishu_client.sent[-1][1], ensure_ascii=False)
 
 
 async def test_outbound_bump_bursts_coalesce_into_one_recreate(
@@ -8542,7 +8581,8 @@ async def test_outbound_bump_bursts_coalesce_into_one_recreate(
     await test_client.post(
         "/events", json=event_payload("message.completed", 1, {"answer": "done"})
     )
-    assert len(feishu_client.sent) == 1
+    # 终态置底重建：完成即撤旧建新。
+    assert len(feishu_client.sent) == 2
 
     # 一轮机器人回复连发数条消息（回执+附件），逐条 bump 终态卡；
     # 防抖必须把它们合并成一次底部重建。
@@ -8552,7 +8592,7 @@ async def test_outbound_bump_bursts_coalesce_into_one_recreate(
         )
         await asyncio.sleep(0.02)
     await asyncio.sleep(0.4)
-    assert len(feishu_client.sent) == 2
+    assert len(feishu_client.sent) == 3
 
 
 async def test_over_limit_clarify_media_truncates_instead_of_rejecting(
