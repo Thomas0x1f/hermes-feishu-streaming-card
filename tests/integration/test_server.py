@@ -5162,6 +5162,12 @@ async def test_interaction_request_renders_buttons_and_callback_resolves(client)
     callback_body = await callback.json()
     assert callback_body["ok"] is True
     assert callback_body["toast"]["type"] == "success"
+    # 回调响应必须携带定格快照：响应不带 card 时飞书客户端会把卡回滚到
+    # 点击时刻的 pending 态（按钮复现）。
+    snapshot = json.dumps(callback_body["card"], ensure_ascii=False)
+    assert callback_body["card"]["header"]["template"] == "green"
+    assert "已选择：允许一次" in snapshot
+    assert '"button"' not in snapshot
     assert result.status == 200
     assert await result.json() == {
         "ok": True,

@@ -71,6 +71,11 @@ INTERACTION_RESULTS_KEY = web.AppKey("interaction_results", dict)
 INTERACTION_RESULT_SESSION_KEYS_KEY = web.AppKey(
     "interaction_result_session_keys", dict
 )
+# clarify resolved 的定格快照（按 interaction_id 索引）。按钮回调响应必须
+# 携带它：飞书客户端在回调响应不带 card 时会把卡回滚到点击时刻的 pending
+# 态，冲掉 freeze PATCH 刚定格的"已完成 + 已选择"。
+INTERACTION_FREEZE_CARDS_KEY = web.AppKey("interaction_freeze_cards", dict)
+MAX_INTERACTION_FREEZE_CARDS = 64
 MESSAGE_BOT_IDS_KEY = web.AppKey("message_bot_ids", dict)
 SESSION_CARD_CONFIGS_KEY = web.AppKey("session_card_configs", dict)
 BOT_ROUTER_KEY = web.AppKey("bot_router", Any)
@@ -216,6 +221,7 @@ def create_app(
     app[CARD_SUMMARY_SESSION_KEYS_KEY] = {}
     app[INTERACTION_RESULTS_KEY] = {}
     app[INTERACTION_RESULT_SESSION_KEYS_KEY] = {}
+    app[INTERACTION_FREEZE_CARDS_KEY] = {}
     app[MESSAGE_BOT_IDS_KEY] = {}
     app[RECREATE_DEBOUNCE_KEY] = {}
     app[SESSION_CARD_CONFIGS_KEY] = {}
@@ -468,9 +474,11 @@ async def _interaction_action(
         # 双击落在已完成的交互上时按幂等成功处理，不打扰用户。
         stored = request.app[INTERACTION_RESULTS_KEY].get(interaction_id)
         if isinstance(stored, dict) and stored.get("status") == "completed":
-            return web.json_response(
-                {"ok": True, "toast": {"type": "success", "content": "已选择"}}
-            )
+            payload = {"ok": True, "toast": {"type": "success", "content": "已选择"}}
+            snapshot = request.app[INTERACTION_FREEZE_CARDS_KEY].get(interaction_id)
+            if isinstance(snapshot, dict):
+                payload["card"] = snapshot
+            return web.json_response(payload)
         return web.json_response({"ok": False, "error": "interaction not found"}, status=404)
     session_key, session = found
     interaction = session.active_interaction
@@ -492,14 +500,15 @@ async def _interaction_action(
         else "已选择"
     )
     if interaction is not None and interaction.status == "completed":
-        # 不带 card 字段：resolved 分段后卡面由定格 PATCH 负责，回调响应
-        # 再返回渲染会把"已完成"定格覆盖成新分段的空卡。
-        return web.json_response(
-            {
-                "ok": True,
-                "toast": {"type": "success", "content": toast_text},
-            }
-        )
+        # 重复点击：带上定格快照防止客户端回滚到 pending 态。
+        payload = {
+            "ok": True,
+            "toast": {"type": "success", "content": toast_text},
+        }
+        snapshot = request.app[INTERACTION_FREEZE_CARDS_KEY].get(interaction_id)
+        if isinstance(snapshot, dict):
+            payload["card"] = snapshot
+        return web.json_response(payload)
     if interaction is not None and interaction.kind == "multi_select":
         expected_action = "interaction.multi_select"
     elif interaction is not None and interaction.kind == "text_input":
@@ -575,14 +584,18 @@ async def _interaction_action(
         await post_lock_task
     if response.status >= 400:
         return response
-    # 不带 card 字段：resolved 会置底分段，被点击的旧卡由定格 PATCH 变为
-    # "已完成 + 问答"快照；这里若返回渲染会把定格覆盖成新分段的空卡。
-    return web.json_response(
-        {
-            "ok": True,
-            "toast": {"type": "success", "content": toast_text},
-        }
-    )
+    # 响应必须携带定格快照：飞书客户端在回调响应不带 card 时会把卡回滚
+    # 到点击时刻的 pending 态（按钮复现），冲掉 freeze PATCH 刚定格的
+    # "已完成 + 已选择"。绝不能返回当前 session 渲染——resolved 已分段
+    # 重置，那是新分段的空卡。
+    payload: dict[str, Any] = {
+        "ok": True,
+        "toast": {"type": "success", "content": toast_text},
+    }
+    freeze_snapshot = request.app[INTERACTION_FREEZE_CARDS_KEY].get(interaction_id)
+    if isinstance(freeze_snapshot, dict):
+        payload["card"] = freeze_snapshot
+    return web.json_response(payload)
 
 
 async def _operations_action(
@@ -2882,6 +2895,16 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                     _render_session_card(request, session),
                     failed=event.event == "interaction.failed",
                 )
+                interaction_id = str(
+                    event.data.get("interaction_id") or ""
+                ).strip()
+                if interaction_id:
+                    freeze_cards: Dict[str, dict[str, Any]] = request.app[
+                        INTERACTION_FREEZE_CARDS_KEY
+                    ]
+                    if len(freeze_cards) >= MAX_INTERACTION_FREEZE_CARDS:
+                        freeze_cards.pop(next(iter(freeze_cards)))
+                    freeze_cards[interaction_id] = session.pending_freeze_card
                 session.reset_segment_after_interaction()
         is_terminal = event_is_terminal
         controller = _flush_controller_for_session(request.app, session_key)
