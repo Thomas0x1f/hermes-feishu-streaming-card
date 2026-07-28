@@ -134,6 +134,7 @@ class FakeFeishuClient:
         self.sent = []
         self.updated = []
         self.deleted = []
+        self.urgent = []
         self.uploaded_images = []
         self.fail_send = False
         self.send_delay = 0.0
@@ -159,6 +160,9 @@ class FakeFeishuClient:
 
     async def delete_message(self, message_id):
         self.deleted.append(message_id)
+
+    async def urgent_app(self, message_id, open_ids):
+        self.urgent.append((message_id, list(open_ids)))
 
     async def upload_image(self, image_path):
         self.uploaded_images.append(str(image_path))
@@ -8645,6 +8649,52 @@ async def test_resolution_rebottom_survives_render_coalescing(client, monkeypatc
     assert "开始执行" in new_segment
     assert "已选择" not in new_segment
     assert "先做哪个" not in new_segment
+
+
+async def test_clarify_request_sends_urgent_app_reminder(client):
+    # clarify 选项卡置底发出后对消息应用内加急，强提醒发起人来选择；
+    # 事件缺 initiator_open_id 时静默跳过。
+    test_client, feishu_client = client
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            1,
+            {
+                "interaction_id": "q1",
+                "kind": "select",
+                "prompt": "选哪个？",
+                "options": [{"label": "北京", "value": "bj"}],
+                "initiator_open_id": "ou_thomas",
+            },
+        ),
+    )
+    await _wait_until(lambda: len(feishu_client.sent) == 2, attempts=300)
+    await _wait_until(lambda: len(feishu_client.urgent) == 1, attempts=300)
+    # 加急的是置底后的选项卡新消息。
+    assert feishu_client.urgent[0] == ("feishu-message-2", ["ou_thomas"])
+
+
+async def test_clarify_request_without_initiator_skips_urgent(client):
+    test_client, feishu_client = client
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            1,
+            {
+                "interaction_id": "q1",
+                "kind": "select",
+                "prompt": "选哪个？",
+                "options": [{"label": "北京", "value": "bj"}],
+            },
+        ),
+    )
+    await _wait_until(lambda: len(feishu_client.sent) == 2, attempts=300)
+    await asyncio.sleep(0.1)
+    assert feishu_client.urgent == []
 
 
 async def test_clarify_tool_event_stays_out_of_new_segment(client):

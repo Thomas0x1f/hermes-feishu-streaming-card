@@ -297,6 +297,22 @@ class FeishuClient:
             token=token,
         )
 
+    async def urgent_app(self, message_id: str, open_ids: list) -> None:
+        """应用内加急：给指定用户发强提醒（需开放平台开通加急权限）。"""
+        if not isinstance(message_id, str) or not message_id.strip():
+            raise ValueError("message_id is required")
+        user_ids = [str(item).strip() for item in (open_ids or []) if str(item).strip()]
+        if not user_ids:
+            raise ValueError("open_ids is required")
+        token = await self._tenant_token()
+        await self._request_json(
+            "PATCH",
+            f"/im/v1/messages/{quote(message_id, safe='')}/urgent_app",
+            token=token,
+            params={"user_id_type": "open_id"},
+            json_body={"user_id_list": user_ids},
+        )
+
     async def upload_image(self, image_path: str | Path) -> str:
         try:
             path = Path(image_path).expanduser().resolve(strict=True)

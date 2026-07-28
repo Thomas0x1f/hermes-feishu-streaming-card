@@ -1894,6 +1894,39 @@ async def _render_displaced_now(app: web.Application, session_key: str) -> None:
     )
 
 
+def _urgent_clarify_card(
+    app: web.Application,
+    session: CardSession,
+    message_id: str,
+    bot_id: str | None,
+) -> None:
+    """clarify 选项卡发出后对消息加急（应用内强提醒），失败静默降级。"""
+    interaction = session.active_interaction
+    open_id = interaction.initiator_open_id if interaction is not None else ""
+    if not open_id or not message_id:
+        return
+    asyncio.get_running_loop().create_task(
+        _send_clarify_urgent(app, message_id, open_id, bot_id)
+    )
+
+
+async def _send_clarify_urgent(
+    app: web.Application, message_id: str, open_id: str, bot_id: str | None
+) -> None:
+    client = _client_for_bot(app, bot_id)
+    urgent = getattr(client, "urgent_app", None)
+    if not callable(urgent):
+        return
+    try:
+        await urgent(message_id, [open_id])
+    except Exception as exc:
+        logger.warning(
+            "clarify urgent_app failed (未开通加急权限?): %s: %s",
+            exc.__class__.__name__,
+            exc,
+        )
+
+
 async def _consume_pending_rebottom(
     app: web.Application, session_key: str, session: CardSession
 ) -> bool:
@@ -1930,7 +1963,16 @@ async def _consume_pending_rebottom(
     if not recreated:
         session.pending_rebottom = reason
         session.pending_freeze_card = freeze_card
-    return recreated
+        return False
+    if reason == "requested":
+        # clarify 选项卡置底成功：加急提醒用户来选择。
+        _urgent_clarify_card(
+            app,
+            session,
+            app[FEISHU_MESSAGE_IDS_KEY].get(session_key, ""),
+            app[MESSAGE_BOT_IDS_KEY].get(session_key),
+        )
+    return True
 
 
 async def _recreate_card_at_bottom(
@@ -2720,6 +2762,10 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                 )
                 if event.event == "interaction.requested":
                     _store_interaction_result(request.app, session)
+                    # clarify 直接开卡（无旧卡可置底）：同样加急提醒。
+                    _urgent_clarify_card(
+                        request.app, session, message_id, route.bot_id
+                    )
                 if event_is_terminal:
                     _store_card_summary(request.app, event, session, message_id)
                     request.app[DIAGNOSTICS_KEY]["last_terminal_event"] = {
