@@ -1909,11 +1909,11 @@ async def _render_displaced_now(app: web.Application, session_key: str) -> None:
 
 def _clarify_urgent_enabled() -> bool:
     """clarify 选项卡是否加急，`HERMES_FEISHU_CARD_CLARIFY_URGENT` 控制，
-    默认开启；`0/false/no/off` 关闭。"""
+    默认关闭；`1/true/yes/on` 开启。"""
     value = (
-        os.environ.get("HERMES_FEISHU_CARD_CLARIFY_URGENT", "1").strip().lower()
+        os.environ.get("HERMES_FEISHU_CARD_CLARIFY_URGENT", "0").strip().lower()
     )
-    return value not in {"0", "false", "no", "off"}
+    return value in {"1", "true", "yes", "on"}
 
 
 def _urgent_clarify_card(

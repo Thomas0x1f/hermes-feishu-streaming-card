@@ -8635,9 +8635,10 @@ async def test_resolution_rebottom_survives_render_coalescing(client, monkeypatc
     assert "先做哪个" not in new_segment
 
 
-async def test_clarify_request_sends_urgent_app_reminder(client):
-    # clarify 选项卡置底发出后对消息应用内加急，强提醒发起人来选择；
-    # 事件缺 initiator_open_id 时静默跳过。
+async def test_clarify_request_sends_urgent_app_reminder(client, monkeypatch):
+    # 显式开启加急后，clarify 选项卡置底发出对消息应用内加急，强提醒
+    # 发起人来选择；事件缺 initiator_open_id 时静默跳过。
+    monkeypatch.setenv("HERMES_FEISHU_CARD_CLARIFY_URGENT", "1")
     test_client, feishu_client = client
     await test_client.post("/events", json=event_payload("message.started", 0))
     await test_client.post(
@@ -8660,8 +8661,8 @@ async def test_clarify_request_sends_urgent_app_reminder(client):
     assert feishu_client.urgent[0] == ("feishu-message-2", ["ou_thomas"])
 
 
-async def test_clarify_urgent_can_be_disabled_by_env(client, monkeypatch):
-    monkeypatch.setenv("HERMES_FEISHU_CARD_CLARIFY_URGENT", "0")
+async def test_clarify_urgent_disabled_by_default(client, monkeypatch):
+    monkeypatch.delenv("HERMES_FEISHU_CARD_CLARIFY_URGENT", raising=False)
     test_client, feishu_client = client
     await test_client.post("/events", json=event_payload("message.started", 0))
     await test_client.post(
@@ -8683,7 +8684,8 @@ async def test_clarify_urgent_can_be_disabled_by_env(client, monkeypatch):
     assert feishu_client.urgent == []
 
 
-async def test_clarify_request_without_initiator_skips_urgent(client):
+async def test_clarify_request_without_initiator_skips_urgent(client, monkeypatch):
+    monkeypatch.setenv("HERMES_FEISHU_CARD_CLARIFY_URGENT", "1")
     test_client, feishu_client = client
     await test_client.post("/events", json=event_payload("message.started", 0))
     await test_client.post(
