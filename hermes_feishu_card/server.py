@@ -1894,6 +1894,45 @@ async def _render_displaced_now(app: web.Application, session_key: str) -> None:
     )
 
 
+async def _consume_pending_rebottom(
+    app: web.Application, session_key: str, session: CardSession
+) -> bool:
+    """消费 clarify 置底待办（任何渲染路径的公共前置步骤）。
+
+    渲染闭包会被 flush 合并只执行最新一个——事件闭包可能被动画闭包顶掉，
+    所以置底/定格/分段的消费不能只挂在事件闭包上，动画闭包渲染前也必须
+    先走这里。返回 True 表示已置底重建（调用方本轮渲染可结束）；重建
+    失败时恢复待办标记，下一次渲染继续重试，更新永不丢失。
+    """
+    reason = session.pending_rebottom
+    if not reason or session.delivery_kind != "chat":
+        return False
+    session.pending_rebottom = ""
+    freeze_card = session.pending_freeze_card
+    session.pending_freeze_card = None
+    # clarify 卡绝不撤回：旧卡渲染着未定格的 clarify（如终态关闭了未回答
+    # 的交互）时原样保留。requested 场景交互刚挂上、旧卡尚未渲染过它。
+    preserve_previous = (
+        freeze_card is None
+        and session.active_interaction is not None
+        and reason != "requested"
+    )
+    recreated = await _recreate_card_at_bottom(
+        app,
+        session_key,
+        session,
+        _render_session_card_for_app(app, session),
+        app[MESSAGE_BOT_IDS_KEY].get(session_key),
+        previous_message_id=app[FEISHU_MESSAGE_IDS_KEY].get(session_key),
+        freeze_card=freeze_card,
+        preserve_previous=preserve_previous,
+    )
+    if not recreated:
+        session.pending_rebottom = reason
+        session.pending_freeze_card = freeze_card
+    return recreated
+
+
 async def _recreate_card_at_bottom(
     app: web.Application,
     session_key: str,
@@ -2795,48 +2834,31 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
             if latest_session is None:
                 return False
             await _populate_subscription_usage(request.app, latest_session)
+            # 置底时机（置底=撤旧建新；飞书只对新消息推送通知，PATCH 更新
+            # 是静默的，置底是让用户收到通知的唯一手段）：
+            # - clarify 发起/resolved/取消：由 session 待办标记驱动，任何
+            #   渲染路径（含动画闭包）都先消费——闭包被 flush 合并顶掉也
+            #   不丢副作用。resolved 时旧卡定格为锁内预拍的"已完成"快照，
+            #   session 已分段重置，新卡只渲染 clarify 之后的内容。
+            # - 终态（最终回答/失败）：无条件置底，用户收到"已完成"的推送。
+            # - 终态后补渲染：仅被顶开（displaced）时置底。
+            # 无条件置底只针对主对话卡（chat）：notice/command 等辅助卡完成
+            # 不值得为通知重建刷屏。
+            if await _consume_pending_rebottom(
+                request.app, session_key, latest_session
+            ):
+                return True
             latest_card = _render_session_card(request, latest_session)
             # A displaced re-create may have moved the live card since this
             # closure captured feishu_message_id — always patch the current one.
             target_message_id = feishu_message_ids.get(session_key) or feishu_message_id
-            # 置底时机（置底=撤旧建新；飞书只对新消息推送通知，PATCH 更新
-            # 是静默的，置底是让用户收到通知的唯一手段）：
-            # - clarify 发起（pending_rebottom="requested"）：无条件置底，
-            #   用户收到"等你选择"的推送。
-            # - clarify resolved/取消（"resolved"/"cancelled"）：无条件置底，
-            #   旧卡定格为锁内预拍的"已完成"快照（问题+回答留存），session
-            #   分段重置，新卡只渲染 clarify 之后的内容。
-            # - 终态（最终回答/失败）：无条件置底，用户收到"已完成"的推送。
-            # - 终态后补渲染：仅被顶开（displaced）时置底。
-            # 触发依据是 session 上的待办标记而不是本闭包捕获的 event——
-            # flush 合并只执行最新闭包，标记让副作用不随闭包被顶掉而丢失。
-            # 无条件置底只针对主对话卡（chat）：notice/command 等辅助卡完成
-            # 不值得为通知重建刷屏。
-            rebottom_reason = latest_session.pending_rebottom
             if (
-                (
-                    latest_session.delivery_kind == "chat"
-                    and (rebottom_reason or is_terminal)
-                )
-                or (
-                    latest_session.displaced
-                    and latest_session.status in {"completed", "failed"}
-                )
+                latest_session.delivery_kind == "chat" and is_terminal
+            ) or (
+                latest_session.displaced
+                and latest_session.status in {"completed", "failed"}
             ):
-                latest_session.pending_rebottom = ""
-                # clarify resolved 分段：快照与分段重置已在事件锁内完成，
-                # 这里只消费快照做定格；latest_card 即新分段渲染（含
-                # resolved 之后已到达的内容）。
-                freeze_card = latest_session.pending_freeze_card
-                latest_session.pending_freeze_card = None
-                # clarify 卡绝不撤回：旧卡渲染着未定格的 clarify（如终态
-                # 关闭了未回答的交互）时原样保留。requested 场景交互刚挂
-                # 上、旧卡还没渲染过它，不算 clarify 卡。
-                preserve_previous = (
-                    freeze_card is None
-                    and latest_session.active_interaction is not None
-                    and rebottom_reason != "requested"
-                )
+                preserve_previous = latest_session.active_interaction is not None
                 recreated = await _recreate_card_at_bottom(
                     request.app,
                     session_key,
@@ -2844,7 +2866,6 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                     latest_card,
                     bot_id,
                     previous_message_id=target_message_id,
-                    freeze_card=freeze_card,
                     preserve_previous=preserve_previous,
                 )
                 if recreated:
@@ -2852,9 +2873,6 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                 # Re-create failed: clear the flag and keep patching the old
                 # card so updates are never lost.
                 latest_session.displaced = False
-                if freeze_card is not None:
-                    # 降级：新卡没发出去，至少把问答定格到旧卡上。
-                    latest_card = freeze_card
             updated = await _update_card_for_app(
                 request.app,
                 target_message_id,
@@ -3098,9 +3116,20 @@ async def _run_card_animation(
             nonlocal update_failed
             if not _card_animation_is_current(app, session_key, session):
                 return False
+            # 动画闭包会在 flush 合并中顶掉事件闭包，clarify 置底待办
+            # 必须在这里同样消费，否则重建丢失、动画持续把加载渲染
+            # PATCH 到本该定格的 clarify 旧卡上。
+            if await _consume_pending_rebottom(app, session_key, session):
+                return True
+            # PATCH 目标动态取当前活卡：置底重建会把会话的卡换成新
+            # message_id，动画若沿用启动时捕获的旧 id，会把"生成中"渲染
+            # 打到已定格的 clarify 旧卡上，覆盖"已完成 + 问答"快照。
+            target_message_id = (
+                app[FEISHU_MESSAGE_IDS_KEY].get(session_key) or feishu_message_id
+            )
             updated = await _update_card_for_app(
                 app,
-                feishu_message_id,
+                target_message_id,
                 _render_session_card_for_app(app, session),
                 bot_id,
                 is_current=lambda: _card_animation_is_current(

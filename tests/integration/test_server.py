@@ -8647,6 +8647,54 @@ async def test_resolution_rebottom_survives_render_coalescing(client, monkeypatc
     assert "先做哪个" not in new_segment
 
 
+async def test_animation_does_not_overwrite_frozen_clarify_card(client, monkeypatch):
+    # 回归：resolved 分段重置后 session 回到 initial-loading 态，动画任务
+    # 会启动。动画若沿用启动时捕获的旧卡 message_id，会把"生成中"渲染
+    # PATCH 到已定格的 clarify 旧卡上，覆盖"已完成 + 问答"快照（生产上
+    # agent 恢复要数秒，动画窗口足够长）。动画必须动态跟随当前活卡。
+    monkeypatch.setattr(sidecar_server, "CARD_ANIMATION_INTERVAL_SECONDS", 0.03)
+    test_client, feishu_client = client
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            1,
+            {
+                "interaction_id": "q1",
+                "kind": "select",
+                "prompt": "选哪个？",
+                "options": [{"label": "北京", "value": "bj"}],
+            },
+        ),
+    )
+    await _wait_until(lambda: len(feishu_client.sent) == 2, attempts=300)
+
+    # 点按钮 resolve；之后 agent 数百毫秒不产生任何事件（动画窗口）。
+    card = feishu_client.sent[-1][1]
+    button = next(
+        e for e in card["body"]["elements"] if e.get("tag") == "button"
+    )
+    await test_client.post(
+        "/card/actions",
+        json={
+            "event": {
+                "operator": {"open_id": "ou_x", "name": "Thomas"},
+                "context": {"open_chat_id": "oc_abc"},
+                "action": {"value": button["behaviors"][0]["value"]},
+            }
+        },
+    )
+    await _wait_until(lambda: len(feishu_client.sent) == 3, attempts=300)
+    await asyncio.sleep(0.3)
+
+    # 旧选项卡的最终状态必须仍是定格快照，不被动画的"生成中"覆盖。
+    frozen = [c for m, c in feishu_client.updated if m == "feishu-message-2"][-1]
+    serialized = json.dumps(frozen, ensure_ascii=False)
+    assert frozen["header"]["template"] == "green"
+    assert "已选择：北京" in serialized
+
+
 async def test_pending_clarify_card_survives_bumps(client, monkeypatch):
     # clarify 卡（选项/问答）是对话记录：pending 期间被出站/入站消息顶开
     # 也不能被 bump 防抖重建撤掉；displaced 标记保留，resolved 时再置底。
