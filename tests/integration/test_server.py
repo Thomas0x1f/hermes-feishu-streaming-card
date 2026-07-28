@@ -18,7 +18,7 @@ from hermes_feishu_card import server as sidecar_server
 from hermes_feishu_card.bots import RouteResult
 from hermes_feishu_card.events import SidecarEvent
 from hermes_feishu_card.event_auth import sign_event_request
-from hermes_feishu_card.feishu_client import FeishuAPIError
+from hermes_feishu_card.feishu_client import FeishuAPIError, FeishuSendResult
 from hermes_feishu_card.diagnostics import DiagnosticFinding, DiagnosticReport
 from hermes_feishu_card.flush import FlushController
 from hermes_feishu_card.lifecycle import (
@@ -8583,6 +8583,87 @@ async def test_multi_clarify_chain_rebottoms_each_request_and_resolution(client)
         await asyncio.sleep(0.02)
     assert len(feishu_client.sent) == 4
     assert "深圳" in json.dumps(feishu_client.sent[-1][1], ensure_ascii=False)
+
+
+class UuidDedupFeishuClient(FakeFeishuClient):
+    """模拟飞书 create message 的 uuid 幂等去重语义。
+
+    同一 delivery_uuid 在去重窗口内重复发送时，飞书返回首次创建的
+    message_id 且不新建消息、不更新内容——这是生产环境的真实行为，
+    FakeFeishuClient.send_card 没有覆盖到。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.uuid_index = {}
+
+    async def send_card_delivery(
+        self,
+        chat_id,
+        card,
+        thread_id=None,
+        reply_to_message_id=None,
+        delivery_uuid=None,
+    ):
+        if delivery_uuid and delivery_uuid in self.uuid_index:
+            return FeishuSendResult(message_id=self.uuid_index[delivery_uuid])
+        message_id = await self.send_card(
+            chat_id, card, thread_id, reply_to_message_id
+        )
+        if delivery_uuid:
+            self.uuid_index[delivery_uuid] = message_id
+        return FeishuSendResult(message_id=message_id)
+
+
+async def test_rebottom_survives_feishu_uuid_dedup():
+    # 回归：置底重建曾复用 session_key 生成 delivery uuid，被飞书幂等
+    # 去重成第一张卡——重建"成功"却没有新卡，选项卡/终态卡从未发出。
+    # 每次重建必须携带唯一 uuid，真正创建新消息。
+    feishu_client = UuidDedupFeishuClient()
+    app = create_app(feishu_client)
+    test_client = TestClient(TestServer(app))
+    await test_client.start_server()
+    try:
+        await test_client.post("/events", json=event_payload("message.started", 0))
+        assert len(feishu_client.sent) == 1
+
+        await test_client.post(
+            "/events",
+            json=event_payload(
+                "interaction.requested",
+                1,
+                {
+                    "interaction_id": "q1",
+                    "kind": "select",
+                    "prompt": "选哪个？",
+                    "options": [{"label": "北京", "value": "bj"}],
+                },
+            ),
+        )
+        # clarify 选项卡必须是真实新建的消息，而不是被 uuid 去重吞掉。
+        await _wait_until(lambda: len(feishu_client.sent) == 2, attempts=300)
+        assert "北京" in json.dumps(feishu_client.sent[-1][1], ensure_ascii=False)
+
+        await test_client.post(
+            "/events",
+            json=event_payload(
+                "interaction.completed", 2, {"interaction_id": "q1"}
+            ),
+        )
+        await _wait_until(lambda: len(feishu_client.sent) == 3, attempts=300)
+
+        await test_client.post(
+            "/events",
+            json=event_payload("message.completed", 3, {"answer": "最终答案"}),
+        )
+        await _wait_until(lambda: len(feishu_client.sent) == 4, attempts=300)
+        assert "最终答案" in json.dumps(
+            feishu_client.sent[-1][1], ensure_ascii=False
+        )
+        # 每次发送的 uuid 都不同。
+        assert len(feishu_client.uuid_index) == 4
+    finally:
+        await test_client.close()
 
 
 async def test_outbound_bump_bursts_coalesce_into_one_recreate(

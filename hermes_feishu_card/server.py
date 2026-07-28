@@ -1906,13 +1906,17 @@ async def _recreate_card_at_bottom(
     # 被顶开时留灰色指针小卡帮用户定位。
     was_displaced = session.displaced
     session.displaced = False
+    # delivery_key 必须每次重建都不同：飞书 create message 按 uuid 幂等
+    # 去重（约 1 小时窗口），复用 session_key 会让重建被去重成第一张卡
+    # ——send"成功"返回旧卡 id、内容不更新，选项卡/终态卡从未真正发出。
+    session.recreate_seq += 1
     delivery = await _send_card_for_app(
         app,
         session.chat_id,
         card,
         bot_id,
         reply_to_message_id=session.reply_to_message_id or None,
-        delivery_key=session_key,
+        delivery_key=f"{session_key}#rb{session.recreate_seq}",
         delivery_kind=session.delivery_kind,
     )
     if not delivery.delivered or not delivery.message_id:

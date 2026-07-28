@@ -94,6 +94,11 @@ class CardSession:
     # The next render re-creates the card at the bottom instead of patching
     # the displaced one, so live updates always stay in view.
     displaced: bool = False
+    # 置底重建次数。参与 delivery uuid：飞书 create message 按 uuid 幂等
+    # 去重（约 1 小时窗口），同一会话的重建若复用相同 uuid，飞书会返回
+    # 首张卡的 message_id 且不更新内容——重建"成功"却没有新卡。每次重建
+    # 递增序号让 uuid 唯一；单次发送内部的重试仍复用同一 uuid 保持幂等。
+    recreate_seq: int = 0
     # Terminal cards stay eligible for outbound re-bottoms (delivery files,
     # receipts) until the user speaks again or a newer turn opens its card.
     bump_retired: bool = False
