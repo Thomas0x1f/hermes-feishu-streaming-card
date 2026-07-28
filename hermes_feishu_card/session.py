@@ -353,6 +353,21 @@ class CardSession:
         self.refresh_display_status_source()
         return True
 
+    def reset_segment_after_interaction(self) -> None:
+        """clarify resolved 置底分段：问答定格在旧卡，新卡从 clarify 之后
+        的内容重新开始渲染，不再携带之前的正文/时间线/工具记录。"""
+        self.active_interaction = None
+        self.answer_text = ""
+        self.thinking_text = ""
+        self.answer_normalizer = StreamingTextNormalizer()
+        self.thinking_normalizer = StreamingTextNormalizer()
+        self._answer_archive_index = None
+        self.timeline = CardTimeline()
+        self.tools = {}
+        self.latest_tool_preview = ""
+        self.media_image_keys = []
+        self.refresh_display_status_source()
+
     def _close_pending_interaction(self) -> None:
         if (
             self.active_interaction is not None

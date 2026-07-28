@@ -4267,11 +4267,19 @@ async def test_v4_interaction_restores_cached_preview_on_same_card(client):
     )
 
     assert response.status == 200
-    resumed_mid, resumed = await wait_for_card_update(feishu_client, "已选择：允许一次")
-    assert resumed["header"]["title"]["content"] == "Hermes Agent"
-    assert resumed["header"]["subtitle"]["content"] == "正在读取：weather_client.py"
-    # clarify 发起时置底重建：交互后的渲染落在重建的新卡上。
-    assert resumed_mid == "feishu-message-2"
+    # resolved 分段：被点击的旧卡定格为"已完成"快照（问题 + 已选择），
+    # 后续内容在底部新卡从新分段继续，不再携带 clarify 问答。
+    frozen_mid, frozen = await wait_for_card_update(feishu_client, "已选择：允许一次")
+    assert frozen_mid == "feishu-message-2"
+    assert frozen["header"]["title"]["content"] == "Hermes Agent"
+    assert frozen["header"]["template"] == "green"
+    assert frozen["header"]["subtitle"]["content"] == "已完成"
+    assert "允许读取精确位置吗？" in str(frozen)
+    # 新分段卡不含 clarify 问答。
+    assert len(feishu_client.sent) == 3
+    new_segment = str(feishu_client.sent[-1][1])
+    assert "允许读取精确位置吗？" not in new_segment
+    assert "已选择" not in new_segment
 
 
 async def test_v4_preview_burst_coalesces_and_late_preview_cannot_reopen_card(
@@ -8504,19 +8512,33 @@ async def test_clarify_request_rebottoms_and_renders_options_on_new_card(client)
     assert "北京" in rendered
 
     # clarify resolved（interaction.completed）也无条件置底：旧卡定格
-    # 为"已选择"（freeze PATCH，不撤回不换指针），后续在新卡继续。
+    # 为"已完成"快照（freeze PATCH，不撤回不换指针，问题+回答留存），
+    # 新卡从新分段开始，不再携带 clarify 问答。
     await test_client.post(
         "/events",
-        json=event_payload("interaction.completed", 2, {"interaction_id": "pick-1"}),
+        json=event_payload(
+            "interaction.completed",
+            2,
+            {"interaction_id": "pick-1", "choice": "bj", "choice_label": "北京"},
+        ),
     )
     await _wait_until(lambda: len(feishu_client.sent) == 3, attempts=300)
     await _wait_until(
         lambda: any(mid == "feishu-message-2" for mid, _ in feishu_client.updated),
         attempts=300,
     )
-    frozen = [card for mid, card in feishu_client.updated if mid == "feishu-message-2"]
-    assert "已移至下方" not in json.dumps(frozen[-1], ensure_ascii=False)
+    frozen = [card for mid, card in feishu_client.updated if mid == "feishu-message-2"][-1]
+    serialized_frozen = json.dumps(frozen, ensure_ascii=False)
+    assert "已移至下方" not in serialized_frozen
+    assert frozen["header"]["template"] == "green"
+    assert frozen["header"]["subtitle"]["content"] == "已完成"
+    assert "选哪个？" in serialized_frozen
+    assert "已选择：北京" in serialized_frozen
     assert "feishu-message-2" not in feishu_client.deleted
+    # 新分段卡不含 clarify 问答。
+    new_segment = json.dumps(feishu_client.sent[-1][1], ensure_ascii=False)
+    assert "选哪个？" not in new_segment
+    assert "已选择" not in new_segment
 
 
 async def test_multi_clarify_chain_rebottoms_each_request_and_resolution(client):

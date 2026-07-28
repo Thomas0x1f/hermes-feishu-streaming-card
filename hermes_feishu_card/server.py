@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from contextlib import suppress
 from concurrent.futures import Future, ThreadPoolExecutor
+import copy
 import hashlib
 import json
 import os
@@ -463,6 +464,13 @@ async def _interaction_action(
     callback_chat_id = _extract_callback_chat_id(payload)
     found = _find_session_by_interaction(request.app, interaction_id, token, callback_chat_id)
     if found is None:
+        # clarify resolved 分段重置后 active_interaction 已清空——快速
+        # 双击落在已完成的交互上时按幂等成功处理，不打扰用户。
+        stored = request.app[INTERACTION_RESULTS_KEY].get(interaction_id)
+        if isinstance(stored, dict) and stored.get("status") == "completed":
+            return web.json_response(
+                {"ok": True, "toast": {"type": "success", "content": "已选择"}}
+            )
         return web.json_response({"ok": False, "error": "interaction not found"}, status=404)
     session_key, session = found
     interaction = session.active_interaction
@@ -484,11 +492,12 @@ async def _interaction_action(
         else "已选择"
     )
     if interaction is not None and interaction.status == "completed":
+        # 不带 card 字段：resolved 分段后卡面由定格 PATCH 负责，回调响应
+        # 再返回渲染会把"已完成"定格覆盖成新分段的空卡。
         return web.json_response(
             {
                 "ok": True,
                 "toast": {"type": "success", "content": toast_text},
-                "card": _render_session_card(request, session),
             }
         )
     if interaction is not None and interaction.kind == "multi_select":
@@ -566,11 +575,12 @@ async def _interaction_action(
         await post_lock_task
     if response.status >= 400:
         return response
+    # 不带 card 字段：resolved 会置底分段，被点击的旧卡由定格 PATCH 变为
+    # "已完成 + 问答"快照；这里若返回渲染会把定格覆盖成新分段的空卡。
     return web.json_response(
         {
             "ok": True,
             "toast": {"type": "success", "content": toast_text},
-            "card": _render_session_card(request, session),
         }
     )
 
@@ -1888,7 +1898,7 @@ async def _recreate_card_at_bottom(
     bot_id: str | None,
     *,
     previous_message_id: str | None,
-    freeze_previous: bool = False,
+    freeze_card: dict[str, Any] | None = None,
 ) -> bool:
     """Re-create a displaced streaming card at the bottom of its chat.
 
@@ -1897,8 +1907,9 @@ async def _recreate_card_at_bottom(
     (best effort).  Returns False when the send did not go through so the
     caller can keep patching the old card.
 
-    freeze_previous=True（clarify resolved）时旧卡不撤回也不换指针，
-    而是定格为本次渲染（含"已选择：xxx"），让用户的回答留在历史里。
+    freeze_card 非空（clarify resolved）时旧卡不撤回也不换指针，而是
+    定格 PATCH 为该快照（"已完成" + 问题 + 用户的回答），问答永久留在
+    历史里。
     """
     # Claim the flag up front so a concurrent event render does not also
     # re-create; on failure the caller falls back to patching the old card.
@@ -1938,12 +1949,12 @@ async def _recreate_card_at_bottom(
         summary_session_key = summary_session_keys.pop(previous_message_id, None)
         if summary_session_key is not None:
             summary_session_keys[delivery.message_id] = summary_session_key
-        if freeze_previous:
-            # clarify resolved：旧卡定格为含"已选择：xxx"的本次渲染
-            # （文字旁路回答时旧卡还停在表单态，需要补一次 PATCH），
-            # 用户的回答永久可见，后续内容在底部新卡继续。
+        if freeze_card is not None:
+            # clarify resolved：旧卡定格为"已完成"快照（含问题与用户的
+            # 回答；文字旁路回答时旧卡还停在表单态，需要补一次 PATCH），
+            # 问答永久可见，后续内容在底部新卡从新分段继续。
             asyncio.get_running_loop().create_task(
-                _freeze_resolved_card(app, previous_message_id, card, bot_id)
+                _freeze_resolved_card(app, previous_message_id, freeze_card, bot_id)
             )
         else:
             asyncio.get_running_loop().create_task(
@@ -1952,6 +1963,21 @@ async def _recreate_card_at_bottom(
                 )
             )
     return True
+
+
+def _completed_freeze_card(
+    card: dict[str, Any], *, failed: bool = False
+) -> dict[str, Any]:
+    """构造 clarify resolved 的定格快照：header 标记为已完成/已取消。"""
+    frozen = copy.deepcopy(card)
+    label = "已取消" if failed else "已完成"
+    header = frozen.setdefault("header", {})
+    header["template"] = "grey" if failed else "green"
+    header["subtitle"] = {"tag": "plain_text", "content": label}
+    config = frozen.get("config")
+    if isinstance(config, dict) and isinstance(config.get("summary"), dict):
+        config["summary"]["content"] = label
+    return frozen
 
 
 async def _freeze_resolved_card(
@@ -2780,6 +2806,17 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                     and latest_session.status in {"completed", "failed"}
                 )
             ):
+                freeze_card = None
+                if is_interaction_resolution:
+                    # clarify resolved 分段：旧卡定格为"已完成"快照（问题
+                    # + 用户的回答），session 重置到新分段，新卡只渲染
+                    # clarify 之后的内容，不再重复携带问答。
+                    freeze_card = _completed_freeze_card(
+                        latest_card,
+                        failed=event.event == "interaction.failed",
+                    )
+                    latest_session.reset_segment_after_interaction()
+                    latest_card = _render_session_card(request, latest_session)
                 recreated = await _recreate_card_at_bottom(
                     request.app,
                     session_key,
@@ -2787,13 +2824,16 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                     latest_card,
                     bot_id,
                     previous_message_id=target_message_id,
-                    freeze_previous=is_interaction_resolution,
+                    freeze_card=freeze_card,
                 )
                 if recreated:
                     return True
                 # Re-create failed: clear the flag and keep patching the old
                 # card so updates are never lost.
                 latest_session.displaced = False
+                if freeze_card is not None:
+                    # 降级：新卡没发出去，至少把问答定格到旧卡上。
+                    latest_card = freeze_card
             updated = await _update_card_for_app(
                 request.app,
                 target_message_id,
