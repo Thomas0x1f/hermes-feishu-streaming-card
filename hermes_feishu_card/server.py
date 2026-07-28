@@ -3017,6 +3017,15 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
         metrics.events_applied += 1
     else:
         metrics.events_ignored += 1
+        if event_is_terminal:
+            logger.warning(
+                "terminal event NOT applied: %s seq=%s session_status=%s "
+                "message_id_hash=%s",
+                event.event,
+                event.sequence,
+                session.status,
+                _diagnostic_id_hash(event.message_id),
+            )
     response_payload = {"ok": True, "applied": applied}
     if applied and event.event == "system.notice" and post_lock_task is not None:
         response_payload["delivery"] = {"outcome": "accepted"}
@@ -4009,7 +4018,7 @@ async def _abandon_stale_sessions_for_chat(
         sess.refresh_display_status_source(
             StatusConfig.from_mapping(card_config.get("status"))
         )
-        logger.info(
+        logger.warning(
             "Abandoning stale session %s (chat_hash=%s, ans=%d chars) "
             "— new session %s is taking over",
             _diagnostic_id_hash(key),

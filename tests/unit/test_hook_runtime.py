@@ -654,6 +654,47 @@ def test_terminal_cross_family_token_stays_ambiguous_with_multiple_actives():
     assert completed is None
 
 
+def test_ambiguous_fallbacks_keep_explicit_message_id_terminal():
+    # 回归：主回合带显式 message_id，completed 时同会话恰有 ≥2 个并发合成
+    # 回合（kanban 唤醒/后台 review）的 fallback 会话——歧义曾导致终态事件
+    # 被直接丢弃，completed 钩子回退原生纯文本，与卡片双份输出。
+    # 有显式 id 时必须按显式 id 投递，不得丢弃。
+    local_vars = {"chat_id": "oc_amb", "conversation_id": "conv_amb"}
+
+    started = hook_runtime.build_event(
+        "message.started", {**local_vars, "message_id": "om_main", "created_at": 100.0}
+    )
+    assert started is not None
+    assert started["message_id"] == "om_main"
+
+    # 主回合运行期间，两个无显式 id 的合成回合注册了 fallback 会话。
+    event_a, event_b = SimpleNamespace(), SimpleNamespace()
+    hook_runtime.build_event("message.started", {**local_vars, "event": event_a})
+    hook_runtime.build_event("message.started", {**local_vars, "event": event_b})
+
+    completed = hook_runtime.build_event(
+        "message.completed",
+        {**local_vars, "message_id": "om_main", "created_at": 100.0},
+    )
+    assert completed is not None
+    assert completed["message_id"] == "om_main"
+
+
+def test_ambiguous_fallbacks_keep_explicit_message_id_delta():
+    # 同一歧义场景下，显式 id 的增量事件也不得被丢弃（否则卡片停更）。
+    local_vars = {"chat_id": "oc_amb2", "conversation_id": "conv_amb2"}
+
+    event_a, event_b = SimpleNamespace(), SimpleNamespace()
+    hook_runtime.build_event("message.started", {**local_vars, "event": event_a})
+    hook_runtime.build_event("message.started", {**local_vars, "event": event_b})
+
+    delta = hook_runtime.build_event(
+        "answer.delta", {**local_vars, "message_id": "om_main2", "text": "hi"}
+    )
+    assert delta is not None
+    assert delta["message_id"] == "om_main2"
+
+
 def test_build_event_uses_event_message_id_from_hermes_run_agent_started_hook():
     payload = hook_runtime.build_event(
         "message.started",
@@ -6908,7 +6949,10 @@ def test_build_event_ignores_unmatched_terminal_token_with_single_active_fallbac
     assert matched_completed["message_id"] == started["message_id"]
 
 
-def test_build_event_ignores_explicit_terminal_with_unmatched_token():
+def test_build_event_delivers_explicit_terminal_with_unmatched_token():
+    # 并发回合：fallback 会话活跃时，另一回合带显式 message_id 的终态事件
+    # 曾被丢弃（导致 completed 钩子回退原生纯文本、与卡片双份输出）。
+    # 新语义：按显式 id 投递，且不得干扰 fallback 会话自己的生命周期。
     local_vars = {"chat_id": "oc_abc", "conversation_id": "conv_abc"}
 
     started = hook_runtime.build_event(
@@ -6925,7 +6969,8 @@ def test_build_event_ignores_explicit_terminal_with_unmatched_token():
         "message.completed", {**local_vars, "created_at": 1777017600.0}
     )
 
-    assert explicit_terminal is None
+    assert explicit_terminal is not None
+    assert explicit_terminal["message_id"] == "msg_explicit"
     assert delta["message_id"] == started["message_id"]
     assert completed["message_id"] == started["message_id"]
 

@@ -644,6 +644,7 @@ async def emit_from_hermes_locals_async(
     local_vars: dict[str, Any],
     event_name: str = "message.started",
 ) -> bool:
+    is_terminal_emit = event_name in {"message.completed", "message.failed"}
     try:
         config = load_runtime_config()
         if not config.enabled:
@@ -652,6 +653,11 @@ async def emit_from_hermes_locals_async(
             await _flush_pending_deltas_for_local_vars(local_vars)
         payload = build_event(event_name, local_vars)
         if payload is None:
+            if is_terminal_emit:
+                _hfc_warn(
+                    f"{event_name} skipped: build_event returned None "
+                    "(native fallback will deliver)"
+                )
             return False
         result = await _post_json_ordered_response(
             config.event_url,
@@ -659,10 +665,20 @@ async def emit_from_hermes_locals_async(
             _timeout_for_event(config, event_name),
         )
         applied = _event_was_applied(result)
+        if not applied and is_terminal_emit:
+            _hfc_warn(
+                f"{event_name} not applied by sidecar: {str(result)[:200]} "
+                "(native fallback will deliver)"
+            )
         if event_name == "message.completed":
             _register_native_media_text_suppression(payload, applied=applied)
         return applied
-    except Exception:
+    except Exception as exc:
+        if is_terminal_emit:
+            _hfc_warn(
+                f"{event_name} emit failed: {exc.__class__.__name__}: {exc} "
+                "(native fallback will deliver)"
+            )
         return False
 
 
@@ -5636,7 +5652,17 @@ def _build_event(
                 fallback_key, created_at_lifecycle_token
             )
     if active_fallback_cache_key is _AMBIGUOUS_TERMINAL:
-        return None
+        if explicit_message_id is None:
+            if is_terminal_event:
+                _hfc_warn(
+                    f"{event_name} dropped: ambiguous fallback sessions, "
+                    "no explicit message_id"
+                )
+            return None
+        # ≥2 个并发合成回合（kanban 唤醒/后台 review）的 fallback 会话无法
+        # 判归属，但本事件带显式 message_id——按显式 id 投递而不是丢弃：
+        # 丢弃会让终态事件失踪，completed 钩子回退原生纯文本，与卡片双份输出。
+        active_fallback_cache_key = None
     active_fallback_message_id = (
         _ACTIVE_FALLBACK_MESSAGE_IDS.get(active_fallback_cache_key)
         if active_fallback_cache_key is not None
