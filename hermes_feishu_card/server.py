@@ -2923,15 +2923,13 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                 return False
             await _populate_subscription_usage(request.app, latest_session)
             # 置底时机（置底=撤旧建新；飞书只对新消息推送通知，PATCH 更新
-            # 是静默的，置底是让用户收到通知的唯一手段）：
+            # 是静默的，置底是让用户收到通知的手段）：
             # - clarify 发起/resolved/取消：由 session 待办标记驱动，任何
             #   渲染路径（含动画闭包）都先消费——闭包被 flush 合并顶掉也
             #   不丢副作用。resolved 时旧卡定格为锁内预拍的"已完成"快照，
             #   session 已分段重置，新卡只渲染 clarify 之后的内容。
-            # - 终态（最终回答/失败）：无条件置底，用户收到"已完成"的推送。
-            # - 终态后补渲染：仅被顶开（displaced）时置底。
-            # 无条件置底只针对主对话卡（chat）：notice/command 等辅助卡完成
-            # 不值得为通知重建刷屏。
+            # - 终态：原地 PATCH 收尾，不撤旧建新；仅被新消息顶开
+            #   （displaced）的卡在终态时置底追到底部。
             if await _consume_pending_rebottom(
                 request.app, session_key, latest_session
             ):
@@ -2941,8 +2939,6 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
             # closure captured feishu_message_id — always patch the current one.
             target_message_id = feishu_message_ids.get(session_key) or feishu_message_id
             if (
-                latest_session.delivery_kind == "chat" and is_terminal
-            ) or (
                 latest_session.displaced
                 and latest_session.status in {"completed", "failed"}
             ):
