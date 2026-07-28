@@ -189,6 +189,10 @@ def _card_config_for_server(config: dict[str, Any]) -> dict[str, Any]:
         card_config["interaction_mode"] = "callback"
     return card_config
 def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     parser = argparse.ArgumentParser(prog="hermes-feishu-card-sidecar")
     parser.add_argument("--config", default="config.yaml.example")
     parser.add_argument("--env-file")
