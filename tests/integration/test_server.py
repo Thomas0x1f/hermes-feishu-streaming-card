@@ -8328,140 +8328,12 @@ async def test_interrupt_abandon_does_not_affect_completed_sessions(client):
         )
 
 
-async def test_conversation_bumped_recreates_card_at_bottom(client):
-    test_client, feishu_client = client
-    await test_client.post("/events", json=event_payload("message.started", 0))
-    assert len(feishu_client.sent) == 1
-
-    resp = await test_client.post(
-        "/conversation/bumped", json={"chat_id": "oc_abc"}
-    )
-    assert await resp.json() == {"ok": True, "displaced": 1}
-
-    # The next render goes through the displaced path: a fresh card is sent
-    # at the bottom instead of patching the displaced one.
-    resp = await test_client.post(
-        "/events",
-        json=event_payload("message.completed", 1, {"answer": "done"}),
-    )
-    assert (await resp.json())["ok"] is True
-    assert len(feishu_client.sent) == 2
-
-    # 被顶开的旧卡不撤回，PATCH 成指针小卡（新卡在下方继续）。
-    await _wait_until(lambda: _pointer_patched(feishu_client, "feishu-message-1"))
-
-
-async def test_conversation_bumped_rejects_missing_chat_id(client):
-    test_client, _ = client
-    resp = await test_client.post("/conversation/bumped", json={})
-    assert resp.status == 400
-
-
-async def test_inbound_bump_retires_completed_sessions(client):
-    test_client, feishu_client = client
-    await test_client.post("/events", json=event_payload("message.started", 0))
-    await test_client.post(
-        "/events", json=event_payload("message.completed", 1, {"answer": "x"})
-    )
-    assert len(feishu_client.sent) == 1
-    # 用户再次发言：终态卡退役，不置底。
-    resp = await test_client.post(
-        "/conversation/bumped", json={"chat_id": "oc_abc", "source": "inbound"}
-    )
-    assert (await resp.json())["displaced"] == 0
-    # 退役后连出站消息也不再把它顶下来。
-    resp = await test_client.post(
-        "/conversation/bumped", json={"chat_id": "oc_abc", "source": "outbound"}
-    )
-    assert (await resp.json())["displaced"] == 0
-    assert len(feishu_client.sent) == 1
-
-
-async def test_outbound_bump_rebottoms_completed_card(client, monkeypatch):
-    monkeypatch.setattr(sidecar_server, "_RECREATE_DEBOUNCE_SECONDS", 0.05)
-    test_client, feishu_client = client
-    await test_client.post("/events", json=event_payload("message.started", 0))
-    await test_client.post(
-        "/events", json=event_payload("message.completed", 1, {"answer": "done"})
-    )
-    assert len(feishu_client.sent) == 1
-
-    # 出站消息（回执/交付文件）落在终态卡下方：卡片仍要置底重建。
-    resp = await test_client.post(
-        "/conversation/bumped", json={"chat_id": "oc_abc", "source": "outbound"}
-    )
-    assert (await resp.json())["displaced"] == 1
-
-    for _ in range(100):
-        if len(feishu_client.sent) >= 2:
-            break
-        await asyncio.sleep(0.02)
-    assert len(feishu_client.sent) == 2
-
-    # 被顶开的旧终态卡不撤回，PATCH 成指针小卡。
-    await _wait_until(lambda: _pointer_patched(feishu_client, "feishu-message-1"))
-
-
-async def test_new_session_retires_older_completed_card(client):
-    test_client, feishu_client = client
-    await test_client.post("/events", json=event_payload("message.started", 0))
-    await test_client.post(
-        "/events", json=event_payload("message.completed", 1, {"answer": "old"})
-    )
-    # 新一轮开卡：旧终态卡退役。
-    msg2 = {"conversation_id": "conversation-1", "message_id": "hermes-message-2"}
-    await test_client.post("/events", json=event_payload("message.started", 0, **msg2))
-    await test_client.post(
-        "/events", json=event_payload("message.completed", 1, {"answer": "new"}, **msg2)
-    )
-    # 出站 bump 只置底最新一轮的终态卡，旧卡不复活。
-    resp = await test_client.post(
-        "/conversation/bumped", json={"chat_id": "oc_abc", "source": "outbound"}
-    )
-    assert (await resp.json())["displaced"] == 1
-
-
-async def test_streaming_bump_defers_recreate_until_attention_moment(
-    client, monkeypatch
-):
-    monkeypatch.setattr(sidecar_server, "_RECREATE_DEBOUNCE_SECONDS", 0.05)
-    test_client, feishu_client = client
-    await test_client.post("/events", json=event_payload("message.started", 0))
-    assert len(feishu_client.sent) == 1
-
-    # 流式中途被顶开：只打标记，不立即重建。
-    resp = await test_client.post(
-        "/conversation/bumped", json={"chat_id": "oc_abc"}
-    )
-    assert (await resp.json())["displaced"] == 1
-    await asyncio.sleep(0.15)
-    assert len(feishu_client.sent) == 1
-
-    # 流式增量不是注意时刻，仍不置底。
-    await test_client.post(
-        "/events", json=event_payload("answer.delta", 1, {"answer": "hi"})
-    )
-    await asyncio.sleep(0.05)
-    assert len(feishu_client.sent) == 1
-
-    # 消息完成是注意时刻：此刻才在底部重建。
-    await test_client.post(
-        "/events", json=event_payload("message.completed", 2, {"answer": "done"})
-    )
-    assert len(feishu_client.sent) == 2
-
-
 async def test_clarify_request_rebottoms_and_renders_options_on_new_card(client):
     # clarify 发起（interaction.requested）无条件置底重建：选项卡以新消息
-    # 发到聊天底部（触发飞书推送通知），且重建即清 displaced 标记——
-    # inbound bump 的防抖重建任务随之失效，不会出现双重建竞争。
+    # 发到聊天底部（触发飞书推送通知）。
     test_client, feishu_client = client
     await test_client.post("/events", json=event_payload("message.started", 0))
     assert len(feishu_client.sent) == 1
-
-    await test_client.post(
-        "/conversation/bumped", json={"chat_id": "oc_abc", "source": "inbound"}
-    )
 
     await test_client.post(
         "/events",
@@ -8512,9 +8384,8 @@ async def test_clarify_request_rebottoms_and_renders_options_on_new_card(client)
 
 
 async def test_multi_clarify_chain_rebottoms_each_request_and_resolution(client):
-    # 多轮 clarify 链：每次 clarify 发起都置底新卡（触发通知）；用户在聊天
-    # 直接回复（inbound bump 打 displaced 标记）后，resolved 时也置底重建，
-    # 后续渲染在底部新卡继续。
+    # 多轮 clarify 链：每次 clarify 发起都置底新卡（触发通知）；resolved
+    # 时也置底重建，后续渲染在底部新卡继续。
     test_client, feishu_client = client
     await test_client.post("/events", json=event_payload("message.started", 0))
     assert len(feishu_client.sent) == 1
@@ -8536,11 +8407,6 @@ async def test_multi_clarify_chain_rebottoms_each_request_and_resolution(client)
     assert len(feishu_client.sent) == 2
     assert "平安" in json.dumps(feishu_client.sent[-1][1], ensure_ascii=False)
     await _wait_until(lambda: _pointer_patched(feishu_client, "feishu-message-1"))
-
-    # 新消息进来（用户直接在聊天回复）→ 打 displaced 标记。
-    await test_client.post(
-        "/conversation/bumped", json={"chat_id": "oc_abc", "source": "inbound"}
-    )
 
     # interaction.completed → 无条件置底重建（后台异步），旧卡定格为
     # "已选择"（freeze），用户的回答留在历史里。
@@ -8940,36 +8806,6 @@ async def test_animation_does_not_overwrite_frozen_clarify_card(client, monkeypa
     assert "已选择：北京" in serialized
 
 
-async def test_pending_clarify_card_survives_bumps(client, monkeypatch):
-    # clarify 卡（选项/问答）是对话记录：pending 期间被出站/入站消息顶开
-    # 也不能被 bump 防抖重建撤掉；displaced 标记保留，resolved 时再置底。
-    monkeypatch.setattr(sidecar_server, "_RECREATE_DEBOUNCE_SECONDS", 0.05)
-    test_client, feishu_client = client
-    await test_client.post("/events", json=event_payload("message.started", 0))
-    await test_client.post(
-        "/events",
-        json=event_payload(
-            "interaction.requested",
-            1,
-            {
-                "interaction_id": "q1",
-                "kind": "select",
-                "prompt": "选哪个？",
-                "options": [{"label": "北京", "value": "bj"}],
-            },
-        ),
-    )
-    await _wait_until(lambda: len(feishu_client.sent) == 2, attempts=300)
-
-    await test_client.post(
-        "/conversation/bumped", json={"chat_id": "oc_abc", "source": "outbound"}
-    )
-    await asyncio.sleep(0.2)
-    # 不重建、选项卡不被撤回。
-    assert len(feishu_client.sent) == 2
-    assert not _pointer_patched(feishu_client, "feishu-message-2")
-
-
 async def test_terminal_closing_unanswered_clarify_keeps_option_card(client):
     # 终态直接关闭未回答的 clarify 时原地收尾：选项卡不被撤回，终态
     # 答案 PATCH 到当前卡。
@@ -9106,28 +8942,6 @@ async def test_sidecar_restart_survives_feishu_uuid_dedup():
         assert len(feishu_client.uuid_index) == 2
     finally:
         await test_client2.close()
-
-
-async def test_outbound_bump_bursts_coalesce_into_one_recreate(
-    client, monkeypatch
-):
-    monkeypatch.setattr(sidecar_server, "_RECREATE_DEBOUNCE_SECONDS", 0.15)
-    test_client, feishu_client = client
-    await test_client.post("/events", json=event_payload("message.started", 0))
-    await test_client.post(
-        "/events", json=event_payload("message.completed", 1, {"answer": "done"})
-    )
-    assert len(feishu_client.sent) == 1
-
-    # 一轮机器人回复连发数条消息（回执+附件），逐条 bump 终态卡；
-    # 防抖必须把它们合并成一次底部重建。
-    for _ in range(4):
-        await test_client.post(
-            "/conversation/bumped", json={"chat_id": "oc_abc", "source": "outbound"}
-        )
-        await asyncio.sleep(0.02)
-    await asyncio.sleep(0.4)
-    assert len(feishu_client.sent) == 2
 
 
 async def test_over_limit_clarify_media_truncates_instead_of_rejecting(

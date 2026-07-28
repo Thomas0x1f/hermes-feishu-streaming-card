@@ -59,7 +59,6 @@ from .install.recovery import execute_recovery, plan_recovery
 FEISHU_CLIENT_KEY = web.AppKey("feishu_client", Any)
 SESSIONS_KEY = web.AppKey("sessions", dict)
 FEISHU_MESSAGE_IDS_KEY = web.AppKey("feishu_message_ids", dict)
-RECREATE_DEBOUNCE_KEY = web.AppKey("recreate_debounce_tasks", dict)
 SESSION_ALIASES_KEY = web.AppKey("session_aliases", dict)
 # thread_id (omt_…) → 话题内最新真实消息 id（om_…）。create 接口没有
 # thread_id 这种 receive_id_type，发进话题只能对话题内锚点消息 reply。
@@ -224,7 +223,6 @@ def create_app(
     app[INTERACTION_RESULT_SESSION_KEYS_KEY] = {}
     app[INTERACTION_FREEZE_CARDS_KEY] = {}
     app[MESSAGE_BOT_IDS_KEY] = {}
-    app[RECREATE_DEBOUNCE_KEY] = {}
     app[SESSION_CARD_CONFIGS_KEY] = {}
     app[BOT_ROUTER_KEY] = bot_router
     app[PROCESS_TOKEN_KEY] = process_token
@@ -299,7 +297,6 @@ def create_app(
     app.router.add_post("/card/actions", _card_actions)
     app.router.add_post("/commands", _commands)
     app.router.add_post("/events", _events)
-    app.router.add_post("/conversation/bumped", _conversation_bumped)
     app.on_startup.append(_start_runtime_cleanup)
     app.on_cleanup.append(_stop_operations_diagnostics)
     app.on_cleanup.append(_stop_card_animations)
@@ -1799,118 +1796,6 @@ async def _events(request: web.Request) -> web.Response:
     return response
 
 
-async def _conversation_bumped(request: web.Request) -> web.Response:
-    """Mark live sessions in a chat as displaced by a newer message.
-
-    The gateway hook posts here when an inbound user message lands in a chat.
-    Any streaming card still being updated in that chat is no longer the
-    bottom-most message, so its next render re-creates the card at the bottom
-    instead of patching in place (see ``CardSession.displaced``).
-    """
-    metrics: SidecarMetrics = request.app[METRICS_KEY]
-    if request.app[EVENT_AUTH_REQUIRED_KEY]:
-        body = await request.read()
-        try:
-            request.app[EVENT_AUTH_VERIFIER_KEY].verify(request.headers, body)
-        except EventAuthenticationError:
-            metrics.event_auth_rejections += 1
-            return web.json_response(
-                {"ok": False, "error": "event authentication failed"},
-                status=401,
-            )
-    try:
-        payload = await request.json()
-    except ValueError:
-        return web.json_response({"ok": False, "error": "invalid json"}, status=400)
-    chat_id = str(payload.get("chat_id") or "").strip()
-    if not chat_id:
-        return web.json_response(
-            {"ok": False, "error": "chat_id is required"}, status=400
-        )
-    source = str(payload.get("source") or "inbound").strip().lower()
-    # 置底是朴素操作：卡所在 chat 有新消息，就把这张卡在它自己的上下文里
-    # 撤旧建新（重建时沿用卡自己的 chat_id/thread/reply_to，私聊建私聊、
-    # 群建群、话题建话题）。不做任何话题匹配/隔离。
-    sessions: Dict[str, CardSession] = request.app[SESSIONS_KEY]
-    displaced_keys: list[str] = []
-    recreate_keys: list[str] = []
-    for key, session in sessions.items():
-        if session.chat_id != chat_id:
-            continue
-        if session.status in {"completed", "failed"}:
-            # Terminal cards: outbound messages (receipts, delivery files)
-            # still push the final card back to the bottom; once the user
-            # speaks again the card is history and must not chase the new
-            # message downward.  No further render will come, so re-create
-            # on a debounce right here.
-            if session.bump_retired:
-                continue
-            if source != "outbound":
-                session.bump_retired = True
-                continue
-            session.displaced = True
-            displaced_keys.append(key)
-            recreate_keys.append(key)
-            continue
-        # Streaming cards only get flagged; the re-create happens at the
-        # next completion or clarify render, not mid-stream.
-        if not session.displaced:
-            session.displaced = True
-        displaced_keys.append(key)
-    # Re-create displaced terminal cards after a short debounce: a bot turn
-    # often lands several messages back-to-back (a receipt plus attachments),
-    # and each fires a bump — coalesce them into one re-create at the tail so
-    # the card drops below the last message instead of thrashing.
-    debounce: Dict[str, asyncio.Task] = request.app[RECREATE_DEBOUNCE_KEY]
-    for key in recreate_keys:
-        pending = debounce.get(key)
-        if pending is not None and not pending.done():
-            continue
-        debounce[key] = asyncio.get_running_loop().create_task(
-            _debounced_render_displaced(request.app, key)
-        )
-    logger.warning(
-        "conversation bumped (%s): %d session(s) displaced",
-        source,
-        len(displaced_keys),
-    )
-    return web.json_response({"ok": True, "displaced": len(displaced_keys)})
-
-
-_RECREATE_DEBOUNCE_SECONDS = 2.0
-
-
-async def _debounced_render_displaced(app: web.Application, session_key: str) -> None:
-    try:
-        await asyncio.sleep(_RECREATE_DEBOUNCE_SECONDS)
-    finally:
-        app[RECREATE_DEBOUNCE_KEY].pop(session_key, None)
-    await _render_displaced_now(app, session_key)
-
-
-async def _render_displaced_now(app: web.Application, session_key: str) -> None:
-    """Immediately re-create a just-displaced card at the bottom of its chat."""
-    sessions: Dict[str, CardSession] = app[SESSIONS_KEY]
-    session = sessions.get(session_key)
-    if session is None or not session.displaced:
-        return
-    if session.active_interaction is not None:
-        # clarify 卡（选项/问答）是对话记录，不能被 bump 重建撤掉。
-        # displaced 标记保留，resolved 时自会置底分段。
-        return
-    card = _render_session_card_for_app(app, session)
-    bot_id = app[MESSAGE_BOT_IDS_KEY].get(session_key)
-    previous = app[FEISHU_MESSAGE_IDS_KEY].get(session_key)
-    await _recreate_card_at_bottom(
-        app,
-        session_key,
-        session,
-        card,
-        bot_id,
-        previous_message_id=previous,
-    )
-
-
 def _clarify_urgent_enabled() -> bool:
     """clarify 选项卡是否加急，`HERMES_FEISHU_CARD_CLARIFY_URGENT` 控制，
     默认关闭；`1/true/yes/on` 开启。"""
@@ -1971,13 +1856,6 @@ async def _consume_pending_rebottom(
     session.pending_rebottom = ""
     freeze_card = session.pending_freeze_card
     session.pending_freeze_card = None
-    # clarify 卡绝不撤回：旧卡渲染着未定格的 clarify（如终态关闭了未回答
-    # 的交互）时原样保留。requested 场景交互刚挂上、旧卡尚未渲染过它。
-    preserve_previous = (
-        freeze_card is None
-        and session.active_interaction is not None
-        and reason != "requested"
-    )
     previous_id = app[FEISHU_MESSAGE_IDS_KEY].get(session_key)
     recreated = await _recreate_card_at_bottom(
         app,
@@ -1987,19 +1865,17 @@ async def _consume_pending_rebottom(
         app[MESSAGE_BOT_IDS_KEY].get(session_key),
         previous_message_id=previous_id,
         freeze_card=freeze_card,
-        preserve_previous=preserve_previous,
     )
     if not recreated:
         session.pending_rebottom = reason
         session.pending_freeze_card = freeze_card
         return False
     logger.warning(
-        "clarify rebottom done: reason=%s new=%s prev=%s freeze=%s preserve=%s",
+        "clarify rebottom done: reason=%s new=%s prev=%s freeze=%s",
         reason,
         app[FEISHU_MESSAGE_IDS_KEY].get(session_key),
         previous_id,
         freeze_card is not None,
-        preserve_previous,
     )
     if reason == "requested":
         # clarify 选项卡置底成功：加急提醒用户来选择。
@@ -2021,23 +1897,17 @@ async def _recreate_card_at_bottom(
     *,
     previous_message_id: str | None,
     freeze_card: dict[str, Any] | None = None,
-    preserve_previous: bool = False,
 ) -> bool:
-    """Re-create a displaced streaming card at the bottom of its chat.
+    """clarify 分段：把当前渲染作为新消息发到聊天底部。
 
     Sends the current render as a fresh message, repoints the session's
-    Feishu message id at it, and retires the displaced card in place
+    Feishu message id at it, and retires the previous card in place
     (best effort).  Returns False when the send did not go through so the
     caller can keep patching the old card.
 
-    freeze_card 非空（clarify resolved）时旧卡不撤回也不换指针，而是
-    定格 PATCH 为该快照（"已完成" + 问题 + 用户的回答），问答永久留在
-    历史里。preserve_previous=True（旧卡上渲染着 clarify 但无定格快照，
-    如终态关闭未回答的 clarify）时旧卡原样保留，绝不撤回。
+    freeze_card 非空（clarify resolved）时旧卡不换指针，而是定格 PATCH
+    为该快照（"已完成" + 问题 + 用户的回答），问答永久留在历史里。
     """
-    # Claim the flag up front so a concurrent event render does not also
-    # re-create; on failure the caller falls back to patching the old card.
-    session.displaced = False
     # delivery_key 必须每次重建都不同：飞书 create message 按 uuid 幂等
     # 去重（约 1 小时窗口），复用 session_key 会让重建被去重成第一张卡
     # ——send"成功"返回旧卡 id、内容不更新，选项卡/终态卡从未真正发出。
@@ -2080,9 +1950,6 @@ async def _recreate_card_at_bottom(
             asyncio.get_running_loop().create_task(
                 _freeze_resolved_card(app, previous_message_id, freeze_card, bot_id)
             )
-        elif preserve_previous:
-            # 旧卡上渲染着 clarify（问题/选项）：对话记录，原样保留。
-            pass
         else:
             asyncio.get_running_loop().create_task(
                 _retire_displaced_card(app, previous_message_id, bot_id)
@@ -2939,35 +2806,15 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
             #   渲染路径（含动画闭包）都先消费——闭包被 flush 合并顶掉也
             #   不丢副作用。resolved 时旧卡定格为锁内预拍的"已完成"快照，
             #   session 已分段重置，新卡只渲染 clarify 之后的内容。
-            # - 终态：原地 PATCH 收尾，不撤旧建新；仅被新消息顶开
-            #   （displaced）的卡在终态时置底追到底部。
+            # - 终态：原地 PATCH 收尾，不撤旧建新。
             if await _consume_pending_rebottom(
                 request.app, session_key, latest_session
             ):
                 return True
             latest_card = _render_session_card(request, latest_session)
-            # A displaced re-create may have moved the live card since this
+            # A clarify re-create may have moved the live card since this
             # closure captured feishu_message_id — always patch the current one.
             target_message_id = feishu_message_ids.get(session_key) or feishu_message_id
-            if (
-                latest_session.displaced
-                and latest_session.status in {"completed", "failed"}
-            ):
-                preserve_previous = latest_session.active_interaction is not None
-                recreated = await _recreate_card_at_bottom(
-                    request.app,
-                    session_key,
-                    latest_session,
-                    latest_card,
-                    bot_id,
-                    previous_message_id=target_message_id,
-                    preserve_previous=preserve_previous,
-                )
-                if recreated:
-                    return True
-                # Re-create failed: clear the flag and keep patching the old
-                # card so updates are never lost.
-                latest_session.displaced = False
             updated = await _update_card_for_app(
                 request.app,
                 target_message_id,
@@ -3982,9 +3829,6 @@ async def _abandon_stale_sessions_for_chat(
         if sess.chat_id != chat_id:
             continue
         if sess.status in {"completed", "failed"}:
-            # A new turn is opening its own card below — older terminal cards
-            # are history and must stop re-bottoming on outbound bumps.
-            sess.bump_retired = True
             continue
         if sess.conversation_id != new_conversation_id:
             continue

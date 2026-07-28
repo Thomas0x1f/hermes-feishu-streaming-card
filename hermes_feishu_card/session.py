@@ -90,10 +90,6 @@ class CardSession:
     media_image_keys: list[str] = field(default_factory=list)
     active_interaction: InteractionState | None = None
     delivery_kind: str = "chat"
-    # Set when a newer message landed below the streaming card in the chat.
-    # The next render re-creates the card at the bottom instead of patching
-    # the displaced one, so live updates always stay in view.
-    displaced: bool = False
     # 置底重建次数。参与 delivery uuid：飞书 create message 按 uuid 幂等
     # 去重（约 1 小时窗口），同一会话的重建若复用相同 uuid，飞书会返回
     # 首张卡的 message_id 且不更新内容——重建"成功"却没有新卡。每次重建
@@ -107,9 +103,6 @@ class CardSession:
     # resolved 时刻（锁内）预渲染的定格快照。闭包异步执行时 session 可能
     # 已推进（如下一个 clarify 已挂上），不能再事后渲染。
     pending_freeze_card: dict | None = None
-    # Terminal cards stay eligible for outbound re-bottoms (delivery files,
-    # receipts) until the user speaks again or a newer turn opens its card.
-    bump_retired: bool = False
     reply_to_message_id: str = ""
     # 话题（thread）上下文：置底重建的新卡必须回到同一话题里，缺了它
     # reply 接口的 reply_in_thread=False，新卡会落到群主流。
