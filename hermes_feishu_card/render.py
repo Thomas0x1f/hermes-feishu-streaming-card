@@ -448,6 +448,8 @@ def _render_interaction_elements(
                         "name": "hfc_text",
                         "element_id": "interaction_text_input",
                         "input_type": "multiline_text",
+                        # 撑满卡片可用宽度（默认宽度偏窄，多行输入体验差）。
+                        "width": "fill",
                         "rows": 3,
                         "auto_resize": True,
                         "required": True,
