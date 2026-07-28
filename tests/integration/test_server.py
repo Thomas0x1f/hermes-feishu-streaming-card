@@ -8976,6 +8976,40 @@ async def test_rebottom_uuid_unique_for_sessions_merged_to_same_key():
         await test_client.close()
 
 
+async def test_clarify_rebottom_keeps_reply_anchor_from_events(client):
+    # 回归（2026-07-28 生产事故）：开卡事件只带 reply_to_message_id（不带
+    # thread_id）时，首卡靠 reply 落进话题，但 session 上没留下任何上下文，
+    # clarify 置底重建走纯 create，新卡漏进群主流。事件携带的话题/回复
+    # 上下文必须补记到 session，重建时沿用同一 reply 锚点。
+    test_client, feishu_client = client
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "message.started", 0, {"reply_to_message_id": "om_user_topic_msg"}
+        ),
+    )
+    assert len(feishu_client.sent) == 1
+    assert feishu_client.sent[0][3] == "om_user_topic_msg"
+
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            1,
+            {
+                "interaction_id": "q1",
+                "kind": "select",
+                "prompt": "选哪个？",
+                "options": [{"label": "北京", "value": "bj"}],
+                "reply_to_message_id": "om_user_topic_msg",
+            },
+        ),
+    )
+    await _wait_until(lambda: len(feishu_client.sent) == 2, attempts=300)
+    # 重建的新卡必须沿用 reply 锚点，而不是纯 create 漏进群主流。
+    assert feishu_client.sent[-1][3] == "om_user_topic_msg"
+
+
 async def test_thread_rebottom_falls_back_to_previous_card_as_anchor():
     # 回归：话题（omt_）内重建时锚点表（纯内存 + 容量淘汰）查不到锚点，
     # 曾静默降级 create 发进群主流。旧卡自身一定在话题里，必须用它作

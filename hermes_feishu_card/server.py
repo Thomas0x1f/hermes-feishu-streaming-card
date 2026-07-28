@@ -2402,6 +2402,19 @@ def _thread_anchor(app: web.Application, thread_id: str | None) -> str | None:
     return app[THREAD_ANCHORS_KEY].get(thread_id)
 
 
+def _capture_thread_context(session: CardSession, event: SidecarEvent) -> None:
+    """把事件携带的话题/回复上下文补记到 session 上。
+
+    话题上下文不一定在开卡事件上（可能只有后续事件携带）。置底重建全靠
+    session.thread_id / reply_to_message_id 回到原话题——都为空时重建走
+    纯 create，新卡会漏进群主流（2026-07-28 生产事故）。
+    """
+    if not session.thread_id:
+        session.thread_id = _thread_id_for_event(event) or ""
+    if not session.reply_to_message_id:
+        session.reply_to_message_id = _reply_to_message_id_for_event(event) or ""
+
+
 def _reply_to_message_id_for_event(event: SidecarEvent) -> str | None:
     data = event.data if isinstance(event.data, dict) else {}
     reply_to = data.get("reply_to_message_id")
@@ -2521,6 +2534,7 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
         applied = session.apply(event)
         if applied:
             _register_session_aliases(request.app, incoming_event, session_key)
+            _capture_thread_context(session, event)
         if applied and session_key not in feishu_message_ids:
             route = _resolve_route(request, event)
             if route is None:
@@ -2544,8 +2558,6 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
             )
             request.app[SESSION_CARD_CONFIGS_KEY][session_key] = session_card_config
             _refresh_session_display_status(request, session)
-            # 记住话题上下文：置底重建的新卡要回到同一话题里。
-            session.thread_id = _thread_id_for_event(event) or ""
             delivery = await _send_card(
                 request,
                 event.chat_id,
@@ -2614,6 +2626,7 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
             applied = session.apply(event)
             if applied:
                 _register_session_aliases(request.app, incoming_event, session_key)
+                _capture_thread_context(session, event)
             if applied:
                 is_cron_completed = (
                     event.event == "message.completed" and _delivery_kind(event) == "cron"
@@ -2728,6 +2741,7 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
     if applied:
         _refresh_session_display_status(request, session)
         _register_session_aliases(request.app, incoming_event, session_key)
+        _capture_thread_context(session, event)
     # When a terminal event arrives for a session already completed (e.g. by
     # _abandon_stale_sessions_for_chat), the apply() returns False but the
     # session IS handled — report applied=True so the gateway hook suppresses
