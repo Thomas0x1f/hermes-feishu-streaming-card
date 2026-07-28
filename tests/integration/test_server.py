@@ -8353,19 +8353,8 @@ async def test_conversation_bumped_recreates_card_at_bottom(client):
     assert (await resp.json())["ok"] is True
     assert len(feishu_client.sent) == 2
 
-    # The displaced card eventually receives the retire pointer patch.
-    retired = []
-    for _ in range(100):
-        retired = [
-            card
-            for message_id, card in feishu_client.updated
-            if message_id == "feishu-message-1"
-        ]
-        if retired:
-            break
-        await asyncio.sleep(0.02)
-    assert retired, "displaced card should be retired with a pointer patch"
-    assert "已移至下方" in json.dumps(retired[-1], ensure_ascii=False)
+    # 被顶开的旧卡直接撤回（新卡在下方继续，指针小卡无信息量）。
+    await _wait_until(lambda: "feishu-message-1" in feishu_client.deleted)
 
 
 async def test_conversation_bumped_rejects_missing_chat_id(client):
@@ -8417,19 +8406,8 @@ async def test_outbound_bump_rebottoms_completed_card(client, monkeypatch):
         await asyncio.sleep(0.02)
     assert len(feishu_client.sent) == 3
 
-    # 被顶开的旧终态卡换成灰色指针小卡。
-    retired = []
-    for _ in range(100):
-        retired = [
-            card
-            for message_id, card in feishu_client.updated
-            if message_id == "feishu-message-2"
-        ]
-        if retired:
-            break
-        await asyncio.sleep(0.02)
-    assert retired, "displaced card should be retired with a pointer patch"
-    assert "已移至下方" in json.dumps(retired[-1], ensure_ascii=False)
+    # 被顶开的旧终态卡直接撤回。
+    await _wait_until(lambda: "feishu-message-2" in feishu_client.deleted)
 
 
 async def test_new_session_retires_older_completed_card(client):

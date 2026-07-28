@@ -1913,9 +1913,6 @@ async def _recreate_card_at_bottom(
     """
     # Claim the flag up front so a concurrent event render does not also
     # re-create; on failure the caller falls back to patching the old card.
-    # 记住重建前是否被顶开：未被顶开（新卡紧随旧卡）时旧卡直接撤回，
-    # 被顶开时留灰色指针小卡帮用户定位。
-    was_displaced = session.displaced
     session.displaced = False
     # delivery_key 必须每次重建都不同：飞书 create message 按 uuid 幂等
     # 去重（约 1 小时窗口），复用 session_key 会让重建被去重成第一张卡
@@ -1958,9 +1955,7 @@ async def _recreate_card_at_bottom(
             )
         else:
             asyncio.get_running_loop().create_task(
-                _retire_displaced_card(
-                    app, previous_message_id, bot_id, recall=not was_displaced
-                )
+                _retire_displaced_card(app, previous_message_id, bot_id)
             )
     return True
 
@@ -1997,23 +1992,20 @@ async def _retire_displaced_card(
     app: web.Application,
     message_id: str,
     bot_id: str | None,
-    *,
-    recall: bool = False,
 ) -> None:
-    """Swap a displaced card for a small pointer to the re-created one.
+    """撤回被置底重建替换的旧卡。
 
-    recall=True（旧卡未被顶开、新卡紧随其后）时直接撤回旧卡，聊天不留
-    冗余指针；撤回失败回退为指针小卡。
+    新卡就在下方继续更新，指针小卡没有信息量——一律直接撤回；撤回失败
+    （超出撤回时限等）才回退为灰色指针小卡，避免旧卡停留在过时状态。
     """
-    if recall:
-        try:
-            await _client_for_bot(app, bot_id).delete_message(message_id)
-            return
-        except Exception:
-            logger.debug(
-                "retired card recall failed; patching pointer instead",
-                exc_info=True,
-            )
+    try:
+        await _client_for_bot(app, bot_id).delete_message(message_id)
+        return
+    except Exception:
+        logger.debug(
+            "retired card recall failed; patching pointer instead",
+            exc_info=True,
+        )
     card = {
         "schema": "2.0",
         "config": {"update_multi": True},
