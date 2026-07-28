@@ -200,6 +200,19 @@ class CardSession:
                     self._archive_current_answer_to_reasoning()
                 self.answer_text += delta
         elif event.event == "tool.updated":
+            raw_name = event.data.get("name")
+            if (
+                isinstance(raw_name, str)
+                and raw_name.strip().lower() == "clarify"
+            ):
+                # clarify 是 hermes 侧的工具调用，其运行/完成已由交互卡
+                # 完整呈现（问题+选项+已选择定格在旧卡）。resolved 分段后
+                # 该工具的 completed 事件会晚于分段到达，若照常记录会把
+                # "clarify 完成"塞进新分段卡的时间线——新卡只应有 clarify
+                # 之后的内容，这里直接忽略。
+                self.updated_at = time.time()
+                self.refresh_display_status_source()
+                return True
             raw_preview = event.data.get("detail")
             if isinstance(raw_preview, str):
                 normalized_preview = normalize_stream_text(raw_preview).strip()

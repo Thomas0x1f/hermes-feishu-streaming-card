@@ -4760,8 +4760,8 @@ async def test_pending_interaction_suppresses_card_animation(monkeypatch):
                 "tool.updated",
                 1,
                 {
-                    "tool_id": "clarify",
-                    "name": "clarify",
+                    "tool_id": "prep",
+                    "name": "terminal",
                     "status": "running",
                     "detail": "等待人工确认",
                 },
@@ -8645,6 +8645,63 @@ async def test_resolution_rebottom_survives_render_coalescing(client, monkeypatc
     assert "开始执行" in new_segment
     assert "已选择" not in new_segment
     assert "先做哪个" not in new_segment
+
+
+async def test_clarify_tool_event_stays_out_of_new_segment(client):
+    # hermes 把 clarify 本身作为工具调用：resolved 后 tool.updated
+    # (name=clarify, completed) 晚于分段重置到达。它的呈现已由定格卡
+    # 完整覆盖（问题+已选择留在旧卡），绝不能再进新分段卡的时间线。
+    test_client, feishu_client = client
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            1,
+            {
+                "interaction_id": "q1",
+                "kind": "select",
+                "prompt": "选哪个？",
+                "options": [{"label": "北京", "value": "bj"}],
+            },
+        ),
+    )
+    await _wait_until(lambda: len(feishu_client.sent) == 2, attempts=300)
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.completed",
+            2,
+            {"interaction_id": "q1", "choice": "bj", "choice_label": "北京"},
+        ),
+    )
+    await _wait_until(lambda: len(feishu_client.sent) == 3, attempts=300)
+
+    # hermes 侧 clarify 工具完成事件（含选择结果 detail）晚到。
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "tool.updated",
+            3,
+            {
+                "tool_id": "clarify-1",
+                "name": "clarify",
+                "status": "completed",
+                "detail": "已选择：北京",
+            },
+        ),
+    )
+    await test_client.post(
+        "/events", json=event_payload("answer.delta", 4, {"text": "好的，继续处理"})
+    )
+    await test_client.post(
+        "/events", json=event_payload("message.completed", 5, {"answer": "处理完成"})
+    )
+    await _wait_until(lambda: len(feishu_client.sent) == 4, attempts=300)
+    final_card = json.dumps(feishu_client.sent[-1][1], ensure_ascii=False)
+    assert "处理完成" in final_card
+    assert "clarify" not in final_card
+    assert "已选择" not in final_card
 
 
 async def test_animation_does_not_overwrite_frozen_clarify_card(client, monkeypatch):
