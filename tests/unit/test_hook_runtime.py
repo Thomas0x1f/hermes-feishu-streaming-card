@@ -898,6 +898,72 @@ def test_request_interaction_posts_event_and_polls_until_completed(monkeypatch):
     assert posted[0][2]["event"] == "interaction.requested"
 
 
+def test_request_interaction_polls_after_post_timeout_when_sidecar_alive(monkeypatch):
+    # 回归：requested 事件走顺序队列，队列被前序事件（媒体上传等）拖慢时
+    # POST 响应超时，但事件已入队、选项卡稍后仍会渲染。此时不能回退原生
+    # 等待（按钮 resolve 的是 sidecar 交互，原生 clarify_gateway 无人解锁，
+    # agent 会阻塞到超时）——只要 sidecar 存活就继续 poll。
+    monkeypatch.setenv("HERMES_FEISHU_CARD_EVENT_URL", "http://sidecar.test/events")
+
+    def fake_post(local_vars, url, payload, timeout):
+        return hook_runtime._POST_FAILED
+
+    def fake_get(url, timeout):
+        if url.endswith("/health"):
+            return {"status": "healthy"}
+        assert url == "http://sidecar.test/interactions/q-timeout"
+        return {
+            "ok": True,
+            "status": "completed",
+            "interaction_id": "q-timeout",
+            "choice": "a",
+            "choice_label": "方案A",
+        }
+
+    monkeypatch.setattr(hook_runtime, "_post_interaction_event", fake_post)
+    monkeypatch.setattr(hook_runtime, "_get_json_sync", fake_get)
+
+    result = hook_runtime.request_interaction_from_hermes_locals(
+        {"chat_id": "oc_abc", "message_id": "msg_1"},
+        kind="clarify",
+        interaction_id="q-timeout",
+        prompt="选哪个？",
+        options=[{"label": "方案A", "value": "a"}],
+        timeout_seconds=1,
+        poll_interval_seconds=0,
+    )
+
+    assert result is not None
+    assert result["status"] == "completed"
+    assert result["choice"] == "a"
+
+
+def test_request_interaction_falls_back_to_native_when_sidecar_dead(monkeypatch):
+    # POST 超时且 sidecar 探活失败：确认宕机，回退原生 clarify 等待。
+    monkeypatch.setenv("HERMES_FEISHU_CARD_EVENT_URL", "http://sidecar.test/events")
+
+    def fake_post(local_vars, url, payload, timeout):
+        return hook_runtime._POST_FAILED
+
+    def fake_get(url, timeout):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(hook_runtime, "_post_interaction_event", fake_post)
+    monkeypatch.setattr(hook_runtime, "_get_json_sync", fake_get)
+
+    result = hook_runtime.request_interaction_from_hermes_locals(
+        {"chat_id": "oc_abc", "message_id": "msg_1"},
+        kind="clarify",
+        interaction_id="q-dead",
+        prompt="选哪个？",
+        options=[{"label": "方案A", "value": "a"}],
+        timeout_seconds=1,
+        poll_interval_seconds=0,
+    )
+
+    assert result is None
+
+
 def test_request_slash_confirm_async_posts_event_and_polls_until_completed(monkeypatch):
     posted = []
     polls = iter(

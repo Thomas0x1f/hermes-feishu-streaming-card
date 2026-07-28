@@ -1039,7 +1039,18 @@ def request_interaction_from_hermes_locals(
             _timeout_for_event(config, payload["event"]),
         )
         if post_result is _POST_FAILED:
-            return None
+            # POST 超时 ≠ 交互失败：requested 事件走顺序队列，队列被前序
+            # 事件（如媒体上传）拖慢时响应超时，但事件已入队、选项卡稍后
+            # 仍会渲染出来。此时若回退原生等待，用户点卡片按钮 resolve 的
+            # 是 sidecar 交互，原生 clarify_gateway 无人解锁，agent 会一直
+            # 阻塞到超时。只要 sidecar 还活着就继续进 poll 循环；确认死了
+            # 才回退原生。
+            if not _sidecar_alive(config):
+                return None
+            _hfc_warn(
+                "interaction.requested post timed out; sidecar alive, "
+                f"polling anyway: {interaction_id}"
+            )
         if isinstance(post_result, dict) and post_result.get("ok") is False:
             return None
         if _uses_text_interaction_fallback(post_result):
@@ -1066,7 +1077,10 @@ def request_interaction_from_hermes_locals(
                     _timeout_for_event(config, payload["event"]),
                 )
                 if post_result is _POST_FAILED:
-                    return None
+                    # 同上：超时不等于失败，sidecar 存活就进 poll。
+                    if not _sidecar_alive(config):
+                        return None
+                    break
                 if isinstance(post_result, dict) and post_result.get("ok") is False:
                     return None
                 if _uses_text_interaction_fallback(post_result):
@@ -5443,6 +5457,15 @@ def _get_json_sync(url: str, timeout: float) -> Any:
         method="GET",
     )
     return _open_json_request(req, timeout)
+
+
+def _sidecar_alive(config: RuntimeConfig) -> bool:
+    """探活：区分 sidecar 宕机与顺序事件队列积压导致的 POST 超时。"""
+    try:
+        health = _get_json_sync(f"{_summary_base_url(config.event_url)}/health", 1.0)
+    except Exception:
+        return False
+    return isinstance(health, dict) and health.get("status") == "healthy"
 
 
 def build_event(
