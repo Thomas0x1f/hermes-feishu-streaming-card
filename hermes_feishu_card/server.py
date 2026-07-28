@@ -1877,6 +1877,10 @@ async def _render_displaced_now(app: web.Application, session_key: str) -> None:
     session = sessions.get(session_key)
     if session is None or not session.displaced:
         return
+    if session.active_interaction is not None:
+        # clarify 卡（选项/问答）是对话记录，不能被 bump 重建撤掉。
+        # displaced 标记保留，resolved 时自会置底分段。
+        return
     card = _render_session_card_for_app(app, session)
     bot_id = app[MESSAGE_BOT_IDS_KEY].get(session_key)
     previous = app[FEISHU_MESSAGE_IDS_KEY].get(session_key)
@@ -1899,6 +1903,7 @@ async def _recreate_card_at_bottom(
     *,
     previous_message_id: str | None,
     freeze_card: dict[str, Any] | None = None,
+    preserve_previous: bool = False,
 ) -> bool:
     """Re-create a displaced streaming card at the bottom of its chat.
 
@@ -1909,7 +1914,8 @@ async def _recreate_card_at_bottom(
 
     freeze_card 非空（clarify resolved）时旧卡不撤回也不换指针，而是
     定格 PATCH 为该快照（"已完成" + 问题 + 用户的回答），问答永久留在
-    历史里。
+    历史里。preserve_previous=True（旧卡上渲染着 clarify 但无定格快照，
+    如终态关闭未回答的 clarify）时旧卡原样保留，绝不撤回。
     """
     # Claim the flag up front so a concurrent event render does not also
     # re-create; on failure the caller falls back to patching the old card.
@@ -1953,6 +1959,9 @@ async def _recreate_card_at_bottom(
             asyncio.get_running_loop().create_task(
                 _freeze_resolved_card(app, previous_message_id, freeze_card, bot_id)
             )
+        elif preserve_previous:
+            # 旧卡上渲染着 clarify（问题/选项）：对话记录，原样保留。
+            pass
         else:
             asyncio.get_running_loop().create_task(
                 _retire_displaced_card(app, previous_message_id, bot_id)
@@ -2820,6 +2829,14 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                 # resolved 之后已到达的内容）。
                 freeze_card = latest_session.pending_freeze_card
                 latest_session.pending_freeze_card = None
+                # clarify 卡绝不撤回：旧卡渲染着未定格的 clarify（如终态
+                # 关闭了未回答的交互）时原样保留。requested 场景交互刚挂
+                # 上、旧卡还没渲染过它，不算 clarify 卡。
+                preserve_previous = (
+                    freeze_card is None
+                    and latest_session.active_interaction is not None
+                    and rebottom_reason != "requested"
+                )
                 recreated = await _recreate_card_at_bottom(
                     request.app,
                     session_key,
@@ -2828,6 +2845,7 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                     bot_id,
                     previous_message_id=target_message_id,
                     freeze_card=freeze_card,
+                    preserve_previous=preserve_previous,
                 )
                 if recreated:
                     return True

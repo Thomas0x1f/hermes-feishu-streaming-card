@@ -8647,6 +8647,69 @@ async def test_resolution_rebottom_survives_render_coalescing(client, monkeypatc
     assert "先做哪个" not in new_segment
 
 
+async def test_pending_clarify_card_survives_bumps(client, monkeypatch):
+    # clarify 卡（选项/问答）是对话记录：pending 期间被出站/入站消息顶开
+    # 也不能被 bump 防抖重建撤掉；displaced 标记保留，resolved 时再置底。
+    monkeypatch.setattr(sidecar_server, "_RECREATE_DEBOUNCE_SECONDS", 0.05)
+    test_client, feishu_client = client
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            1,
+            {
+                "interaction_id": "q1",
+                "kind": "select",
+                "prompt": "选哪个？",
+                "options": [{"label": "北京", "value": "bj"}],
+            },
+        ),
+    )
+    await _wait_until(lambda: len(feishu_client.sent) == 2, attempts=300)
+
+    await test_client.post(
+        "/conversation/bumped", json={"chat_id": "oc_abc", "source": "outbound"}
+    )
+    await asyncio.sleep(0.2)
+    # 不重建、选项卡不被撤回。
+    assert len(feishu_client.sent) == 2
+    assert "feishu-message-2" not in feishu_client.deleted
+
+
+async def test_terminal_closing_unanswered_clarify_keeps_option_card(client):
+    # 终态直接关闭未回答的 clarify 时，旧选项卡原样保留（不撤回），
+    # 终态答案在底部新卡发出。
+    test_client, feishu_client = client
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            1,
+            {
+                "interaction_id": "q1",
+                "kind": "select",
+                "prompt": "选哪个？",
+                "options": [{"label": "北京", "value": "bj"}],
+            },
+        ),
+    )
+    await _wait_until(lambda: len(feishu_client.sent) == 2, attempts=300)
+
+    await test_client.post(
+        "/events",
+        json=event_payload("message.completed", 2, {"answer": "不等了，直接收尾"}),
+    )
+    await _wait_until(lambda: len(feishu_client.sent) == 3, attempts=300)
+    assert "不等了，直接收尾" in json.dumps(
+        feishu_client.sent[-1][1], ensure_ascii=False
+    )
+    # clarify 选项卡不被撤回。
+    await asyncio.sleep(0.1)
+    assert "feishu-message-2" not in feishu_client.deleted
+
+
 class UuidDedupFeishuClient(FakeFeishuClient):
     """模拟飞书 create message 的 uuid 幂等去重语义。
 
