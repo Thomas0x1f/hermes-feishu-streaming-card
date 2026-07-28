@@ -8722,3 +8722,122 @@ def test_operations_select_rejected_admission_is_claimed_without_forward(monkeyp
     )
 
     assert response.card is None
+
+def test_interaction_poll_aborts_when_sidecar_lost_interaction(monkeypatch):
+    # sidecar 重启丢内存态：/interactions 持续 404("not found")。轮询必须
+    # 在连续 _INTERACTION_LOST_STREAK 次后立即放弃，而不是等满全程超时。
+    monkeypatch.setenv("HERMES_FEISHU_CARD_EVENT_URL", "http://sidecar.test/events")
+    gets = []
+
+    def fake_post(local_vars, url, payload, timeout):
+        return {"ok": True, "applied": True}
+
+    def fake_get(url, timeout):
+        gets.append(url)
+        if len(gets) > 10:  # 守卫失效时防止热循环拖死测试
+            raise AssertionError("poll did not abort on sustained not-found")
+        return {"ok": False, "error": "not found"}
+
+    monkeypatch.setattr(hook_runtime, "_post_interaction_event", fake_post)
+    monkeypatch.setattr(hook_runtime, "_get_json_sync", fake_get)
+
+    result = hook_runtime.request_interaction_from_hermes_locals(
+        {"chat_id": "oc_abc", "message_id": "msg_1"},
+        kind="clarify",
+        interaction_id="q-lost",
+        prompt="选哪个？",
+        options=[{"label": "方案A", "value": "a"}],
+        timeout_seconds=7200,
+        poll_interval_seconds=0,
+    )
+
+    assert result == {"ok": False, "status": "lost", "interaction_id": "q-lost"}
+    assert len(gets) == hook_runtime._INTERACTION_LOST_STREAK
+
+
+def test_interaction_poll_not_found_streak_resets_on_pending(monkeypatch):
+    # 偶发 not found（注册可见性竞态）被 pending 打断时不能误判丢失。
+    monkeypatch.setenv("HERMES_FEISHU_CARD_EVENT_URL", "http://sidecar.test/events")
+    polls = iter(
+        [
+            {"ok": False, "error": "not found"},
+            {"ok": False, "error": "not found"},
+            {"ok": True, "status": "pending"},
+            {"ok": False, "error": "not found"},
+            {"ok": True, "status": "completed", "interaction_id": "q-flaky", "choice": "a"},
+        ]
+    )
+
+    def fake_post(local_vars, url, payload, timeout):
+        return {"ok": True, "applied": True}
+
+    monkeypatch.setattr(hook_runtime, "_post_interaction_event", fake_post)
+    monkeypatch.setattr(hook_runtime, "_get_json_sync", lambda url, timeout: next(polls))
+
+    result = hook_runtime.request_interaction_from_hermes_locals(
+        {"chat_id": "oc_abc", "message_id": "msg_1"},
+        kind="clarify",
+        interaction_id="q-flaky",
+        prompt="选哪个？",
+        options=[{"label": "方案A", "value": "a"}],
+        timeout_seconds=5,
+        poll_interval_seconds=0,
+    )
+
+    assert result["status"] == "completed"
+    assert result["choice"] == "a"
+
+
+def test_clarify_lost_interaction_falls_back_to_native(monkeypatch):
+    # lost 状态映射：不能落进 media/multi_select 兜底，返回 None 让
+    # run.py 走原生文本 clarify（用户直接打字可答）。
+    monkeypatch.setattr(
+        hook_runtime,
+        "request_interaction_from_hermes_locals",
+        lambda *_args, **_kwargs: {"ok": False, "status": "lost", "interaction_id": "x"},
+    )
+
+    result = hook_runtime.request_clarify_response_from_hermes_locals(
+        {},
+        interaction_id="x",
+        question="怎么处理？",
+        choices=["保留", "删除"],
+    )
+
+    assert result is None
+
+
+def test_clarify_pending_steer_becomes_text_answer(monkeypatch):
+    # busy-interrupt 被网关降级成 steer 的用户消息：clarify 等待中每轮
+    # escape 检查 agent._pending_steer，有文本就取走充当答案并结清交互。
+    entry = _FakeClarifyEntry()
+    gateway = _fake_clarify_gateway(entry)
+    _install_fake_tools(monkeypatch, gateway=gateway)
+    posted = _clarify_card_runtime(monkeypatch)  # poll 恒为 pending
+
+    class _Agent:
+        def __init__(self):
+            self._pending_steer = "中国平安 Logo 不对"
+            self._pending_steer_lock = threading.Lock()
+
+    agent = _Agent()
+    result = hook_runtime.request_clarify_response_from_hermes_locals(
+        {
+            "chat_id": "oc_abc",
+            "message_id": "msg_1",
+            "session_key": "sess-1",
+            "agent": agent,
+        },
+        interaction_id="clarify-steer-1",
+        question="用哪版方案？",
+        choices=["方案A", "方案B"],
+        timeout_seconds=5,
+    )
+
+    assert result == "中国平安 Logo 不对"
+    assert agent._pending_steer is None
+    assert [payload["event"] for payload in posted] == [
+        "interaction.requested",
+        "interaction.completed",
+    ]
+    assert posted[-1]["data"]["choice"] == "中国平安 Logo 不对"

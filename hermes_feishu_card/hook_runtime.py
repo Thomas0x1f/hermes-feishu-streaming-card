@@ -1113,6 +1113,7 @@ def request_interaction_from_hermes_locals(
         _hfc_warn(
             f"interaction poll started: {interaction_id} timeout={timeout:.0f}s"
         )
+        missing_streak = 0
         while True:
             try:
                 result = _get_json_sync(url, config.timeout_seconds)
@@ -1124,6 +1125,29 @@ def request_interaction_from_hermes_locals(
                     f"status={result.get('status')}"
                 )
                 return result
+            # sidecar 存活但不认识这个交互（典型场景：sidecar 进程重启，
+            # 内存交互态全丢）。注册先于轮询发生，所以持续 not found 是
+            # 终态——等满全程超时只会把 agent 卡死几小时。连续多次才放弃，
+            # 避开注册可见性竞态；宕机/断连走 except 分支不计入。
+            if (
+                isinstance(result, dict)
+                and result.get("ok") is False
+                and str(result.get("error") or "").strip()
+                in {"not found", "interaction not found"}
+            ):
+                missing_streak += 1
+                if missing_streak >= _INTERACTION_LOST_STREAK:
+                    _hfc_warn(
+                        f"interaction poll aborted: {interaction_id} lost by "
+                        f"sidecar (not found x{missing_streak})"
+                    )
+                    return {
+                        "ok": False,
+                        "status": "lost",
+                        "interaction_id": interaction_id,
+                    }
+            else:
+                missing_streak = 0
             if escape is not None:
                 try:
                     escaped = escape()
@@ -4965,6 +4989,30 @@ def _hermes_interrupt_requested() -> bool:
         return False
 
 
+def _drain_agent_pending_steer(agent: Any) -> str:
+    """clarify 等待期间，把 busy-interrupt 降级成的 steer 文本取出充当答案。
+
+    网关 busy_input_mode=interrupt 对"工具执行中"的活跃 turn 会把新消息
+    redirect→steer（不杀工具）；clarify 恰好是可能阻塞数小时的工具，steer
+    便签在工具结束前永远送不到模型。这里直接把便签取走作为 clarify 的文本
+    回答；取走后 conversation loop 的 steer drain 看到空值，不会重复注入。
+    """
+    if agent is None:
+        return ""
+    lock = getattr(agent, "_pending_steer_lock", None)
+    try:
+        if lock is not None:
+            with lock:
+                text = getattr(agent, "_pending_steer", None) or ""
+                agent._pending_steer = None
+        else:
+            text = getattr(agent, "_pending_steer", None) or ""
+            agent._pending_steer = None
+    except Exception:
+        return ""
+    return str(text).strip()
+
+
 class _ClarifyTextChannel:
     """卡片 clarify 的旁路文本通道。
 
@@ -5130,6 +5178,8 @@ def request_clarify_response_from_hermes_locals(
         else None
     )
 
+    _agent = local_vars.get("agent")
+
     def escape() -> dict[str, Any] | None:
         if _hermes_interrupt_requested():
             return {"status": "interrupted"}
@@ -5137,6 +5187,12 @@ def request_clarify_response_from_hermes_locals(
             text = text_channel.poll_text()
             if text:
                 return {"status": "text_reply", "text": text}
+        # busy-interrupt 被降级成 steer 的用户消息：取出充当 clarify 答案。
+        # multi_select 需要结构化选择，自由文本无法映射，不走此通道。
+        if not is_multi_select:
+            steered = _drain_agent_pending_steer(_agent)
+            if steered:
+                return {"status": "text_reply", "text": steered}
         return None
 
     _hfc_warn(
@@ -5198,6 +5254,10 @@ def request_clarify_response_from_hermes_locals(
         # 超时是"人没回"，不是"图挂了"——卡片（含媒体）已成功投递，
         # 不能落进下面的 media unavailable 兜底造成误报。
         return _HFC_CLARIFY_TIMEOUT
+    if isinstance(result, dict) and result.get("status") == "lost":
+        # sidecar 丢失交互状态（进程重启）：立即放弃卡片等待，返回 None
+        # 走原生文本 clarify 兜底，用户在聊天里直接打字即可回答。
+        return _HFC_MULTI_SELECT_UNAVAILABLE if is_multi_select else None
     if media_paths:
         return _HFC_CLARIFY_MEDIA_UNAVAILABLE
     if is_multi_select:
@@ -5720,6 +5780,10 @@ def _interaction_timeout(value: float | None) -> float:
     if env_value is not None and env_value >= 0:
         return env_value
     return 300.0
+
+
+# 交互轮询连续收到多少次 "not found" 后判定 sidecar 已丢失该交互并放弃等待。
+_INTERACTION_LOST_STREAK = 3
 
 
 def _interaction_poll_interval(value: float | None) -> float:
