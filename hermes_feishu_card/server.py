@@ -1907,6 +1907,15 @@ async def _render_displaced_now(app: web.Application, session_key: str) -> None:
     )
 
 
+def _clarify_urgent_enabled() -> bool:
+    """clarify 选项卡是否加急，`HERMES_FEISHU_CARD_CLARIFY_URGENT` 控制，
+    默认开启；`0/false/no/off` 关闭。"""
+    value = (
+        os.environ.get("HERMES_FEISHU_CARD_CLARIFY_URGENT", "1").strip().lower()
+    )
+    return value not in {"0", "false", "no", "off"}
+
+
 def _urgent_clarify_card(
     app: web.Application,
     session: CardSession,
@@ -1914,6 +1923,8 @@ def _urgent_clarify_card(
     bot_id: str | None,
 ) -> None:
     """clarify 选项卡发出后对消息加急（应用内强提醒），失败静默降级。"""
+    if not _clarify_urgent_enabled():
+        return
     interaction = session.active_interaction
     open_id = interaction.initiator_open_id if interaction is not None else ""
     if not open_id or not message_id:

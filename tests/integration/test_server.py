@@ -8660,6 +8660,29 @@ async def test_clarify_request_sends_urgent_app_reminder(client):
     assert feishu_client.urgent[0] == ("feishu-message-2", ["ou_thomas"])
 
 
+async def test_clarify_urgent_can_be_disabled_by_env(client, monkeypatch):
+    monkeypatch.setenv("HERMES_FEISHU_CARD_CLARIFY_URGENT", "0")
+    test_client, feishu_client = client
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            1,
+            {
+                "interaction_id": "q1",
+                "kind": "select",
+                "prompt": "选哪个？",
+                "options": [{"label": "北京", "value": "bj"}],
+                "initiator_open_id": "ou_thomas",
+            },
+        ),
+    )
+    await _wait_until(lambda: len(feishu_client.sent) == 2, attempts=300)
+    await asyncio.sleep(0.1)
+    assert feishu_client.urgent == []
+
+
 async def test_clarify_request_without_initiator_skips_urgent(client):
     test_client, feishu_client = client
     await test_client.post("/events", json=event_payload("message.started", 0))
