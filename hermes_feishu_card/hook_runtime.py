@@ -4985,8 +4985,11 @@ class _ClarifyTextChannel:
         try:
             if not entry.event.is_set():
                 return None
+            # hermes 0.19.0 起 wait_for_response(timeout<=0) 语义从"立即
+            # 返回"变为"无限等待"——此处 event 已置位会立即返回，但仍用
+            # 极小正超时防御，绝不传 0。
             text = str(
-                self._gateway.wait_for_response(self._clarify_id, 0.0) or ""
+                self._gateway.wait_for_response(self._clarify_id, 0.001) or ""
             ).strip()
         except Exception:
             self._entry = None
@@ -4999,9 +5002,18 @@ class _ClarifyTextChannel:
     def close(self) -> None:
         if self._entry is None:
             return
+        entry = self._entry
         self._entry = None
         try:
-            self._gateway.wait_for_response(self._clarify_id, 0.0)
+            if not entry.event.is_set():
+                # hermes 0.19.0 起 wait_for_response(timeout<=0) 是无限
+                # 等待，不能再用它做非阻塞清理：用户点卡片按钮 resolve 的
+                # 是 sidecar 交互，这里的 entry 永远不会被置位，旧写法会
+                # 把 agent 线程卡死在 close() 里。先 resolve 空响应把
+                # event 置位，再用极小超时走正常清理路径（从 _entries /
+                # _session_index 移除，避免残留 pending 误报 busy）。
+                self._gateway.resolve_gateway_clarify(self._clarify_id, "")
+            self._gateway.wait_for_response(self._clarify_id, 0.001)
         except Exception:
             pass
 

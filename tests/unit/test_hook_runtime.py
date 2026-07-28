@@ -5061,7 +5061,7 @@ def _install_fake_tools(monkeypatch, *, gateway=None, interrupted=False):
 
 def _fake_clarify_gateway(entry):
     module = types.ModuleType("tools.clarify_gateway")
-    module.calls = {"register": [], "wait": []}
+    module.calls = {"register": [], "wait": [], "resolve": []}
 
     def register(*, clarify_id, session_key, question, choices):
         module.calls["register"].append(
@@ -5076,10 +5076,24 @@ def _fake_clarify_gateway(entry):
 
     def wait_for_response(clarify_id, timeout):
         module.calls["wait"].append((clarify_id, timeout))
+        # hermes 0.19.0 语义：timeout<=0 是无限等待。event 未置位时调用
+        # 会把线程卡死——测试里直接失败。
+        if float(timeout) <= 0 and not entry.event.is_set():
+            raise AssertionError(
+                "wait_for_response(timeout<=0) would block forever "
+                "(hermes 0.19.0 semantics)"
+            )
         return entry.response
+
+    def resolve_gateway_clarify(clarify_id, response):
+        module.calls["resolve"].append((clarify_id, response))
+        entry.response = response
+        entry.event.set()
+        return True
 
     module.register = register
     module.wait_for_response = wait_for_response
+    module.resolve_gateway_clarify = resolve_gateway_clarify
     return module
 
 
@@ -5181,7 +5195,11 @@ def test_clarify_card_submit_clears_text_channel(monkeypatch):
     )
 
     assert result == "保留"
-    assert gateway.calls["wait"] == [("clarify-3", 0.0)]
+    # 回归（hermes 0.19.0）：按钮 resolve 时旁路 entry 未被置位，close()
+    # 不能用 wait_for_response(timeout<=0) 做清理——那是无限等待，会把
+    # agent 线程卡死。必须先 resolve 空响应置位，再用正超时清理。
+    assert gateway.calls["resolve"] == [("clarify-3", "")]
+    assert gateway.calls["wait"] == [("clarify-3", 0.001)]
 
 
 def test_clarify_interrupt_returns_sentinel_and_fails_interaction(monkeypatch):
@@ -5204,7 +5222,9 @@ def test_clarify_interrupt_returns_sentinel_and_fails_interaction(monkeypatch):
         "interaction.failed",
     ]
     assert posted[-1]["data"]["error"] == "用户已发送新消息，交互取消"
-    assert gateway.calls["wait"] == [("clarify-4", 0.0)]
+    # entry 未被置位：close() 先 resolve 再用正超时清理，绝不传 0。
+    assert gateway.calls["resolve"] == [("clarify-4", "")]
+    assert gateway.calls["wait"] == [("clarify-4", 0.001)]
 
 
 def test_clarify_multi_select_does_not_open_text_channel(monkeypatch):
