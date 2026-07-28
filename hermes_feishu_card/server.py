@@ -1888,6 +1888,7 @@ async def _recreate_card_at_bottom(
     bot_id: str | None,
     *,
     previous_message_id: str | None,
+    freeze_previous: bool = False,
 ) -> bool:
     """Re-create a displaced streaming card at the bottom of its chat.
 
@@ -1895,6 +1896,9 @@ async def _recreate_card_at_bottom(
     Feishu message id at it, and retires the displaced card in place
     (best effort).  Returns False when the send did not go through so the
     caller can keep patching the old card.
+
+    freeze_previous=True（clarify resolved）时旧卡不撤回也不换指针，
+    而是定格为本次渲染（含"已选择：xxx"），让用户的回答留在历史里。
     """
     # Claim the flag up front so a concurrent event render does not also
     # re-create; on failure the caller falls back to patching the old card.
@@ -1930,12 +1934,33 @@ async def _recreate_card_at_bottom(
         summary_session_key = summary_session_keys.pop(previous_message_id, None)
         if summary_session_key is not None:
             summary_session_keys[delivery.message_id] = summary_session_key
-        asyncio.get_running_loop().create_task(
-            _retire_displaced_card(
-                app, previous_message_id, bot_id, recall=not was_displaced
+        if freeze_previous:
+            # clarify resolved：旧卡定格为含"已选择：xxx"的本次渲染
+            # （文字旁路回答时旧卡还停在表单态，需要补一次 PATCH），
+            # 用户的回答永久可见，后续内容在底部新卡继续。
+            asyncio.get_running_loop().create_task(
+                _freeze_resolved_card(app, previous_message_id, card, bot_id)
             )
-        )
+        else:
+            asyncio.get_running_loop().create_task(
+                _retire_displaced_card(
+                    app, previous_message_id, bot_id, recall=not was_displaced
+                )
+            )
     return True
+
+
+async def _freeze_resolved_card(
+    app: web.Application,
+    message_id: str,
+    card: dict[str, Any],
+    bot_id: str | None,
+) -> None:
+    """Freeze a resolved clarify card in place so the answer stays visible."""
+    try:
+        await _update_card_for_app(app, message_id, card, bot_id)
+    except Exception:
+        logger.debug("freeze resolved card failed", exc_info=True)
 
 
 async def _retire_displaced_card(
@@ -2726,23 +2751,29 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
             #   "等你选择"的推送。此刻表单还没有用户输入、无状态可丢；且重建
             #   会立即清 displaced 标记，让 inbound bump 的防抖重建任务自动
             #   失效，不再有 f4c224a 时代双重建竞争导致的选项卡错乱。
+            # - clarify resolved/取消（interaction.completed/failed）：无条件
+            #   置底，旧卡定格为"已选择：xxx"（freeze，不撤回不换指针），
+            #   每轮问答永久留在历史里，后续内容在底部新卡继续。
             # - 终态（最终回答/失败）：无条件置底，用户收到"已完成"的推送。
-            # - clarify resolved/取消（interaction.completed/failed）与终态后
-            #   补渲染：保持原状，仅被顶开（displaced）时置底。
+            # - 终态后补渲染：保持原状，仅被顶开（displaced）时置底。
             # 无条件置底只针对主对话卡（chat）：notice/command 等辅助卡完成
             # 不值得为通知重建刷屏。
+            is_interaction_resolution = event.event in {
+                "interaction.completed",
+                "interaction.failed",
+            }
             if (
                 (
                     latest_session.delivery_kind == "chat"
-                    and (event.event == "interaction.requested" or is_terminal)
+                    and (
+                        event.event == "interaction.requested"
+                        or is_interaction_resolution
+                        or is_terminal
+                    )
                 )
                 or (
                     latest_session.displaced
-                    and (
-                        latest_session.status in {"completed", "failed"}
-                        or event.event
-                        in {"interaction.completed", "interaction.failed"}
-                    )
+                    and latest_session.status in {"completed", "failed"}
                 )
             ):
                 recreated = await _recreate_card_at_bottom(
@@ -2752,6 +2783,7 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                     latest_card,
                     bot_id,
                     previous_message_id=target_message_id,
+                    freeze_previous=is_interaction_resolution,
                 )
                 if recreated:
                     return True

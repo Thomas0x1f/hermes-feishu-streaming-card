@@ -335,6 +335,17 @@ def _render_interaction_elements(
         return []
 
     elements: list[Dict[str, Any]] = []
+    # 问题放正文而不是标题：标题是 plain_text 且有长度限制，长问题会被
+    # 截断显示不全。resolved 后也保留，定格卡上"问题 + 回答"完整可读。
+    prompt_text = normalize_stream_text(interaction.prompt).strip()
+    if prompt_text:
+        elements.append(
+            {
+                "tag": "markdown",
+                "element_id": "interaction_prompt",
+                "content": f"**{prompt_text}**",
+            }
+        )
     for index, image_key in enumerate(interaction.media_image_keys):
         elements.append(
             {

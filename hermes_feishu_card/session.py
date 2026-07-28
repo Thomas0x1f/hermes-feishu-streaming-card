@@ -115,7 +115,9 @@ class CardSession:
     def runtime_header_text(self) -> str:
         interaction = self.active_interaction
         if interaction is not None and interaction.status == "pending":
-            return normalize_stream_text(interaction.prompt).strip()
+            # clarify 的问题渲染在卡片正文（标题是 plain_text，放不下
+            # 长问题会被截断）；等待选择期间标题回落到产品名。
+            return ""
         if self.status == "completed":
             return ""
         if self.runtime_phase_text:

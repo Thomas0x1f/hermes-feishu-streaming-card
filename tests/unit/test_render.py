@@ -150,8 +150,15 @@ def test_pending_interaction_has_priority_over_compaction_phase():
 
     card = render_card(session, title="研发助手")
 
-    assert card["header"]["title"]["content"] == "允许继续执行吗？"
+    # clarify 的问题渲染在正文（标题放不下长问题），标题回落产品名。
+    assert card["header"]["title"]["content"] == "研发助手"
     assert "正在压缩上下文" not in str(card["header"])
+    prompt_element = next(
+        element
+        for element in card["body"]["elements"]
+        if element.get("element_id") == "interaction_prompt"
+    )
+    assert "允许继续执行吗？" in prompt_element["content"]
 
 
 def test_tool_activity_clears_compaction_and_restores_tool_subtitle():
@@ -213,7 +220,9 @@ def test_v4_answer_delta_remains_primary_over_public_interim_text():
     assert "公开阶段说明" not in str(card)
 
 
-def test_v4_waiting_prompt_moves_to_header_without_body_duplication():
+def test_v4_waiting_prompt_renders_in_body_not_header():
+    # clarify 的问题渲染在正文：标题是 plain_text 且有长度限制，长问题
+    # 会被截断显示不全；等待选择期间标题回落产品名。
     session = CardSession(conversation_id="c", message_id="m", chat_id="oc")
     session.active_interaction = InteractionState(
         interaction_id="approval-1",
@@ -230,9 +239,15 @@ def test_v4_waiting_prompt_moves_to_header_without_body_duplication():
         if item.get("element_id") == "footer"
     )
 
-    assert card["header"]["title"]["content"] == "允许覆盖文件吗？"
+    assert card["header"]["title"]["content"] == "Hermes Agent"
     assert "subtitle" not in card["header"]
     assert str(card).count("允许覆盖文件吗？") == 1
+    prompt_element = next(
+        item
+        for item in card["body"]["elements"]
+        if item.get("element_id") == "interaction_prompt"
+    )
+    assert "允许覆盖文件吗？" in prompt_element["content"]
     assert "目标文件：report.html" in str(card)
     assert "等待" in footer["content"]
     assert "ctx " not in footer["content"]

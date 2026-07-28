@@ -4243,7 +4243,13 @@ async def test_v4_interaction_restores_cached_preview_on_same_card(client):
     )
 
     _, waiting = await wait_for_card_update(feishu_client, "允许读取精确位置吗？")
-    assert waiting["header"]["title"]["content"] == "允许读取精确位置吗？"
+    # clarify 的问题渲染在正文而非标题（长问题标题显示不全）。
+    assert waiting["header"]["title"]["content"] == "Hermes Agent"
+    assert any(
+        item.get("element_id") == "interaction_prompt"
+        and "允许读取精确位置吗？" in item.get("content", "")
+        for item in waiting["body"]["elements"]
+    )
     button = next(
         item for item in waiting["body"]["elements"] if item.get("tag") == "button"
     )
@@ -8497,14 +8503,20 @@ async def test_clarify_request_rebottoms_and_renders_options_on_new_card(client)
     rendered = json.dumps(feishu_client.sent[-1][1], ensure_ascii=False)
     assert "北京" in rendered
 
-    # displaced 已被重建清除：clarify resolved（interaction.completed）
-    # 原地渲染，不再重复重建。
+    # clarify resolved（interaction.completed）也无条件置底：旧卡定格
+    # 为"已选择"（freeze PATCH，不撤回不换指针），后续在新卡继续。
     await test_client.post(
         "/events",
         json=event_payload("interaction.completed", 2, {"interaction_id": "pick-1"}),
     )
-    await asyncio.sleep(0.1)
-    assert len(feishu_client.sent) == 2
+    await _wait_until(lambda: len(feishu_client.sent) == 3, attempts=300)
+    await _wait_until(
+        lambda: any(mid == "feishu-message-2" for mid, _ in feishu_client.updated),
+        attempts=300,
+    )
+    frozen = [card for mid, card in feishu_client.updated if mid == "feishu-message-2"]
+    assert "已移至下方" not in json.dumps(frozen[-1], ensure_ascii=False)
+    assert "feishu-message-2" not in feishu_client.deleted
 
 
 async def test_multi_clarify_chain_rebottoms_each_request_and_resolution(client):
@@ -8538,8 +8550,8 @@ async def test_multi_clarify_chain_rebottoms_each_request_and_resolution(client)
         "/conversation/bumped", json={"chat_id": "oc_abc", "source": "inbound"}
     )
 
-    # interaction.completed → 检测到 displaced → 置底重建（后台异步），
-    # 被顶开的旧卡收到「已移至下方」灰指针。
+    # interaction.completed → 无条件置底重建（后台异步），旧卡定格为
+    # "已选择"（freeze），用户的回答留在历史里。
     await test_client.post(
         "/events",
         json=event_payload("interaction.completed", 2, {"interaction_id": "q1"}),
@@ -8549,6 +8561,7 @@ async def test_multi_clarify_chain_rebottoms_each_request_and_resolution(client)
             break
         await asyncio.sleep(0.02)
     assert len(feishu_client.sent) == 3
+    assert "feishu-message-2" not in feishu_client.deleted
 
     # 下一个 clarify 发起 → 再次置底新卡，选项在最新卡上渲染。
     await test_client.post(

@@ -1084,7 +1084,9 @@ def test_interaction_temporarily_overrides_then_restores_preview():
             },
         )
     )
-    assert session.runtime_header_text == "允许继续执行测试吗？"
+    # clarify 的问题渲染在正文而非标题：等待选择期间标题不再被 prompt
+    # 覆盖（回落产品名），也不显示过时的工具预览。
+    assert session.runtime_header_text == ""
 
     assert session.apply(
         event(
