@@ -1052,8 +1052,13 @@ def request_interaction_from_hermes_locals(
                 f"polling anyway: {interaction_id}"
             )
         if isinstance(post_result, dict) and post_result.get("ok") is False:
+            _hfc_warn(
+                f"interaction fallback to native (sidecar rejected): {interaction_id} "
+                f"error={post_result.get('error')!r}"
+            )
             return None
         if _uses_text_interaction_fallback(post_result):
+            _hfc_warn(f"interaction using text fallback mode: {interaction_id}")
             return None
         if isinstance(post_result, dict) and post_result.get("applied") is False:
             for _ in range(2):
@@ -1082,6 +1087,10 @@ def request_interaction_from_hermes_locals(
                         return None
                     break
                 if isinstance(post_result, dict) and post_result.get("ok") is False:
+                    _hfc_warn(
+                        "interaction fallback to native (retry rejected): "
+                        f"{interaction_id} error={post_result.get('error')!r}"
+                    )
                     return None
                 if _uses_text_interaction_fallback(post_result):
                     return None
@@ -1091,18 +1100,29 @@ def request_interaction_from_hermes_locals(
                 ):
                     break
             else:
+                _hfc_warn(
+                    "interaction fallback to native (applied=False after "
+                    f"retries): {interaction_id}"
+                )
                 return None
         base_url = _summary_base_url(config.event_url)
         url = f"{base_url}/interactions/{parse.quote(interaction_id, safe='')}"
         timeout = _interaction_timeout(timeout_seconds)
         poll_interval = _interaction_poll_interval(poll_interval_seconds)
         deadline = time.monotonic() + timeout
+        _hfc_warn(
+            f"interaction poll started: {interaction_id} timeout={timeout:.0f}s"
+        )
         while True:
             try:
                 result = _get_json_sync(url, config.timeout_seconds)
             except Exception:
                 result = None
             if isinstance(result, dict) and result.get("status") in {"completed", "failed"}:
+                _hfc_warn(
+                    f"interaction poll resolved: {interaction_id} "
+                    f"status={result.get('status')}"
+                )
                 return result
             if escape is not None:
                 try:
@@ -1137,7 +1157,11 @@ def request_interaction_from_hermes_locals(
                     "interaction_id": interaction_id,
                 }
             time.sleep(poll_interval)
-    except Exception:
+    except Exception as exc:
+        _hfc_warn(
+            "interaction fallback to native (unexpected error): "
+            f"{interaction_id} {exc.__class__.__name__}: {exc}"
+        )
         return None
 
 
@@ -5103,6 +5127,10 @@ def request_clarify_response_from_hermes_locals(
                 return {"status": "text_reply", "text": text}
         return None
 
+    _hfc_warn(
+        f"clarify interaction begin: {interaction_id} kind={kind} "
+        f"options={len(options)}"
+    )
     try:
         result = request_interaction_from_hermes_locals(
             local_vars,
@@ -5117,6 +5145,10 @@ def request_clarify_response_from_hermes_locals(
     finally:
         if text_channel is not None:
             text_channel.close()
+    _hfc_warn(
+        f"clarify interaction end: {interaction_id} "
+        f"result={'none' if result is None else (result.get('status') if isinstance(result, dict) else 'raw')}"
+    )
     if isinstance(result, dict) and result.get("status") == "text_reply":
         text = str(result.get("text") or "").strip()
         _post_clarify_terminal_event(
