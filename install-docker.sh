@@ -154,22 +154,27 @@ install_package() {
   fi
   local pip_log
   pip_log="$(mktemp)"
-  if "$python_bin" -m pip install --upgrade "$spec" >"$pip_log" 2>&1; then
+  # 分支 HEAD 前进但包版本号未变时，pip --upgrade 会误判“已满足”而跳过更新；
+  # 先强制重装包本体（--no-deps 避免全量重装依赖），再常规安装一次补齐新增依赖
+  local pip_status=0
+  { "$python_bin" -m pip install --upgrade --force-reinstall --no-deps "$spec" &&
+    "$python_bin" -m pip install "$spec"; } >"$pip_log" 2>&1 || pip_status=$?
+  if [ "$pip_status" -eq 0 ]; then
     cat "$pip_log"
     rm -f "$pip_log"
     return
   fi
-  local pip_status
-  pip_status=$?
   if grep -q "externally-managed-environment" "$pip_log"; then
     log "Python environment is externally managed; retrying with --break-system-packages"
-    if "$python_bin" -m pip install --upgrade --break-system-packages "$spec" >"$pip_log" 2>&1; then
+    pip_status=0
+    { "$python_bin" -m pip install --upgrade --force-reinstall --no-deps --break-system-packages "$spec" &&
+      "$python_bin" -m pip install --break-system-packages "$spec"; } >"$pip_log" 2>&1 || pip_status=$?
+    if [ "$pip_status" -eq 0 ]; then
       cat "$pip_log"
       log "pip warning handled safely; package install completed"
       rm -f "$pip_log"
       return
     fi
-    pip_status=$?
     cat "$pip_log" >&2
     rm -f "$pip_log"
     return "$pip_status"
