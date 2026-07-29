@@ -228,7 +228,7 @@ def create_app(
     app[BOT_ROUTER_KEY] = bot_router
     app[PROCESS_TOKEN_KEY] = process_token
     # 掺入每次进程启动唯一的 nonce：delivery uuid 是确定性哈希，重启会把
-    # _RECREATE_SEQ 归零，若不加盐，1 小时内重启后的发卡会被飞书 uuid 去重
+    # _DELIVERY_SEQ 归零，若不加盐，1 小时内重启后的发卡会被飞书 uuid 去重
     # 成重启前的旧卡（返回已撤回的 message_id，后续 PATCH 全部 230011）。
     app[BOOT_NONCE_KEY] = secrets.token_hex(8)
     app[METRICS_KEY] = SidecarMetrics()
@@ -1889,9 +1889,11 @@ async def _consume_pending_rebottom(
     return True
 
 
-# 置底重建全局序号：参与 delivery uuid，保证同进程内任意两次重建的 uuid
-# 不同（见 _recreate_card_at_bottom 内注释）。重启归零由 BOOT_NONCE 兜底。
-_RECREATE_SEQ = itertools.count(1)
+# 发卡全局序号：参与 delivery uuid，保证同进程内任意两次新建消息（新轮
+# 首卡、置底重建）的 uuid 不同——话题群各轮共用 session_key，裸用它会撞
+# 进飞书 uuid 去重窗口（见 _recreate_card_at_bottom 内注释）。重启归零由
+# BOOT_NONCE 兜底。
+_DELIVERY_SEQ = itertools.count(1)
 
 
 async def _recreate_card_at_bottom(
@@ -1934,7 +1936,7 @@ async def _recreate_card_at_bottom(
         # 新卡会落到群主流而不是原话题里。
         thread_id=session.thread_id or None,
         reply_to_message_id=reply_anchor,
-        delivery_key=f"{session_key}#rb{next(_RECREATE_SEQ)}",
+        delivery_key=f"{session_key}#rb{next(_DELIVERY_SEQ)}",
         delivery_kind=session.delivery_kind,
     )
     if not delivery.delivered or not delivery.message_id:
@@ -2565,7 +2567,10 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                 route.bot_id,
                 thread_id=_thread_id_for_event(event),
                 reply_to_message_id=_reply_to_message_id_for_event(event),
-                delivery_key=session_key,
+                # 话题群各轮共用 message_id → 同一 session_key，裸用它当
+                # delivery_key 会让新一轮首卡与上一轮撞 uuid，被飞书幂等
+                # 去重成顶部旧卡（本轮进度全部打在顶部卡片上）。
+                delivery_key=f"{session_key}#t{next(_DELIVERY_SEQ)}",
                 delivery_kind=_delivery_kind(event) or "chat",
             )
             if not delivery.delivered:
@@ -2663,7 +2668,8 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                     route.bot_id,
                     thread_id=_thread_id_for_event(event),
                     reply_to_message_id=_reply_to_message_id_for_event(event),
-                    delivery_key=session_key,
+                    # 同上：session_key 可能跨轮复用，必须掺入全局序号。
+                    delivery_key=f"{session_key}#t{next(_DELIVERY_SEQ)}",
                     delivery_kind=_delivery_kind(event)
                     or ("notice" if event.event == "system.notice" else "chat"),
                 )

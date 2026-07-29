@@ -8917,7 +8917,7 @@ async def test_rebottom_survives_feishu_uuid_dedup():
 
 
 async def test_sidecar_restart_survives_feishu_uuid_dedup():
-    # 回归：delivery uuid 是确定性哈希，sidecar 重启把 _RECREATE_SEQ 归零，
+    # 回归：delivery uuid 是确定性哈希，sidecar 重启把 _DELIVERY_SEQ 归零，
     # 去重窗口（约 1 小时）内重启后的发卡全部被飞书去重成重启前的旧卡
     # （返回已撤回的 message_id，后续 PATCH 连环 230011）。每次进程启动
     # 必须掺入唯一 nonce，重启后发卡不得与旧进程撞 uuid。
@@ -8942,6 +8942,68 @@ async def test_sidecar_restart_survives_feishu_uuid_dedup():
         assert len(feishu_client.uuid_index) == 2
     finally:
         await test_client2.close()
+
+
+async def test_topic_new_turn_first_card_survives_feishu_uuid_dedup():
+    # 回归：话题群各轮共用同一 message_id → 同一 session_key，新一轮首卡
+    # 发送裸用 session_key 当 delivery_key，与上一轮首卡撞 uuid 被飞书幂等
+    # 去重——send"成功"却返回顶部旧卡 id，本轮进度更新全部打在顶部卡片上。
+    feishu_client = UuidDedupFeishuClient()
+    app = create_app(feishu_client)
+    test_client = TestClient(TestServer(app))
+    await test_client.start_server()
+    topic = dict(
+        conversation_id="omt_topic",
+        message_id="om_topic_user",
+        thread_id="omt_topic",
+    )
+    try:
+        await test_client.post(
+            "/events",
+            json=event_payload(
+                "message.started",
+                0,
+                {"reply_to_message_id": "om_topic_user"},
+                **topic,
+            ),
+        )
+        await test_client.post(
+            "/events",
+            json=event_payload(
+                "message.completed",
+                1,
+                {"reply_to_message_id": "om_topic_user", "answer": "第一轮答案"},
+                **topic,
+            ),
+        )
+        assert len(feishu_client.sent) == 1
+
+        # 第二轮复用同一 message_id：首卡必须真实新建，不得被去重成旧卡。
+        await test_client.post(
+            "/events",
+            json=event_payload(
+                "message.started",
+                0,
+                {"reply_to_message_id": "om_topic_user"},
+                **topic,
+            ),
+        )
+        assert len(feishu_client.sent) == 2
+
+        # 第二轮进度要落在新卡上，而不是顶部旧卡。
+        await test_client.post(
+            "/events",
+            json=event_payload(
+                "answer.delta",
+                1,
+                {"reply_to_message_id": "om_topic_user", "text": "第二轮进度"},
+                **topic,
+            ),
+        )
+        message_id, _card = await wait_for_card_update(feishu_client, "第二轮进度")
+        assert message_id == "feishu-message-2"
+    finally:
+        await test_client.close()
 
 
 async def test_rebottom_uuid_unique_for_sessions_merged_to_same_key():
