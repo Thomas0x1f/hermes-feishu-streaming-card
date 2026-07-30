@@ -133,6 +133,7 @@ class FakeFeishuClient:
     def __init__(self):
         self.sent = []
         self.updated = []
+        self.deleted = []
         self.urgent = []
         self.uploaded_images = []
         self.fail_send = False
@@ -156,6 +157,9 @@ class FakeFeishuClient:
             self.update_failures_remaining -= 1
             raise RuntimeError(self.update_error_message)
         self.updated.append((message_id, card))
+
+    async def delete_message(self, message_id):
+        self.deleted.append(message_id)
 
     async def urgent_app(self, message_id, open_ids):
         self.urgent.append((message_id, list(open_ids)))
@@ -704,14 +708,6 @@ async def _wait_until(predicate, attempts=80):
             return
         await _REAL_ASYNCIO_SLEEP(0.01)
     raise AssertionError("condition was not observed")
-
-
-def _pointer_patched(feishu_client, message_id):
-    """旧卡是否已被 PATCH 成"已移至下方"的灰色指针小卡。"""
-    return any(
-        mid == message_id and "已移至下方" in json.dumps(card, ensure_ascii=False)
-        for mid, card in feishu_client.updated
-    )
 
 
 async def wait_for_metric(test_client, metric_name, expected_value, attempts=80):
@@ -4136,7 +4132,7 @@ async def test_event_lifecycle_sends_then_updates_final_card(client):
     assert len(feishu_client.updated) >= 1
     assert all(message_id == "feishu-message-1" for message_id, _ in feishu_client.updated)
     assert "最终答案" in str(feishu_client.updated[-1][1])
-    assert not _pointer_patched(feishu_client, "feishu-message-1")
+    assert feishu_client.deleted == []
     health = await test_client.get("/health")
     metrics = (await health.json())["metrics"]
     assert metrics["events_received"] == 3
@@ -8376,7 +8372,7 @@ async def test_clarify_request_rebottoms_and_renders_options_on_new_card(client)
     assert frozen["header"]["subtitle"]["content"] == "已完成"
     assert "选哪个？" in serialized_frozen
     assert "已选择：北京" in serialized_frozen
-    assert not _pointer_patched(feishu_client, "feishu-message-2")
+    assert "feishu-message-2" not in feishu_client.deleted
     # 新分段卡不含 clarify 问答。
     new_segment = json.dumps(feishu_client.sent[-1][1], ensure_ascii=False)
     assert "选哪个？" not in new_segment
@@ -8390,7 +8386,7 @@ async def test_multi_clarify_chain_rebottoms_each_request_and_resolution(client)
     await test_client.post("/events", json=event_payload("message.started", 0))
     assert len(feishu_client.sent) == 1
 
-    # 第一个 clarify 发起 → 置底新卡（旧卡 PATCH 成指针小卡）。
+    # 第一个 clarify 发起 → 置底新卡（未被顶开的旧卡直接撤回）。
     await test_client.post(
         "/events",
         json=event_payload(
@@ -8406,7 +8402,7 @@ async def test_multi_clarify_chain_rebottoms_each_request_and_resolution(client)
     )
     assert len(feishu_client.sent) == 2
     assert "平安" in json.dumps(feishu_client.sent[-1][1], ensure_ascii=False)
-    await _wait_until(lambda: _pointer_patched(feishu_client, "feishu-message-1"))
+    await _wait_until(lambda: "feishu-message-1" in feishu_client.deleted)
 
     # interaction.completed → 无条件置底重建（后台异步），旧卡定格为
     # "已选择"（freeze），用户的回答留在历史里。
@@ -8419,7 +8415,7 @@ async def test_multi_clarify_chain_rebottoms_each_request_and_resolution(client)
             break
         await asyncio.sleep(0.02)
     assert len(feishu_client.sent) == 3
-    assert not _pointer_patched(feishu_client, "feishu-message-2")
+    assert "feishu-message-2" not in feishu_client.deleted
 
     # 下一个 clarify 发起 → 再次置底新卡，选项在最新卡上渲染。
     await test_client.post(
@@ -8834,7 +8830,7 @@ async def test_terminal_closing_unanswered_clarify_keeps_option_card(client):
     assert len(feishu_client.sent) == 2
     # clarify 选项卡不被撤回。
     await asyncio.sleep(0.1)
-    assert not _pointer_patched(feishu_client, "feishu-message-2")
+    assert "feishu-message-2" not in feishu_client.deleted
 
 
 class UuidDedupFeishuClient(FakeFeishuClient):

@@ -96,12 +96,19 @@ async def feishu_api():
             {"code": 0, "msg": "ok", "data": {"image_key": "img_v2_master"}}
         )
 
+    async def delete_message(request):
+        requests.append(
+            ("delete", request.match_info["message_id"], dict(request.headers))
+        )
+        return web.json_response({"code": 0, "msg": "ok", "data": {}})
+
     app = web.Application()
     app.router.add_post("/auth/v3/tenant_access_token/internal", tenant_token)
     app.router.add_post("/im/v1/messages", send_message)
     app.router.add_post("/im/v1/messages/{message_id}/reply", reply_message)
     app.router.add_post("/im/v1/images", upload_image)
     app.router.add_patch("/im/v1/messages/{message_id}", update_message)
+    app.router.add_delete("/im/v1/messages/{message_id}", delete_message)
     server = TestServer(app)
     client = TestClient(server)
     await client.start_server()
@@ -262,6 +269,28 @@ async def test_update_card_reuses_cached_token_and_patches_message(feishu_api):
     assert update_request[1] == "om_message_1"
     assert "更新" in update_request[2]["content"]
     assert update_request[3]["Authorization"] == "Bearer tenant-token-1"
+
+
+async def test_delete_message_recalls_by_message_id(feishu_api):
+    test_client, requests, token_calls = feishu_api
+    client = FeishuClient(
+        FeishuClientConfig(
+            app_id="cli_test",
+            app_secret="secret",
+            base_url=str(test_client.make_url("/")),
+        )
+    )
+
+    await client.delete_message("om_message_1")
+
+    assert token_calls() == 1
+    delete_request = requests[-1]
+    assert delete_request[0] == "delete"
+    assert delete_request[1] == "om_message_1"
+    assert delete_request[2]["Authorization"] == "Bearer tenant-token-1"
+
+    with pytest.raises(ValueError):
+        await client.delete_message("")
 
 
 async def test_api_error_raises_without_exposing_secret(unused_tcp_port):

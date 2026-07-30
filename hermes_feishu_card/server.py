@@ -1948,7 +1948,7 @@ async def _recreate_card_at_bottom(
     feishu_message_ids[session_key] = delivery.message_id
     if previous_message_id and previous_message_id != delivery.message_id:
         # 卡片摘要跟着卡走：用户回复的是重建后的新卡，摘要必须能按新
-        # message_id 查到（旧卡已退役，旧键失去意义）。
+        # message_id 查到（旧卡已撤回/退役，旧键失去意义）。
         summaries: Dict[str, dict[str, Any]] = app[CARD_SUMMARIES_KEY]
         summary = summaries.pop(previous_message_id, None)
         if summary is not None:
@@ -2015,10 +2015,19 @@ async def _retire_displaced_card(
     message_id: str,
     bot_id: str | None,
 ) -> None:
-    """退役被置底重建替换的旧卡。
+    """撤回被置底重建替换的旧卡。
 
-    不撤回消息，只把旧卡 PATCH 为灰色指针小卡，指向下方继续更新的新卡。
+    新卡就在下方继续更新，指针小卡没有信息量——一律直接撤回；撤回失败
+    （超出撤回时限等）才回退为灰色指针小卡，避免旧卡停留在过时状态。
     """
+    try:
+        await _client_for_bot(app, bot_id).delete_message(message_id)
+        return
+    except Exception:
+        logger.debug(
+            "retired card recall failed; patching pointer instead",
+            exc_info=True,
+        )
     card = {
         "schema": "2.0",
         "config": {"update_multi": True},
