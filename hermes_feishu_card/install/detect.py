@@ -6,6 +6,9 @@ from pathlib import Path
 import re
 import subprocess
 
+from . import patcher
+from .patcher import apply_base_patch, remove_base_patch
+
 
 MIN_SUPPORTED_VERSION = "v2026.4.23"
 HANDLER_NAME = "_handle_message_with_agent"
@@ -38,6 +41,10 @@ class HermesDetection:
     cron_py: Path | None = None
     cron_py_exists: bool = False
     cron_hook_strategy: str = ""
+    base_py: Path | None = None
+    base_py_exists: bool = False
+    base_hook_strategy: str = ""
+    base_required: bool = False
     compatibility: str = "unsupported"
     capabilities: dict[str, bool] = field(default_factory=dict)
     suggested_root: Path | None = None
@@ -48,6 +55,7 @@ def detect_hermes(root: str | Path) -> HermesDetection:
     hermes_root = Path(root)
     run_py = hermes_root / "gateway" / "run.py"
     cron_py = hermes_root / "cron" / "scheduler.py"
+    base_py = hermes_root / "gateway" / "platforms" / "base.py"
     version, version_error, version_source = _read_version(hermes_root / "VERSION")
     if version == "unknown" and version_error is None:
         git_version = _read_git_version(hermes_root)
@@ -64,6 +72,8 @@ def detect_hermes(root: str | Path) -> HermesDetection:
         capabilities: dict[str, bool] | None = None,
         suggested_root: Path | None = None,
         suggestion_reason: str = "",
+        base_required: bool = False,
+        base_hook_strategy: str = "",
     ) -> HermesDetection:
         return HermesDetection(
             root=hermes_root,
@@ -78,6 +88,10 @@ def detect_hermes(root: str | Path) -> HermesDetection:
             cron_py=cron_py,
             cron_py_exists=cron_py.exists(),
             cron_hook_strategy="cron_scheduler" if cron_py.exists() else "",
+            base_py=base_py,
+            base_py_exists=base_py.exists(),
+            base_hook_strategy=base_hook_strategy,
+            base_required=base_required,
             compatibility=compatibility,
             capabilities=capabilities or {},
             suggested_root=suggested_root,
@@ -119,7 +133,38 @@ def detect_hermes(root: str | Path) -> HermesDetection:
     if cron_error is not None:
         return result(False, cron_error)
 
+    parsed_version = _parse_version(version)
+    version_requires_base = bool(
+        parsed_version is not None
+        and (
+            (parsed_version[0] == 0 and parsed_version >= (0, 19, 0))
+            or parsed_version >= (2026, 7, 20)
+        )
+    )
+    base_contents = ""
+    base_error = None
+    if base_py.exists():
+        if base_py.is_symlink():
+            base_error = "gateway/platforms/base.py must not be a symlink"
+        else:
+            base_contents, base_error = _read_text(
+                base_py, "gateway/platforms/base.py"
+            )
+    verified_ledger_signals = _has_exact_delivery_ledger_signals(base_contents)
+    base_required = version_requires_base or verified_ledger_signals
+    exact_base_delivery = False
+    exact_base_error = ""
+    if base_contents and base_error is None:
+        exact_base_delivery, exact_base_error = _detect_exact_base_contract(
+            base_contents
+        )
+    elif base_error is not None:
+        exact_base_error = base_error
+    elif base_required:
+        exact_base_error = "gateway/platforms/base.py missing for exact delivery contract"
+
     capabilities, capability_error = _detect_capabilities(contents, cron_contents)
+    capabilities["exact_base_delivery"] = exact_base_delivery
     core_ok = all(capabilities.get(name, False) for name in CORE_CAPABILITIES)
     optional_ok = all(capabilities.get(name, False) for name in OPTIONAL_CAPABILITIES)
     if core_ok and optional_ok:
@@ -134,9 +179,27 @@ def detect_hermes(root: str | Path) -> HermesDetection:
             capability_error,
             compatibility=compatibility,
             capabilities=capabilities,
+            base_required=base_required,
         )
 
-    parsed_version = _parse_version(version)
+    if capability_error != "supported":
+        return result(
+            False,
+            capability_error,
+            compatibility=compatibility,
+            capabilities=capabilities,
+            base_required=base_required,
+        )
+
+    if base_required and not exact_base_delivery:
+        return result(
+            False,
+            exact_base_error or "gateway/platforms/base.py exact delivery anchors missing",
+            compatibility=compatibility,
+            capabilities=capabilities,
+            base_required=True,
+        )
+
     if parsed_version is None:
         version_source = (
             "gateway anchors"
@@ -160,7 +223,35 @@ def detect_hermes(root: str | Path) -> HermesDetection:
         hook_strategy=hook_strategy,
         compatibility=compatibility,
         capabilities=capabilities,
+        base_required=base_required,
+        base_hook_strategy=(
+            "exact_base_delivery" if exact_base_delivery else ""
+        ),
     )
+
+
+def _has_exact_delivery_ledger_signals(contents: str) -> bool:
+    return all(
+        signal in contents
+        for signal in (
+            "compute_obligation_id",
+            "record_obligation",
+            "mark_attempting",
+            "mark_delivered",
+            "mark_failed",
+        )
+    )
+
+
+def _detect_exact_base_contract(contents: str) -> tuple[bool, str]:
+    try:
+        patched = apply_base_patch(contents)
+        original = remove_base_patch(patched)
+        if apply_base_patch(original) != patched:
+            return False, "gateway/platforms/base.py exact delivery patch is not reversible"
+    except ValueError:
+        return False, "gateway/platforms/base.py exact delivery anchors are unsupported"
+    return True, ""
 
 
 def _read_version(path: Path) -> tuple[str, str | None, str]:
@@ -290,14 +381,14 @@ def _detect_capabilities(
     else:
         completion_return = _find_completion_return(handler)
 
+    callback_capabilities, callback_error = _detect_callback_patchability(
+        contents, module
+    )
     capabilities = {
         "message_handler": handler is not None,
         "completion_return": completion_return is not None,
         "run_agent": _find_run_agent(module) is not None,
-        "tool_callback": _find_callback(module, "progress_callback") is not None,
-        "answer_delta_callback": _find_callback(module, "_stream_delta_cb") is not None,
-        "thinking_delta_callback": _find_callback(module, "_interim_assistant_cb") is not None,
-        "status_callback": _has_patchable_status_callback(module),
+        **callback_capabilities,
         "cron_delivery": _has_cron_delivery(contents, cron_contents),
         "reply_context": "reply_to_message_id" in contents
         or "_reply_anchor_for_event" in contents,
@@ -309,8 +400,73 @@ def _detect_capabilities(
         return capabilities, f"gateway/run.py missing async anchor function: {HANDLER_NAME}"
     if not capabilities["completion_return"]:
         return capabilities, 'gateway/run.py missing handler anchor: hooks.emit("agent:end", ...)'
+    if callback_error:
+        return capabilities, callback_error
 
     return capabilities, "supported"
+
+
+def _detect_callback_patchability(
+    contents: str, module: ast.Module
+) -> tuple[dict[str, bool], str]:
+    try:
+        patched = patcher.apply_patch(contents, strategy="gateway_run_013_plus")
+    except ValueError:
+        # Detection also runs while the recovery planner is inspecting an
+        # already-installed file with damaged markers. Preserve the legacy
+        # structural capability report here so recovery, not compatibility
+        # detection, remains responsible for classifying that state.
+        return {
+            "tool_callback": _find_callback(module, "progress_callback") is not None,
+            "answer_delta_callback": _find_callback(module, "_stream_delta_cb")
+            is not None,
+            "thinking_delta_callback": _find_callback(
+                module, "_interim_assistant_cb"
+            )
+            is not None,
+            "status_callback": _has_patchable_status_callback(module),
+        }, ""
+
+    capabilities = {
+        "tool_callback": (
+            patcher.STABLE_TOOL_PATCH_BEGIN in patched
+            or patcher.TOOL_PATCH_BEGIN in patched
+        ),
+        "answer_delta_callback": patcher.ANSWER_DELTA_PATCH_BEGIN in patched,
+        "thinking_delta_callback": patcher.THINKING_DELTA_PATCH_BEGIN in patched,
+        "status_callback": patcher.STATUS_PATCH_BEGIN in patched,
+    }
+
+    turn_runner = _find_turn_runner(module)
+    if turn_runner is None:
+        return capabilities, ""
+
+    required_markers = []
+    if _turn_runner_assigns_agent_callback(turn_runner, "tool_start_callback"):
+        required_markers.append(
+            ("tool lifecycle", patcher.STABLE_TOOL_PATCH_BEGIN)
+        )
+    for callback_name, label, marker in (
+        ("_stream_delta_cb", "answer delta", patcher.ANSWER_DELTA_PATCH_BEGIN),
+        (
+            "_interim_assistant_cb",
+            "thinking delta",
+            patcher.THINKING_DELTA_PATCH_BEGIN,
+        ),
+        ("_clarify_callback_sync", "clarify", patcher.CLARIFY_PATCH_BEGIN),
+        ("_approval_notify_sync", "approval", patcher.APPROVAL_PATCH_BEGIN),
+        ("_status_callback_sync", "status", patcher.STATUS_PATCH_BEGIN),
+    ):
+        if _turn_runner_has_callback(turn_runner, callback_name):
+            required_markers.append((label, marker))
+
+    missing = [label for label, marker in required_markers if marker not in patched]
+    if missing:
+        return capabilities, (
+            "gateway/run.py TurnRunner hooks are not safely patchable: "
+            + ", ".join(missing)
+        )
+    return capabilities, ""
 
 
 def _has_cron_delivery(contents: str, cron_contents: str) -> bool:
@@ -395,6 +551,43 @@ def _find_callback(
         if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) and node.name == name:
             return node
     return None
+
+
+def _find_turn_runner(module: ast.Module) -> ast.ClassDef | None:
+    return next(
+        (
+            node
+            for node in module.body
+            if isinstance(node, ast.ClassDef) and node.name == "TurnRunner"
+        ),
+        None,
+    )
+
+
+def _turn_runner_has_callback(turn_runner: ast.ClassDef, name: str) -> bool:
+    return any(
+        isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+        and node.name == name
+        for node in ast.walk(turn_runner)
+    )
+
+
+def _turn_runner_assigns_agent_callback(
+    turn_runner: ast.ClassDef, attribute: str
+) -> bool:
+    for node in ast.walk(turn_runner):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if any(
+            isinstance(target, ast.Attribute)
+            and target.attr == attribute
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "agent"
+            for target in targets
+        ):
+            return True
+    return False
 
 
 def _has_patchable_status_callback(module: ast.Module) -> bool:

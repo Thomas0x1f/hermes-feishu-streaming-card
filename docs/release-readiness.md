@@ -2,7 +2,7 @@
 
 [中文](release-readiness.md) | [English](release-readiness.en.md)
 
-当前发布候选为 `4.0.20`。它修复 Issue #153 中已有卡片 notice 的异步 ACK 语义，并为真实 PATCH 失败补充脱敏可观测性；V3.9.1 已于 2026-07-11 发布，V4.0.19 及更早版本也已发布。
+当前发布候选为 `4.1.3`。它修复 Issue #158 的同 target integrity fence binding 收敛、合入 PR #168 的原生 answer-delta callback 选择，并修复 Issue #169 中 Hermes `TurnRunner` 重构导致的 tool/streaming/interaction hook 丢失与 doctor 误报。V3.9.1 已于 2026-07-11 发布；V4.1.3 的合并候选自动化、构建、CI、Issue #158 Ubuntu 真实复测、Issue #169 最新 Hermes 真实复测、exact merge SHA、public tag/install 与 Release assets 只有完成后才会标记通过。
 
 ## 已具备
 
@@ -144,6 +144,48 @@ python3 -m hermes_feishu_card.cli restore --hermes-dir ~/.hermes/hermes-agent --
 - tag 后验证 macOS、Linux、Windows 与 checksums 四个 assets。
 
 `v3.9.0` tag 的 release-assets workflow 会发布 4 个 assets：macOS tarball、Linux tarball、Windows zip 和 checksums 文件，分别为 `hermes-feishu-card-v3.9.0-macos.tar.gz`、`hermes-feishu-card-v3.9.0-linux.tar.gz`、`hermes-feishu-card-v3.9.0-windows.zip`、`hermes-feishu-card-v3.9.0-checksums.txt`。
+
+## V4.1.3 发布门禁
+
+- 同一 target 的旧 plan binding 只有在当前 recovery/integrity plan 连续两次为 installed、sidecar 连续两次确认停止且 fence CAS 未漂移时才能迁移：**聚焦回归通过**。
+- 不同 target、状态漂移、残留 pidfile/health、unknown legacy fence 与不可验证 plan 继续 fail-closed；非空 restart/hash fence 必须保留：**安全边界回归通过**。
+- `doctor --explain` 必须分别给出完整 `integrity migrate-safe` 与 `integrity acknowledge-review` 命令，且不泄露路径、fingerprint 或私密状态证据：**诊断回归通过**。
+- PR #168 必须只选择调用 `_stream_consumer.on_delta` 的原生文本流 callback，并可迁移旧 hook：**独立审查、完整自动化与真实 Hermes 源码注入验证通过，已保留贡献者署名合并**。
+- Hermes `1a3a9de` 的 TurnRunner 源码必须恢复 14 个受管 hook block，6 个迁移 hook 各一次，status 在 ctx 绑定后执行，重复 patch 幂等、卸载逐字还原、doctor 为 `supported/full`；不可识别结构必须 `not safely patchable`：**回归、真实源码与 PR #170 CI 通过**。
+- 合并候选完整 pytest **`2207 passed, 4 skipped`**、`git diff --check`、wheel/sdist 与隔离 Python 3.12 `site-packages` 包版本/distribution/CLI entry point provenance：**本地通过**；Issue #158 Ubuntu 官方流程复测、Issue #169 最新 Hermes 真实 Feishu 复测、候选 CI、exact merge SHA、public tagged install 与 Release assets：**待完成**。
+
+## V4.1.2 发布门禁
+
+- 已安装 plan、旧 runtime hello、heartbeat stale、coordinator check、新 matching hello 的竞态必须不产生 fence，并一次恢复 ready：**聚焦回归通过**。
+- generation/package mismatch、control auth unavailable、manual-review/restart fence 和实际 strict repair 继续 fail-closed，且不自动重启 Gateway：**安全边界回归通过**。
+- stable tool wrapper 检测与显式 fail-open fallback 必须避免同一 call 同时走稳定 callback 和 legacy progress path；本机与远端 MacBook Pro 的真实 Hermes 配置模型均验证 terminal 只出现一个带耗时条目：**自动化与双机真实飞书通过**。
+- 候选完整 pytest **`2197 passed, 4 skipped`**，`git diff --check`、wheel/sdist 与隔离 `site-packages`/CLI provenance：**通过**；exact merge SHA、public tagged install 与 Release assets：**待合并后完成**。
+
+## V4.1.1 发布门禁
+
+- 已验证 `installed` plan 在首次 heartbeat 等待/缺失时不执行 repair、不写 restart/manual-review fence；收到 matching `runtime.hello` 后恢复正常评估：**候选提交聚焦与全量回归通过**。
+- `integrity acknowledge-review` 只接受 installed + sidecar health 不可达 + 无 pidfile；empty hash 可解除不可自清 fence，non-empty hash 保留 restart fence 直到不同 runtime id 的 matching hello：**CLI、持久化与重启模拟通过**。
+- legacy `0644` pidfile 只在私有 owned `0700` state dir 中通过 fd identity 绑定收紧；pidfile-less 进程不自动接管/kill，要求人工停旧服务后重跑：**macOS 真实进程测试通过，Linux CI 待完成**。
+- setup 通过 Hermes runtime venv 安装/复检，并按 `/health` package version 与 Python identity 决定是否重启 sidecar；随后人工重启 sidecar 与 Gateway：**待本机、远端升级验收**。
+- 候选提交 `20b7b06`：完整 pytest **`2194 passed, 4 skipped`**，`git diff --check`、wheel/sdist 构建、隔离 `site-packages` provenance 与 wheel 真实进程测试 **`8 passed`**；**CI、exact merge SHA、public tagged install、Release assets、Linux/Docker 与真实飞书仍待发布流程完成**。
+
+## V4.1.0 发布门禁
+
+- `bindings.native_chats` exact/profile-scoped，hook 与 sidecar 双重 enforcement，所有 direct card path fail-open，`/hfc` 保持卡片：**待完成聚焦矩阵与真实 card → native → card 验收**。
+- 默认 `table_overflow_mode=compact` 保留第 6 张及后续表格，fenced fake table 不计数；无附件 terminal 超过 28,000 byte 时使用 V2 descriptor、稳定 UUID、Hermes ledger 与 delivered 后 ACK 交还完整原生答案；窗口外 exact descriptor 失效，带可见 recovered marker 的上游有界恢复仍保持普通 fail-open：**待完成真实 7-table 与 oversized handoff 验收**。
+- `integrity.mode` 的 safe/notify/off、认证 `runtime.hello` / `runtime.heartbeat`、strict repair、`sidecar.restart_required` 与不自动重启 Gateway：**待完成升级 simulation**。
+- `service.manager` 四模式、`auto` 不提权、Docker 普通容器：**待 Linux manager 与 Docker Compose smoke**。
+- 完整 pytest、`git diff --check`、build/isolated `site-packages`、exact merge SHA、public tagged install 和 Release assets：**发布流程待完成**。
+
+## V4.0.21 发布门禁
+
+- Issue #155：只有明确 `answer -> tool` 边界才能归档答案；`tool -> answer -> completed` 必须保留完整的用户可见终态答案：**已通过聚焦顺序回归（`74 passed`）**。
+- Issue #147：完成卡接管后，匹配原生媒体文本只抑制一次、native image 继续投递，accepted queued notice 不出现 uncertain-delivery warning：**已通过 hook runtime 组合回归（`277 passed`）**。
+- 当前 README、安装说明、Docker Compose 和双语用户指南均 pin 到 `v4.0.21`；UI 与配置保持不变：**已通过文档门禁**。
+- 真实飞书图片验收：**已通过（2026-07-28）**。观测到 1 条带标记、非“生成中”的 completion card + 1 条 native image，无 uncertain-delivery warning；正常工具回合的两段答案保留在同一卡，bot 原生标记重复为 0。
+- sidecar 最终 metrics 为 `events_received/events_applied=23/23`、1 次发送成功、16 次更新成功，event/auth rejection、send/update failures、notice uncertain warnings、notice update failures 均为 0；Gateway Feishu WebSocket 已连接，Hermes venv site-packages 为 4.0.21。
+- 最终本地发布门禁：完整 pytest 为 `1526 passed, 4 skipped in 53.56s`；`uv build` 生成 `hermes_feishu_streaming_card-4.0.21.tar.gz` 与 `hermes_feishu_streaming_card-4.0.21-py3-none-any.whl`。干净 Python 3.12 venv 从 wheel 安装后，import 位于 `site-packages`，package/distribution version 均为 `4.0.21`，`hermes-feishu-card = hermes_feishu_card.cli:main` 存在，CLI --help exit 0。
+- 上述验收不宣称截图或桌面/移动端视觉 QA，也不替代真实故障注入。公开 tagged installer 与 Release assets 的 post-tag 验证仍待完成。
 
 ## V4.0.20 发布门禁
 
