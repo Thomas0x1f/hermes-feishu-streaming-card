@@ -7,6 +7,7 @@ import copy
 import hashlib
 import itertools
 import json
+import math
 import os
 from pathlib import Path
 import secrets
@@ -1806,21 +1807,88 @@ def _clarify_urgent_enabled() -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
+# clarify 等待超时前多久再加急一次（秒）。到点还没人回答就说明第一次加急
+# 被忽略了，超时后 agent 会带着"交互请求超时"往下走，这是最后一次提醒。
+_CLARIFY_URGENT_LEAD_SECONDS = 600.0
+
+
+def _clarify_wait_timeout(session: CardSession) -> float:
+    """clarify 的等待超时，口径与 hook 侧 `_interaction_timeout` 保持一致。"""
+    interaction = session.active_interaction
+    if interaction is not None and interaction.timeout_seconds > 0:
+        return interaction.timeout_seconds
+    raw = os.environ.get("HERMES_FEISHU_CARD_INTERACTION_TIMEOUT_SECONDS", "")
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError):
+        return 300.0
+    return seconds if math.isfinite(seconds) and seconds > 0 else 300.0
+
+
 def _urgent_clarify_card(
     app: web.Application,
+    session_key: str,
     session: CardSession,
     message_id: str,
     bot_id: str | None,
 ) -> None:
-    """clarify 选项卡发出后对消息加急（应用内强提醒），失败静默降级。"""
+    """clarify 选项卡发出后对消息加急（应用内强提醒），失败静默降级。
+
+    同时排一次超时前的兜底加急：第一次提醒发出即被划走时，超时前 10 分钟
+    再催一次，避免 agent 静悄悄地按超时往下走。
+    """
     if not _clarify_urgent_enabled():
         return
     interaction = session.active_interaction
     open_id = interaction.initiator_open_id if interaction is not None else ""
     if not open_id or not message_id:
         return
-    asyncio.get_running_loop().create_task(
-        _send_clarify_urgent(app, message_id, open_id, bot_id)
+    loop = asyncio.get_running_loop()
+    loop.create_task(_send_clarify_urgent(app, message_id, open_id, bot_id))
+    delay = _clarify_wait_timeout(session) - _CLARIFY_URGENT_LEAD_SECONDS
+    if delay <= 0:
+        # 等待窗口本来就短于提前量：刚发的这次加急已经是全部提醒。
+        return
+    loop.create_task(
+        _remind_clarify_urgent(
+            app,
+            session_key,
+            interaction.interaction_id if interaction is not None else "",
+            open_id,
+            delay,
+        )
+    )
+
+
+async def _remind_clarify_urgent(
+    app: web.Application,
+    session_key: str,
+    interaction_id: str,
+    open_id: str,
+    delay: float,
+) -> None:
+    """超时前的兜底加急：交互还挂着才催，卡片换过就催当前那张。"""
+    await asyncio.sleep(delay)
+    session = app[SESSIONS_KEY].get(session_key)
+    if session is None:
+        return
+    interaction = session.active_interaction
+    if (
+        interaction is None
+        or interaction.interaction_id != interaction_id
+        or interaction.status != "pending"
+    ):
+        return
+    message_id = app[FEISHU_MESSAGE_IDS_KEY].get(session_key)
+    if not message_id:
+        return
+    logger.warning(
+        "clarify urgent reminder (%.0fs before timeout): %s",
+        _CLARIFY_URGENT_LEAD_SECONDS,
+        interaction_id,
+    )
+    await _send_clarify_urgent(
+        app, message_id, open_id, app[MESSAGE_BOT_IDS_KEY].get(session_key)
     )
 
 
@@ -1882,6 +1950,7 @@ async def _consume_pending_rebottom(
         # clarify 选项卡置底成功：加急提醒用户来选择。
         _urgent_clarify_card(
             app,
+            session_key,
             session,
             app[FEISHU_MESSAGE_IDS_KEY].get(session_key, ""),
             app[MESSAGE_BOT_IDS_KEY].get(session_key),
@@ -2715,7 +2784,7 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                     _store_interaction_result(request.app, session)
                     # clarify 直接开卡（无旧卡可置底）：同样加急提醒。
                     _urgent_clarify_card(
-                        request.app, session, message_id, route.bot_id
+                        request.app, session_key, session, message_id, route.bot_id
                     )
                 if event_is_terminal:
                     _store_card_summary(request.app, event, session, message_id)

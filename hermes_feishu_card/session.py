@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import math
 import re
 import secrets
 import time
@@ -62,6 +63,9 @@ class InteractionState:
     choice_labels: list[str] = field(default_factory=list)
     user_name: str = ""
     error: str = ""
+    # hook 侧的等待超时（秒），0 表示事件没带、由 sidecar 自行回落到环境
+    # 变量默认值。超时前的加急提醒靠它算触发时刻。
+    timeout_seconds: float = 0.0
 
 
 @dataclass
@@ -492,7 +496,18 @@ def _interaction_from_event_data(data: dict[str, Any]) -> InteractionState:
         media_image_keys=_media_image_keys(data.get("media_image_keys")),
         options=_interaction_options(data.get("options")),
         callback_token=str(data.get("callback_token") or secrets.token_urlsafe(16)),
+        timeout_seconds=_interaction_timeout_seconds(data.get("timeout_seconds")),
     )
+
+
+def _interaction_timeout_seconds(value: Any) -> float:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(seconds) or seconds <= 0:
+        return 0.0
+    return seconds
 
 
 def _media_image_keys(value: Any) -> list[str]:
