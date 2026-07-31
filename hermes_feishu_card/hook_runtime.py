@@ -7200,11 +7200,6 @@ def install_feishu_command_card_adapter_methods(runner: Any, event: Any = None) 
         return False
 
 
-_HFC_MULTI_SELECT_QUESTION_PREFIX = "[hfc:multi-select]"
-_HFC_MULTI_SELECT_CHOICE_SEPARATOR = "::"
-_HFC_MULTI_SELECT_UNAVAILABLE = (
-    "[hfc multi-select unavailable; ask the user to reply with text]"
-)
 _HFC_CLARIFY_MEDIA_UNAVAILABLE = (
     "[hfc clarify media unavailable; do not confirm media the user could not see]"
 )
@@ -7398,11 +7393,9 @@ def request_clarify_response_from_hermes_locals(
     timeout_seconds: float | None = None,
 ) -> str | None:
     normalized_question = str(question or "请选择").strip()
-    is_multi_select = normalized_question.startswith(_HFC_MULTI_SELECT_QUESTION_PREFIX)
-    if is_multi_select:
-        normalized_question = normalized_question[
-            len(_HFC_MULTI_SELECT_QUESTION_PREFIX) :
-        ].strip() or "请选择"
+    # hermes 的 clarify callback 签名为 (question, choices, multi_select=False)，
+    # 注入点用 **locals() 把参数整体带入。
+    is_multi_select = bool(local_vars.get("multi_select"))
     normalized_question, media_paths, media_required = _clarify_media_from_question(
         local_vars,
         normalized_question,
@@ -7410,32 +7403,26 @@ def request_clarify_response_from_hermes_locals(
     if media_required and not media_paths:
         return _HFC_CLARIFY_MEDIA_UNAVAILABLE
     if not choices and is_multi_select:
-        return _HFC_MULTI_SELECT_UNAVAILABLE
+        return None
     options = []
     seen_values: set[str] = set()
     for index, choice in enumerate(list(choices or [])):
         label = str(choice).strip()
-        value = label
-        if is_multi_select and _HFC_MULTI_SELECT_CHOICE_SEPARATOR in label:
-            label, value = (
-                part.strip()
-                for part in label.split(_HFC_MULTI_SELECT_CHOICE_SEPARATOR, 1)
-            )
-        if is_multi_select and (
-            not label or not value or value in seen_values
-        ):
-            return _HFC_MULTI_SELECT_UNAVAILABLE
+        # 飞书 multi_select_static 依赖唯一 value 回传选择，重复或空选项无法
+        # 稳定映射；返回 None 交回 hermes 原生多选路径，不自作主张丢选项。
+        if is_multi_select and (not label or label in seen_values):
+            return None
         if label:
             options.append(
                 {
                     "label": label,
-                    "value": value,
+                    "value": label,
                     "style": "primary" if index == 0 else "default",
                 }
             )
-            seen_values.add(value)
+            seen_values.add(label)
     if choices and not options:
-        return _HFC_MULTI_SELECT_UNAVAILABLE if is_multi_select else None
+        return None
     if is_multi_select:
         kind = "multi_select"
     elif options:
@@ -7443,7 +7430,8 @@ def request_clarify_response_from_hermes_locals(
     else:
         # 无 choices 的 clarify 视为自由文本提问，卡片渲染 textarea 输入框
         kind = "text_input"
-    # multi_select 的返回值是结构化 JSON 数组，自由文本无法映射，保持卡片专属。
+    # multi_select 交回原生时由 hermes 自己的 clarify_gateway 接管文本回复，
+    # 这里不重复注册旁路通道。
     text_channel = (
         _open_clarify_text_channel(
             local_vars,
@@ -7534,11 +7522,9 @@ def request_clarify_response_from_hermes_locals(
     if isinstance(result, dict) and result.get("status") == "lost":
         # sidecar 丢失交互状态（进程重启）：立即放弃卡片等待，返回 None
         # 走原生文本 clarify 兜底，用户在聊天里直接打字即可回答。
-        return _HFC_MULTI_SELECT_UNAVAILABLE if is_multi_select else None
+        return None
     if media_paths:
         return _HFC_CLARIFY_MEDIA_UNAVAILABLE
-    if is_multi_select:
-        return _HFC_MULTI_SELECT_UNAVAILABLE
     return None
 
 

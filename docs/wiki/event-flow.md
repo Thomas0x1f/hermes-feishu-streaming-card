@@ -218,12 +218,12 @@ V3.10.0 的 command-card adapter hook 会在运行时包装 runner 的 `_handle_
 Agent 任务内的普通单选 `interaction.requested` 会渲染为当前 streaming card 里的按钮，
 不会改成 select 组件。
 
-HFC 还支持在不修改 Hermes `clarify` schema 的前提下请求真正多选：question 以
-`[hfc:multi-select]` 开头，choices 使用 `显示名::稳定值`。hook 会移除内部前缀，
-把选项渲染为 Card JSON 2.0 的 `form + multi_select_static + submit`，完成后向
-Hermes 返回稳定值 JSON 数组。空选择、未知值和重复提交不会重复完成 interaction；
-空 label/value 或重复稳定值不会发出多选卡；多选卡不可用时返回明确 sentinel，
-由 agent 回退普通文字，不降级成原生单选。
+Hermes 原生 `clarify` 的多选（callback 签名 `(question, choices, multi_select=False)`）
+会被 hook 直接识别：`multi_select=True` 时把 choices 渲染为 Card JSON 2.0 的
+`form + multi_select_static + submit`，完成后向 Hermes 返回选项 JSON 数组。
+空选择、未知值和重复提交不会重复完成 interaction；空 label 或重复选项不会发出
+多选卡。多选卡不可用时返回 `None`，交回 Hermes 原生多选路径（`clarify_gateway`
+以 `multi_select=True` 注册，文本回复由 Hermes 自行解析），不降级成原生单选。
 
 Clarify question 中的大写 `MEDIA:` 使用 Hermes 官方 adapter 的媒体解析和安全过滤。
 图片由 sidecar 上传为 Feishu/Lark `image_key`，并和单选按钮或多选表单渲染在同一张

@@ -5713,10 +5713,15 @@ def test_clarify_multi_select_does_not_open_text_channel(monkeypatch):
     )
 
     result = hook_runtime.request_clarify_response_from_hermes_locals(
-        {"chat_id": "oc_abc", "message_id": "msg_1", "session_key": "sess-1"},
+        {
+            "chat_id": "oc_abc",
+            "message_id": "msg_1",
+            "session_key": "sess-1",
+            "multi_select": True,
+        },
         interaction_id="materials-1",
-        question="[hfc:multi-select]请选择接待物料",
-        choices=["水牌::water_sign", "会议桌签::table_card"],
+        question="请选择接待物料",
+        choices=["水牌", "会议桌签"],
         timeout_seconds=1,
     )
 
@@ -5765,25 +5770,20 @@ def test_clarify_multi_select_marker_returns_stable_values(monkeypatch):
     )
 
     result = hook_runtime.request_clarify_response_from_hermes_locals(
-        {},
+        {"multi_select": True},
         interaction_id="materials-1",
-        question="[hfc:multi-select]请选择接待物料",
-        choices=[
-            "水牌::water_sign",
-            "会议桌签::table_card",
-            "会议用纸::meeting_paper",
-            "台卡::desk_card",
-        ],
+        question="请选择接待物料",
+        choices=["水牌", "会议桌签", "会议用纸", "台卡"],
     )
 
     assert json.loads(result) == ["water_sign", "table_card"]
     assert captured["kind"] == "multi_select"
     assert captured["prompt"] == "请选择接待物料"
     assert captured["options"] == [
-        {"label": "水牌", "value": "water_sign", "style": "primary"},
-        {"label": "会议桌签", "value": "table_card", "style": "default"},
-        {"label": "会议用纸", "value": "meeting_paper", "style": "default"},
-        {"label": "台卡", "value": "desk_card", "style": "default"},
+        {"label": "水牌", "value": "水牌", "style": "primary"},
+        {"label": "会议桌签", "value": "会议桌签", "style": "default"},
+        {"label": "会议用纸", "value": "会议用纸", "style": "default"},
+        {"label": "台卡", "value": "台卡", "style": "default"},
     ]
 
 
@@ -6080,7 +6080,7 @@ def test_clarify_media_does_not_leak_when_official_parser_is_unavailable(monkeyp
     )
 
 
-def test_clarify_multi_select_does_not_fall_back_to_native_single_select(monkeypatch):
+def test_clarify_multi_select_returns_none_when_card_unavailable(monkeypatch):
     monkeypatch.setattr(
         hook_runtime,
         "request_interaction_from_hermes_locals",
@@ -6088,25 +6088,18 @@ def test_clarify_multi_select_does_not_fall_back_to_native_single_select(monkeyp
     )
 
     result = hook_runtime.request_clarify_response_from_hermes_locals(
-        {},
+        {"multi_select": True},
         interaction_id="materials-1",
-        question="[hfc:multi-select]请选择接待物料",
-        choices=["水牌::water_sign", "会议桌签::table_card"],
+        question="请选择接待物料",
+        choices=["水牌", "会议桌签"],
     )
 
-    assert result == "[hfc multi-select unavailable; ask the user to reply with text]"
+    # 卡片不可用时交回 hermes 原生多选路径，不再返回自造 sentinel。
+    assert result is None
 
 
-@pytest.mark.parametrize(
-    "choices",
-    [
-        [],
-        ["水牌::"],
-        ["::water_sign"],
-        ["水牌::material", "会议桌签::material"],
-    ],
-)
-def test_clarify_multi_select_invalid_stable_values_use_text_sentinel(
+@pytest.mark.parametrize("choices", [[], ["", "会议桌签"], ["水牌", "水牌"]])
+def test_clarify_multi_select_unmappable_choices_fall_back_to_native(
     monkeypatch, choices
 ):
     def fail_request(*_args, **_kwargs):
@@ -6119,13 +6112,13 @@ def test_clarify_multi_select_invalid_stable_values_use_text_sentinel(
     )
 
     result = hook_runtime.request_clarify_response_from_hermes_locals(
-        {},
+        {"multi_select": True},
         interaction_id="materials-invalid-options",
-        question="[hfc:multi-select]请选择接待物料",
+        question="请选择接待物料",
         choices=choices,
     )
 
-    assert result == "[hfc multi-select unavailable; ask the user to reply with text]"
+    assert result is None
 
 
 def test_request_interaction_polls_through_transient_not_found(monkeypatch):
