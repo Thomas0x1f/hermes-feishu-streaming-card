@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from pathlib import Path
 
@@ -576,3 +578,28 @@ def test_resolve_card_config_merges_global_profile_and_bot_in_priority_order():
         "footer_fields": ["duration"],
         "max_chars": 120,
     }
+
+
+def test_export_card_env_loads_card_switches_without_overriding(tmp_path, monkeypatch):
+    # env 文件里的 HERMES_FEISHU_CARD_* 要进 os.environ（加急等开关直接读它），
+    # 但已在进程环境里的值优先，且不碰其他前缀的变量。
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "HERMES_FEISHU_CARD_CLARIFY_URGENT=1\n"
+        "HERMES_FEISHU_CARD_INTERACTION_TIMEOUT_SECONDS=7200\n"
+        "FEISHU_APP_SECRET=from-file\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("HERMES_FEISHU_CARD_CLARIFY_URGENT", raising=False)
+    monkeypatch.delenv("FEISHU_APP_SECRET", raising=False)
+    monkeypatch.setenv("HERMES_FEISHU_CARD_INTERACTION_TIMEOUT_SECONDS", "60")
+
+    runner._export_card_env(str(env_file))
+
+    assert os.environ["HERMES_FEISHU_CARD_CLARIFY_URGENT"] == "1"
+    assert os.environ["HERMES_FEISHU_CARD_INTERACTION_TIMEOUT_SECONDS"] == "60"
+    assert "FEISHU_APP_SECRET" not in os.environ
+
+
+def test_export_card_env_without_env_file_is_noop():
+    runner._export_card_env(None)

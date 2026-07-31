@@ -3,13 +3,15 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import logging
+import os
+from pathlib import Path
 from typing import Any
 
 from aiohttp import web
 
 from .bots import BotRegistry, FeishuClientFactory, RoutingContext
 from .bots import resolve_card_config as _resolve_card_config
-from .config import load_config, resolve_operations_hermes_root
+from .config import _read_dotenv, load_config, resolve_operations_hermes_root
 from .event_auth import is_loopback_host
 from .feishu_client import FeishuAPIError, FeishuClient, FeishuClientConfig
 from .server import create_app
@@ -188,6 +190,21 @@ def _card_config_for_server(config: dict[str, Any]) -> dict[str, Any]:
     elif mode not in {"callback", "text", "markdown", "reply"}:
         card_config["interaction_mode"] = "callback"
     return card_config
+def _export_card_env(env_file: str | None) -> None:
+    """把 env 文件里的 `HERMES_FEISHU_CARD_*` 灌进本进程环境。
+
+    这类开关（加急、交互超时……）是直接读 `os.environ` 的，而 sidecar 由
+    父进程 Popen 出来、只继承父进程环境——不导一遍，写在 env 文件里的开关
+    在容器等"环境变量不来自 env 文件"的部署下永远不生效。进程环境优先，
+    已存在的变量不覆盖。
+    """
+    if not env_file:
+        return
+    for name, value in _read_dotenv(Path(env_file).expanduser()).items():
+        if name.startswith("HERMES_FEISHU_CARD_"):
+            os.environ.setdefault(name, value)
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=logging.WARNING,
@@ -199,6 +216,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--token", default="")
     args = parser.parse_args(argv)
 
+    _export_card_env(args.env_file)
     config = (
         load_config(args.config, env_file=args.env_file)
         if args.env_file is not None
