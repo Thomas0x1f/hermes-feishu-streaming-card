@@ -285,7 +285,8 @@ def test_v4_completed_reply_card_uses_only_native_feishu_quote_header():
 
     assert "header" not in card
     assert "最终答案" in str(card)
-    assert card["config"]["summary"]["content"] == "已完成"
+    # 会话列表/通知栏预览展示回复正文，而不是"已完成"状态词。
+    assert card["config"]["summary"]["content"] == "最终答案"
     footer = next(
         item
         for item in card["body"]["elements"]

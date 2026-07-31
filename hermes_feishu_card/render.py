@@ -29,6 +29,7 @@ DEFAULT_FOOTER_FIELDS = (
 MAIN_CONTENT_CHUNK_CHARS = 2400
 DEFAULT_TITLE = "Hermes Agent"
 RUNTIME_HEADER_MAX_CHARS = 120
+SUMMARY_MAX_CHARS = 120
 TEXT_SIZE_ROLE_ORDER = ("body", "reasoning", "tool", "notice", "footer")
 MODEL_COLOR_PREFIXES = (
     (("gpt-", "o1", "o3"), "blue"),
@@ -74,6 +75,13 @@ _RUNTIME_URL_SECRET_RE = re.compile(
     r"(?i)([?&](?:token|password|secret|api_key|api-key|app_secret)=)([^&#\s]+)"
 )
 _TOOL_DURATION_LINE_RE = re.compile(r"^耗时:\s*(.+?)\s*$")
+# 摘要预览的 Markdown 剥离：整段代码块、图片、链接、行首标记、强调符号。
+_SUMMARY_FENCED_BLOCK_RE = re.compile(r"```.*?(?:```|\Z)", re.DOTALL)
+_SUMMARY_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+_SUMMARY_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+_SUMMARY_LINE_PREFIX_RE = re.compile(r"(?m)^\s{0,3}(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+\.\s+)")
+# 不剥下划线：正文里的 snake_case 远多于下划线强调，剥了会毁标识符。
+_SUMMARY_EMPHASIS_RE = re.compile(r"(\*{1,3}|`+|~~)")
 
 
 @dataclass(frozen=True)
@@ -409,7 +417,13 @@ def _render_status(
         }
     display_status = resolve_display_status(session, status_config or StatusConfig.defaults()).value
     if display_status == "completed":
-        return {"subtitle": "已完成", "template": "green"}
+        # 会话列表/通知栏的预览文案：完成后展示回复正文本身，而不是"已完成"
+        # 这类状态词（正文为空时才回落到状态词）。
+        return {
+            "subtitle": "已完成",
+            "summary": _answer_summary_text(session.answer_text) or "已完成",
+            "template": "green",
+        }
     if display_status == "failed":
         return {"subtitle": "", "summary": "处理失败", "template": "red"}
     if display_status == "waiting":
@@ -462,6 +476,28 @@ def _sanitize_runtime_header(text: str) -> str:
     if len(normalized) <= RUNTIME_HEADER_MAX_CHARS:
         return normalized
     return normalized[: RUNTIME_HEADER_MAX_CHARS - 1].rstrip() + "…"
+
+
+def _answer_summary_text(text: str) -> str:
+    """把回复正文压成单行预览文案，供 config.summary 在会话列表/通知栏展示。
+
+    摘要出现在对话之外，所以沿用 runtime header 的密钥脱敏；Markdown 标记
+    在预览里不会被渲染，统一剥成纯文本再截断。
+    """
+
+    normalized = normalize_stream_text(str(text or ""))
+    # 先脱敏再剥 Markdown：剥离会改写字符，可能让密钥正则失配。
+    normalized = _RUNTIME_SECRET_FLAG_RE.sub(r"\1[REDACTED]", normalized)
+    normalized = _RUNTIME_URL_SECRET_RE.sub(r"\1[REDACTED]", normalized)
+    normalized = _SUMMARY_FENCED_BLOCK_RE.sub(" ", normalized)
+    normalized = _SUMMARY_IMAGE_RE.sub("", normalized)
+    normalized = _SUMMARY_LINK_RE.sub(r"\1", normalized)
+    normalized = _SUMMARY_LINE_PREFIX_RE.sub("", normalized)
+    normalized = _SUMMARY_EMPHASIS_RE.sub("", normalized)
+    normalized = " ".join(normalized.split())
+    if len(normalized) <= SUMMARY_MAX_CHARS:
+        return normalized
+    return normalized[: SUMMARY_MAX_CHARS - 1].rstrip() + "…"
 
 
 def _render_main_content_elements(
