@@ -1807,8 +1807,8 @@ def _clarify_urgent_enabled() -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
-# clarify 等待超时前多久再加急一次（秒）。到点还没人回答就说明第一次加急
-# 被忽略了，超时后 agent 会带着"交互请求超时"往下走，这是最后一次提醒。
+# clarify 等待超时前多久加急（秒）。弹出即加急太吵，只在快超时还没人回答
+# 时催一次——超时后 agent 会带着"交互请求超时"往下走，这是唯一的提醒。
 _CLARIFY_URGENT_LEAD_SECONDS = 600.0
 
 
@@ -1825,17 +1825,16 @@ def _clarify_wait_timeout(session: CardSession) -> float:
     return seconds if math.isfinite(seconds) and seconds > 0 else 300.0
 
 
-def _urgent_clarify_card(
+def _schedule_clarify_urgent(
     app: web.Application,
     session_key: str,
     session: CardSession,
     message_id: str,
-    bot_id: str | None,
 ) -> None:
-    """clarify 选项卡发出后对消息加急（应用内强提醒），失败静默降级。
+    """给 clarify 排一次超时前的加急（应用内强提醒），失败静默降级。
 
-    同时排一次超时前的兜底加急：第一次提醒发出即被划走时，超时前 10 分钟
-    再催一次，避免 agent 静悄悄地按超时往下走。
+    卡片弹出时不加急——那时消息刚到，通知已经够了；只有快到超时还没人
+    回答时才强提醒一次。
     """
     if not _clarify_urgent_enabled():
         return
@@ -1843,17 +1842,15 @@ def _urgent_clarify_card(
     open_id = interaction.initiator_open_id if interaction is not None else ""
     if not open_id or not message_id:
         return
-    loop = asyncio.get_running_loop()
-    loop.create_task(_send_clarify_urgent(app, message_id, open_id, bot_id))
     delay = _clarify_wait_timeout(session) - _CLARIFY_URGENT_LEAD_SECONDS
     if delay <= 0:
-        # 等待窗口本来就短于提前量：刚发的这次加急已经是全部提醒。
+        # 等待窗口本来就短于提前量：此刻催等同于弹出即加急，不催。
         return
-    loop.create_task(
+    asyncio.get_running_loop().create_task(
         _remind_clarify_urgent(
             app,
             session_key,
-            interaction.interaction_id if interaction is not None else "",
+            interaction.interaction_id,
             open_id,
             delay,
         )
@@ -1867,7 +1864,7 @@ async def _remind_clarify_urgent(
     open_id: str,
     delay: float,
 ) -> None:
-    """超时前的兜底加急：交互还挂着才催，卡片换过就催当前那张。"""
+    """超时前加急：到点交互还挂着才催，卡片换过就催当前那张。"""
     await asyncio.sleep(delay)
     session = app[SESSIONS_KEY].get(session_key)
     if session is None:
@@ -1947,13 +1944,12 @@ async def _consume_pending_rebottom(
         freeze_card is not None,
     )
     if reason == "requested":
-        # clarify 选项卡置底成功：加急提醒用户来选择。
-        _urgent_clarify_card(
+        # clarify 选项卡置底成功：排一次超时前的加急提醒。
+        _schedule_clarify_urgent(
             app,
             session_key,
             session,
             app[FEISHU_MESSAGE_IDS_KEY].get(session_key, ""),
-            app[MESSAGE_BOT_IDS_KEY].get(session_key),
         )
     return True
 
@@ -2782,9 +2778,9 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                 )
                 if event.event == "interaction.requested":
                     _store_interaction_result(request.app, session)
-                    # clarify 直接开卡（无旧卡可置底）：同样加急提醒。
-                    _urgent_clarify_card(
-                        request.app, session_key, session, message_id, route.bot_id
+                    # clarify 直接开卡（无旧卡可置底）：同样排加急提醒。
+                    _schedule_clarify_urgent(
+                        request.app, session_key, session, message_id
                     )
                 if event_is_terminal:
                     _store_card_summary(request.app, event, session, message_id)

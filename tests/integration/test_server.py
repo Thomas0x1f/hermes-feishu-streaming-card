@@ -8501,9 +8501,8 @@ async def test_resolution_rebottom_survives_render_coalescing(client, monkeypatc
     assert "先做哪个" not in new_segment
 
 
-async def test_clarify_request_sends_urgent_app_reminder(client, monkeypatch):
-    # 显式开启加急后，clarify 选项卡置底发出对消息应用内加急，强提醒
-    # 发起人来选择；事件缺 initiator_open_id 时静默跳过。
+async def test_clarify_request_does_not_urge_on_arrival(client, monkeypatch):
+    # 卡片弹出时不加急：消息刚到，飞书通知已经够了。
     monkeypatch.setenv("HERMES_FEISHU_CARD_CLARIFY_URGENT", "1")
     test_client, feishu_client = client
     await test_client.post("/events", json=event_payload("message.started", 0))
@@ -8522,44 +8521,12 @@ async def test_clarify_request_sends_urgent_app_reminder(client, monkeypatch):
         ),
     )
     await _wait_until(lambda: len(feishu_client.sent) == 2, attempts=300)
-    await _wait_until(lambda: len(feishu_client.urgent) == 1, attempts=300)
-    # 加急的是置底后的选项卡新消息。
-    assert feishu_client.urgent[0] == ("feishu-message-2", ["ou_thomas"])
+    await asyncio.sleep(0.1)
+    assert feishu_client.urgent == []
 
 
-async def test_clarify_urgent_reminds_again_before_timeout(client, monkeypatch):
-    # 超时前的兜底加急：第一次提醒没人理，等到"超时前 N 秒"再催一次。
-    monkeypatch.setenv("HERMES_FEISHU_CARD_CLARIFY_URGENT", "1")
-    monkeypatch.setattr(sidecar_server, "_CLARIFY_URGENT_LEAD_SECONDS", 0.5)
-    test_client, feishu_client = client
-    await test_client.post("/events", json=event_payload("message.started", 0))
-    await test_client.post(
-        "/events",
-        json=event_payload(
-            "interaction.requested",
-            1,
-            {
-                "interaction_id": "q1",
-                "kind": "select",
-                "prompt": "选哪个？",
-                "options": [{"label": "北京", "value": "bj"}],
-                "initiator_open_id": "ou_thomas",
-                "timeout_seconds": 0.6,
-            },
-        ),
-    )
-    await _wait_until(lambda: len(feishu_client.urgent) == 2, attempts=300)
-    # 两次加急都打在当前选项卡上。
-    assert feishu_client.urgent == [
-        ("feishu-message-2", ["ou_thomas"]),
-        ("feishu-message-2", ["ou_thomas"]),
-    ]
-
-
-async def test_clarify_answered_before_timeout_skips_urgent_reminder(
-    client, monkeypatch
-):
-    # 已经答完的交互到点不再催。
+async def test_clarify_urges_before_timeout(client, monkeypatch):
+    # 快到超时还没人回答：加急一次强提醒发起人。
     monkeypatch.setenv("HERMES_FEISHU_CARD_CLARIFY_URGENT", "1")
     monkeypatch.setattr(sidecar_server, "_CLARIFY_URGENT_LEAD_SECONDS", 0.5)
     test_client, feishu_client = client
@@ -8580,6 +8547,32 @@ async def test_clarify_answered_before_timeout_skips_urgent_reminder(
         ),
     )
     await _wait_until(lambda: len(feishu_client.urgent) == 1, attempts=300)
+    # 加急打在当前选项卡上。
+    assert feishu_client.urgent == [("feishu-message-2", ["ou_thomas"])]
+
+
+async def test_clarify_answered_before_timeout_skips_urgent(client, monkeypatch):
+    # 已经答完的交互到点不催。
+    monkeypatch.setenv("HERMES_FEISHU_CARD_CLARIFY_URGENT", "1")
+    monkeypatch.setattr(sidecar_server, "_CLARIFY_URGENT_LEAD_SECONDS", 0.5)
+    test_client, feishu_client = client
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            1,
+            {
+                "interaction_id": "q1",
+                "kind": "select",
+                "prompt": "选哪个？",
+                "options": [{"label": "北京", "value": "bj"}],
+                "initiator_open_id": "ou_thomas",
+                "timeout_seconds": 0.6,
+            },
+        ),
+    )
+    await _wait_until(lambda: len(feishu_client.sent) == 2, attempts=300)
     await test_client.post(
         "/events",
         json=event_payload(
@@ -8589,7 +8582,7 @@ async def test_clarify_answered_before_timeout_skips_urgent_reminder(
         ),
     )
     await asyncio.sleep(0.4)
-    assert len(feishu_client.urgent) == 1
+    assert feishu_client.urgent == []
 
 
 async def test_clarify_urgent_disabled_by_default(client, monkeypatch):
