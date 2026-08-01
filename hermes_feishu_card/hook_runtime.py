@@ -76,9 +76,14 @@ _CONTEXT_COMPACTION_STATUS_RE = re.compile(
     r"\bCompacting\s+context\b",
     re.IGNORECASE,
 )
-MEDIA_RE = re.compile(r"MEDIA:([^\s\]]+)")
+# 路径里不许跨过字面的 \n / \r / \t 转义序列。上游把多个 MEDIA 用字面反斜杠 n
+# 分隔（而不是真换行）时，反斜杠和 n 都不是空白字符，贪婪匹配会一直吃到字符串
+# 末尾，把好几个路径粘成一个不存在的文件名，卡片整个不展示，clarify 只能返回
+# media unavailable。这里让匹配在字面转义序列处停下，等价于把它当作分隔符。
+_NO_LITERAL_ESCAPE = r"(?:(?!\\[nrt])[^\s\]])"
+MEDIA_RE = re.compile(r"MEDIA:(" + _NO_LITERAL_ESCAPE + r"+)")
 LOCAL_FILE_RE = re.compile(
-    r"(?<![:\w/])(/[^\s`]+\.(?:png|jpg|jpeg|webp|gif|pdf|txt|md|csv|xlsx|docx|mp3|wav|ogg|mp4|mov|webm))"
+    r"(?<![:\w/])(/(?:(?!\\[nrt])[^\s`])+\.(?:png|jpg|jpeg|webp|gif|pdf|txt|md|csv|xlsx|docx|mp3|wav|ogg|mp4|mov|webm))"
 )
 BACKGROUND_PROCESS_FINISHED_RE = re.compile(
     r"\A\[Background process "
