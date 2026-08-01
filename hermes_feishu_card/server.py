@@ -2489,13 +2489,23 @@ async def _recreate_card_at_bottom(
 ) -> bool:
     """clarify 分段：把当前渲染作为新消息发到聊天底部。
 
-    Sends the current render as a fresh message, repoints the session's
-    Feishu message id at it, and retires the previous card in place
-    (best effort).  Returns False when the send did not go through so the
-    caller can keep patching the old card.
+    Retires the previous card first, then sends the current render as a
+    fresh message and repoints the session's Feishu message id at it.
+    Returns False when the send did not go through so the caller can
+    retry; note the old card is normally already gone by then, so the
+    chat shows nothing until that retry lands.
 
-    freeze_card 非空（clarify resolved）时旧卡不换指针，而是定格 PATCH
-    为该快照（"已完成" + 问题 + 用户的回答），问答永久留在历史里。
+    先撤后发的空窗风险有限：发卡自带 3 次尝试 + 退避（见 feishu_client
+    的 _SEND_MAX_ATTEMPTS），锚点是用户消息不会随撤回失效，剩下的只有
+    飞书整体故障——那种情况换成先发后撤同样发不出卡。
+
+    例外：话题内拿不到用户消息作 reply 锚点时，旧卡是唯一能把新卡留在
+    话题里的锚点，只能等发卡成功后再撤回。先撤回会让 reply 目标失效，
+    飞书返回的是不可重试的 4xx，重试兜不住。
+
+    freeze_card 非空（clarify resolved）时旧卡不撤回也不换指针，而是在
+    发卡后定格 PATCH 为该快照（"已完成" + 问题 + 用户的回答），问答永久
+    留在历史里。
     """
     # delivery_key 必须每次重建都不同：飞书 create message 按 uuid 幂等
     # 去重（约 1 小时窗口），复用 session_key 会让重建被去重成第一张卡
@@ -2503,11 +2513,37 @@ async def _recreate_card_at_bottom(
     # 序号必须进程级全局：per-session 计数时，先后两个 CardSession 经
     # alias 归并落到同一 session_key，会各自从 1 起步拼出相同 key 撞进
     # 去重窗口（2026-07-28 生产事故）。
+    # 锚点优先取用户消息：它同样在话题里，且不会被我们撤回，所以撤回旧卡
+    # 之后仍然有效。session.message_id 不一定是飞书 id（也可能是 Hermes
+    # 内部 id），只有 om_ 前缀才能当锚点用。
     reply_anchor = session.reply_to_message_id or None
-    if not reply_anchor and session.thread_id:
-        # 话题内重建缺显式锚点时用旧卡自身作锚点：旧卡一定在该话题里，
-        # reply(reply_in_thread) 能把新卡留在话题内，不依赖易失的锚点表。
-        reply_anchor = previous_message_id or None
+    if not reply_anchor and session.thread_id and session.message_id.startswith("om_"):
+        reply_anchor = session.message_id
+    # 拿不到用户消息时只剩旧卡可用：它一定在话题里，但撤回后 message_id
+    # 失效，reply 会报错把新卡降级发进群主流。此时无法既先撤回又留在话题
+    # 内，只能保话题——这一条路径退回"先发后撤"。
+    # 不用 _thread_anchor()：该表在每次发卡成功后会被我们自己的卡 id 覆盖
+    # （见 _send_card_for_app 末尾），拿到的多半就是这张待撤回的旧卡。
+    anchored_on_retiring_card = False
+    if not reply_anchor and session.thread_id and previous_message_id:
+        reply_anchor = previous_message_id
+        anchored_on_retiring_card = True
+
+    # 先撤回旧卡，再发新卡：新卡出现前旧卡必须已经消失，不能两张并存。
+    # 这里必须 await——fire-and-forget 无法保证撤回先于发卡完成。
+    retire_before_send = (
+        freeze_card is None
+        and bool(previous_message_id)
+        and not anchored_on_retiring_card
+    )
+    if retire_before_send:
+        await _retire_displaced_card(app, previous_message_id, bot_id)
+    elif anchored_on_retiring_card:
+        logger.warning(
+            "thread rebottom has no durable user-message anchor; keeping the "
+            "old card until the new one is sent so it stays in the thread"
+        )
+
     delivery = await _send_card_for_app(
         app,
         session.chat_id,
@@ -2522,7 +2558,9 @@ async def _recreate_card_at_bottom(
     )
     if not delivery.delivered or not delivery.message_id:
         logger.warning(
-            "displaced card re-create failed for session; keeping old card"
+            "displaced card re-create failed for session; old card %s, "
+            "caller retries",
+            "already retired" if retire_before_send else "kept as anchor",
         )
         return False
     feishu_message_ids: Dict[str, str] = app[FEISHU_MESSAGE_IDS_KEY]
@@ -2546,10 +2584,12 @@ async def _recreate_card_at_bottom(
             asyncio.get_running_loop().create_task(
                 _freeze_resolved_card(app, previous_message_id, freeze_card, bot_id)
             )
-        else:
+        elif not retire_before_send:
+            # 旧卡刚才被当作 reply 锚点，发完才能撤。
             asyncio.get_running_loop().create_task(
                 _retire_displaced_card(app, previous_message_id, bot_id)
             )
+        # 其余情况旧卡已在发卡前撤回，这里不再重复处理。
     return True
 
 

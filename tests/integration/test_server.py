@@ -11772,6 +11772,47 @@ async def test_thread_rebottom_falls_back_to_previous_card_as_anchor():
         await test_client.close()
 
 
+async def test_rebottom_retires_old_card_before_sending_the_new_one():
+    # 旧卡必须先撤回再发新卡，不能两张并存。用户消息可作锚点时撤回不会
+    # 毁掉锚点，所以走"先撤后发"。
+    class OrderedFakeFeishuClient(FakeFeishuClient):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        async def send_card(self, *args, **kwargs):
+            self.calls.append("send")
+            return await super().send_card(*args, **kwargs)
+
+        async def delete_message(self, message_id):
+            self.calls.append("delete")
+            return await super().delete_message(message_id)
+
+    feishu_client = OrderedFakeFeishuClient()
+    app = create_app(feishu_client)
+    test_client = TestClient(TestServer(app))
+    await test_client.start_server()
+    try:
+        session = CardSession("conversation-1", "om_user_msg", "oc_abc")
+        session.thread_id = "omt_topic1"
+        session.reply_to_message_id = "om_user_msg"
+        ok = await sidecar_server._recreate_card_at_bottom(
+            app,
+            "profile:ordered",
+            session,
+            {"schema": "2.0", "body": {"elements": []}},
+            None,
+            previous_message_id="om_prev_card",
+        )
+        assert ok
+        assert feishu_client.calls == ["delete", "send"]
+        assert feishu_client.deleted == ["om_prev_card"]
+        # 撤回旧卡不影响锚点：新卡仍按用户消息回到话题内。
+        assert feishu_client.sent[-1][3] == "om_user_msg"
+    finally:
+        await test_client.close()
+
+
 async def test_over_limit_clarify_media_truncates_instead_of_rejecting(
     client, monkeypatch, tmp_path
 ):
