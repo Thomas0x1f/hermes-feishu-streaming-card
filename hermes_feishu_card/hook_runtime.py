@@ -22,7 +22,8 @@ import sys
 from types import CodeType, SimpleNamespace
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Optional
+import weakref
 from urllib import error as urlerror
 from urllib import parse
 from urllib import request
@@ -149,6 +150,8 @@ SUPPORTED_RUNTIME_EVENTS = {
     "interaction.failed",
 }
 
+_CANONICAL_TURN_ATTR = "_hfc_turn_id"
+
 
 @dataclass(frozen=True)
 class RuntimeConfig:
@@ -186,6 +189,7 @@ class _PolicyIdentity:
     chat_id: str
     conversation_id: str
     message_id: str
+    turn_id: str
     scope_key: tuple[str, str, str, str]
     turn_key: tuple[str, str, str, str]
     is_new_turn: bool
@@ -278,6 +282,8 @@ _OPERATION_TRANSPORT_SECRETS: dict[str, tuple[bytes, str, float]] = {}
 _OPERATION_TRANSPORT_SECRETS_LOCK = threading.Lock()
 _OPERATION_TRANSPORT_SECRET_TTL_SECONDS = 600.0
 _OPERATION_TRANSPORT_SECRET_LIMIT = 256
+_GATEWAY_RUNNER_LOCK = threading.Lock()
+_GATEWAY_RUNNER_REF: weakref.ReferenceType[Any] | None = None
 
 
 class _OperationsActionDispatcher:
@@ -335,6 +341,7 @@ _OPERATIONS_ACTION_DISPATCHER = _OperationsActionDispatcher(
 
 
 def reset_runtime_state() -> None:
+    global _GATEWAY_RUNNER_REF
     with _SEQUENCE_LOCK:
         _SEQUENCES.clear()
     _ACTIVE_FALLBACK_MESSAGE_IDS.clear()
@@ -367,6 +374,8 @@ def reset_runtime_state() -> None:
         task.cancel()
     _NATIVE_HANDOFF_ACK_TASKS.clear()
     _NATIVE_HANDOFF_PLAN_FINGERPRINTS.clear()
+    with _GATEWAY_RUNNER_LOCK:
+        _GATEWAY_RUNNER_REF = None
     reset_runtime_control_for_tests()
 
 
@@ -378,7 +387,132 @@ def _ensure_runtime_control_started(config: RuntimeConfig | None = None) -> bool
         return start_runtime_control(
             event_url=resolved.event_url,
             package_version=__version__,
+            active_work_snapshot_provider=gateway_active_work_snapshot,
+            admission_draining_provider=gateway_external_drain_active,
+            drain_home_verified_provider=gateway_drain_home_verified,
         )
+    except Exception:
+        return False
+
+
+def _remember_gateway_runner(runner: Any) -> None:
+    global _GATEWAY_RUNNER_REF
+    if runner is None:
+        return
+    try:
+        reference = weakref.ref(runner)
+    except TypeError:
+        return
+    with _GATEWAY_RUNNER_LOCK:
+        _GATEWAY_RUNNER_REF = reference
+
+
+def gateway_active_work_snapshot() -> tuple[int, bool]:
+    with _GATEWAY_RUNNER_LOCK:
+        reference = _GATEWAY_RUNNER_REF
+    runner = reference() if reference is not None else None
+    if runner is None:
+        return 0, False
+    aggregate = getattr(runner, "_active_work_count", None)
+    if callable(aggregate):
+        try:
+            value = aggregate()
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                return value, True
+        except Exception:
+            pass
+    running_agents = getattr(runner, "_running_agents", {})
+    agent_count = len(running_agents) if isinstance(running_agents, dict) else 0
+    adapters: list[Any] = []
+    primary = getattr(runner, "adapters", {})
+    if isinstance(primary, dict):
+        adapters.extend(primary.values())
+    profile_maps = getattr(runner, "_profile_adapters", {})
+    if isinstance(profile_maps, dict):
+        for profile_map in profile_maps.values():
+            if isinstance(profile_map, dict):
+                adapters.extend(profile_map.values())
+    seen: set[int] = set()
+    adapter_count = 0
+    for adapter in adapters:
+        identity = id(adapter)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        active = getattr(adapter, "_active_sessions", {})
+        if isinstance(active, dict):
+            adapter_count += len(active)
+    return max(0, agent_count, adapter_count), False
+
+
+def gateway_active_session_count() -> int:
+    return gateway_active_work_snapshot()[0]
+
+
+def gateway_external_drain_active() -> bool:
+    with _GATEWAY_RUNNER_LOCK:
+        reference = _GATEWAY_RUNNER_REF
+    runner = reference() if reference is not None else None
+    return bool(runner is not None and getattr(runner, "_external_drain_active", False))
+
+
+def gateway_drain_home_verified() -> bool:
+    module = sys.modules.get("gateway.run")
+    source = getattr(module, "__file__", None)
+    if not isinstance(source, str) or not source:
+        return False
+    try:
+        gateway_source = Path(source).resolve(strict=True)
+        if gateway_source.parent.name != "gateway":
+            return False
+        hermes_root = gateway_source.parent.parent
+        constants = importlib.import_module("hermes_constants")
+        resolver = getattr(constants, "get_process_hermes_home", None)
+        if not callable(resolver):
+            resolver = getattr(constants, "get_hermes_home", None)
+        if not callable(resolver):
+            return False
+        gateway_home = Path(resolver()).expanduser().resolve(strict=False)
+    except Exception:
+        return False
+    return os.path.normcase(str(gateway_home)) == os.path.normcase(
+        str(hermes_root.parent.resolve(strict=False))
+    )
+
+
+async def maintenance_admission_from_hermes_locals(
+    local_vars: dict[str, Any],
+) -> bool:
+    runner = local_vars.get("self") if isinstance(local_vars, dict) else None
+    _remember_gateway_runner(runner)
+    try:
+        from .maintenance_store import (
+            MaintenanceRefused,
+            load_active_drain_lease,
+            maintenance_paths,
+        )
+
+        try:
+            lease = load_active_drain_lease(maintenance_paths())
+            blocked = lease is not None
+            message = "Hermes 正在维护升级中，请稍后再试。"
+        except MaintenanceRefused:
+            blocked = True
+            message = "Hermes 维护状态需要本机检查，暂不接入新任务。"
+        if not blocked:
+            return False
+        event = local_vars.get("event")
+        source = local_vars.get("source") or getattr(event, "source", None)
+        adapter_for_source = getattr(runner, "_adapter_for_source", None)
+        adapter = adapter_for_source(source) if callable(adapter_for_source) else None
+        send = getattr(adapter, "send", None)
+        chat_id = str(getattr(source, "chat_id", "") or "").strip()
+        if callable(send) and chat_id:
+            try:
+                await send(chat_id, message)
+            except Exception:
+                pass
+        return True
     except Exception:
         return False
 
@@ -587,12 +721,14 @@ def _policy_identity(
         or _first_attr_string(gateway_event_obj, ("message_id", "msg_id"))
         or ""
     )
+    turn_id = _turn_id_for_runtime_event(event_name, local_vars) or ""
+    canonical_id = turn_id or message_id
     endpoint = _summary_base_url(config.event_url)
     scope_key = (endpoint, profile_id, chat_id, conversation_id)
     with _POLICY_LOCK:
         active_turn = _ACTIVE_POLICY_TURNS.get(scope_key)
-    if message_id:
-        turn_token = f"message:{message_id}"
+    if canonical_id:
+        turn_token = f"message:{canonical_id}"
     elif event_name != "message.started" and active_turn is not None:
         turn_token = active_turn[3]
     else:
@@ -622,6 +758,7 @@ def _policy_identity(
         chat_id=chat_id,
         conversation_id=conversation_id,
         message_id=message_id,
+        turn_id=turn_id,
         scope_key=scope_key,
         turn_key=turn_key,
         is_new_turn=is_new_turn,
@@ -637,6 +774,8 @@ def _policy_payload(identity: _PolicyIdentity) -> dict[str, str]:
     }
     if identity.message_id:
         payload["message_id"] = identity.message_id
+    if identity.turn_id:
+        payload["turn_id"] = identity.turn_id
     return payload
 
 
@@ -826,18 +965,23 @@ def _policy_event_locals(
     gate: _PolicyGateResult,
 ) -> dict[str, Any]:
     identity = gate.identity
-    if identity is None or not identity.is_new_turn:
+    if identity is None:
         return local_vars
-    return {**local_vars, "_hfc_policy_new_turn": True}
+    updates: dict[str, Any] = {}
+    if identity.turn_id:
+        updates["turn_id"] = identity.turn_id
+    if identity.is_new_turn:
+        updates["_hfc_policy_new_turn"] = True
+    return {**local_vars, **updates} if updates else local_vars
 
 
 def _discard_pending_deltas_for_local_vars(local_vars: dict[str, Any]) -> None:
-    message_id = _message_id_from_local_vars(local_vars)
-    if not message_id:
+    canonical_id = _canonical_id_from_local_vars(local_vars)
+    if not canonical_id:
         return
     with _PENDING_DELTAS_LOCK:
         for key, pending in list(_PENDING_DELTAS.items()):
-            if _pending_message_id(key, pending) == message_id:
+            if _pending_message_id(key, pending) == canonical_id:
                 _PENDING_DELTAS.pop(key, None)
 
 
@@ -903,6 +1047,8 @@ def _delta_coalesce_identity(
     )
     if not message_id:
         return None
+    turn_id = _turn_id_for_runtime_event(event_name, local_vars) or ""
+    canonical_id = turn_id or message_id
     text = _first_raw_string(local_vars, ("text", "delta", "delta_text", "content"))
     if text is None:
         text = _first_attr_raw_string(message_obj, ("text", "content"))
@@ -915,8 +1061,11 @@ def _delta_coalesce_identity(
         except RuntimeError:
             return None
     profile_id, _profile_source = _profile_identity(local_vars, source_obj, message_obj)
-    key = (id(loop), config.event_url, message_id, event_name, profile_id)
-    return key, loop, _delta_base_locals(local_vars), str(text)
+    key = (id(loop), config.event_url, canonical_id, event_name, profile_id)
+    base_locals = _delta_base_locals(
+        {**local_vars, **({"turn_id": turn_id} if turn_id else {})}
+    )
+    return key, loop, base_locals, str(text)
 
 
 def _delta_base_locals(local_vars: dict[str, Any]) -> dict[str, Any]:
@@ -933,6 +1082,7 @@ def _delta_base_locals(local_vars: dict[str, Any]) -> dict[str, Any]:
         "message_id",
         "msg_id",
         "event_message_id",
+        "turn_id",
         "created_at",
         "profile_id",
         "hermes_profile",
@@ -974,18 +1124,18 @@ async def flush_pending_deltas_for_message(message_id: str) -> None:
 
 
 async def _flush_pending_deltas_for_local_vars(local_vars: dict[str, Any]) -> None:
-    message_id = _message_id_from_local_vars(local_vars)
-    if message_id:
-        await flush_pending_deltas_for_message(message_id)
+    canonical_id = _canonical_id_from_local_vars(local_vars)
+    if canonical_id:
+        await flush_pending_deltas_for_message(canonical_id)
 
 
 def _has_pending_deltas_for_local_vars(local_vars: dict[str, Any]) -> bool:
-    message_id = _message_id_from_local_vars(local_vars)
-    if not message_id:
+    canonical_id = _canonical_id_from_local_vars(local_vars)
+    if not canonical_id:
         return False
     with _PENDING_DELTAS_LOCK:
         return any(
-            _pending_message_id(key, pending) == message_id
+            _pending_message_id(key, pending) == canonical_id
             for key, pending in _PENDING_DELTAS.items()
         )
 
@@ -1001,6 +1151,13 @@ def _message_id_from_local_vars(local_vars: dict[str, Any]) -> str | None:
         gateway_event_obj, ("message_id", "msg_id")
     )
     return message_id
+
+
+def _canonical_id_from_local_vars(local_vars: dict[str, Any]) -> Optional[str]:
+    return (
+        _turn_id_for_runtime_event("", local_vars)
+        or _message_id_from_local_vars(local_vars)
+    )
 
 
 def _pending_message_id(
@@ -3293,6 +3450,106 @@ def _hfc_install_compress_command_handler(runner_type: type[Any]) -> bool:
         _hfc_handle_compress_command_with_card,
     )
     setattr(runner_type, "_hfc_compress_command_wrapped", True)
+    return True
+
+
+async def _hfc_request_update_command(runner: Any, event: Any) -> bool:
+    try:
+        config = load_runtime_config()
+        if not config.enabled:
+            return False
+        source = getattr(event, "source", None)
+        chat_id = str(getattr(source, "chat_id", "") or "").strip()
+        message_id = _hfc_command_event_message_id(event)
+        operator_open_id = _hfc_resume_operator_open_id(event)
+        if not chat_id or not message_id or not operator_open_id:
+            return False
+        local_vars = {
+            "source": source,
+            "event": event,
+            "message": event,
+            "runner": runner,
+        }
+        profile_id, profile_source = _profile_identity(local_vars, source, event)
+        payload = {
+            "command": "update",
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "thread_id": str(getattr(source, "thread_id", "") or "").strip(),
+            "reply_to_message_id": message_id,
+            "profile_id": profile_id,
+            "profile_source": profile_source,
+            "chat_type": str(getattr(source, "chat_type", "") or "").strip().lower(),
+            "operator": {"open_id": operator_open_id},
+            "created_at": _created_at(getattr(event, "created_at", None)),
+            "platform": "feishu",
+        }
+        root_secret = read_transport_root_secret()
+        if root_secret is None:
+            return False
+        payload["adapter_command_proof"] = sign_command_transport_proof(
+            root_secret,
+            payload,
+            timestamp=int(time.time()),
+            nonce=secrets.token_urlsafe(18),
+        )
+        result = await _post_json_response(
+            f"{_summary_base_url(config.event_url)}/commands",
+            payload,
+            config.timeout_seconds,
+        )
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            return False
+        operation_id = str(result.get("operation_id") or "").strip()
+        if not operation_id:
+            return False
+        _remember_operation_transport(
+            operation_id,
+            derive_operation_transport_secret(root_secret, operation_id),
+            profile_id,
+        )
+        return True
+    except Exception:
+        return False
+
+
+async def _hfc_handle_update_command_with_card(runner: Any, event: Any) -> Any:
+    original = getattr(type(runner), "_hfc_original_handle_update_command", None)
+    if not callable(original):
+        return None
+    source = getattr(event, "source", None)
+    if source is None or _platform_name({}, source) != "feishu":
+        return await original(runner, event)
+    if _hfc_command_from_event(event) != "update":
+        return await original(runner, event)
+    try:
+        get_args = getattr(event, "get_command_args", None)
+        raw_args = str(get_args() or "").strip() if callable(get_args) else ""
+    except Exception:
+        raw_args = ""
+    chat_type = str(getattr(source, "chat_type", "") or "").strip().lower()
+    if raw_args or chat_type not in {"dm", "p2p", "private"}:
+        return await original(runner, event)
+    if not _hfc_resume_operator_open_id(event):
+        return "自动更新暂不可用：无法确认操作者身份，未执行 Hermes 更新。"
+    if await _hfc_request_update_command(runner, event):
+        return None
+    return "自动更新暂不可用，请稍后重试；未执行 Hermes 更新。"
+
+
+def _hfc_install_update_command_handler(runner_type: type[Any]) -> bool:
+    current = runner_type.__dict__.get("_handle_update_command")
+    if current is _hfc_handle_update_command_with_card:
+        setattr(runner_type, "_hfc_update_command_wrapped", True)
+        return True
+    if getattr(runner_type, "_hfc_update_command_wrapped", False):
+        return callable(getattr(runner_type, "_handle_update_command", None))
+    original = current or getattr(runner_type, "_handle_update_command", None)
+    if not callable(original):
+        return False
+    setattr(runner_type, "_hfc_original_handle_update_command", original)
+    setattr(runner_type, "_handle_update_command", _hfc_handle_update_command_with_card)
+    setattr(runner_type, "_hfc_update_command_wrapped", True)
     return True
 
 
@@ -5898,6 +6155,9 @@ def _hfc_handle_operations_select_action(
     token = str(action_value.get("token") or "").strip()
     transport_lineage_id = str(action_value.get("transport_lineage_id") or "").strip()
     profile_scope = str(action_value.get("profile_scope") or "").strip()
+    update_evidence_fingerprint = str(
+        action_value.get("update_evidence_fingerprint") or ""
+    ).strip()
     chat_id = _hfc_action_chat_id(data)
     if not operation_action or not token or not chat_id:
         _hfc_info("operations.select ignored: missing action/token/chat")
@@ -5923,6 +6183,10 @@ def _hfc_handle_operations_select_action(
         forwarded_value["profile_scope"] = profile_scope
     if transport_lineage_id:
         forwarded_value["transport_lineage_id"] = transport_lineage_id
+    if update_evidence_fingerprint:
+        forwarded_value["update_evidence_fingerprint"] = (
+            update_evidence_fingerprint
+        )
     sidecar_payload = {
         "adapter_transport_proof": {
             "timestamp": timestamp,
@@ -7011,6 +7275,7 @@ def _hfc_install_policy_adapter_method(
 
 def install_feishu_command_card_adapter_methods(runner: Any, event: Any = None) -> bool:
     try:
+        _remember_gateway_runner(runner)
         _ensure_runtime_control_started()
         _install_delivery_ledger_mark_delivered_wrapper()
         adapters = getattr(runner, "adapters", None)
@@ -7023,6 +7288,7 @@ def install_feishu_command_card_adapter_methods(runner: Any, event: Any = None) 
         runner_type = type(runner)
         _hfc_install_resume_picker_handler(runner_type)
         _hfc_install_compress_command_handler(runner_type)
+        _hfc_install_update_command_handler(runner_type)
         current_notice_delivery = runner_type.__dict__.get("_deliver_platform_notice")
         if current_notice_delivery is _hfc_deliver_platform_notice_with_card:
             setattr(runner_type, "_hfc_platform_notice_wrapped", True)
@@ -7650,8 +7916,8 @@ async def _post_json_ordered_response(
 
 
 def _send_lock(url: str, payload: dict[str, Any]) -> asyncio.Lock | None:
-    message_id = payload.get("message_id")
-    if not isinstance(message_id, str) or not message_id:
+    canonical_id = payload.get("turn_id") or payload.get("message_id")
+    if not isinstance(canonical_id, str) or not canonical_id:
         return None
     try:
         loop = asyncio.get_running_loop()
@@ -7659,7 +7925,7 @@ def _send_lock(url: str, payload: dict[str, Any]) -> asyncio.Lock | None:
         # Called from a context without a running loop (gateway drain,
         # cross-thread submit) — skip ordering and let the send proceed.
         return None
-    key = (id(loop), url, message_id)
+    key = (id(loop), url, canonical_id)
     with _SEND_LOCKS_GUARD:
         lock = _SEND_LOCKS.get(key)
         if lock is None:
@@ -7949,7 +8215,11 @@ def _build_event(
         )
         if message_id is None:
             return None
-    sequence = _peek_next_sequence(message_id) if preview else _next_sequence(message_id)
+    turn_id = _turn_id_for_runtime_event(event_name, local_vars) or ""
+    sequence_id = turn_id or message_id
+    sequence = (
+        _peek_next_sequence(sequence_id) if preview else _next_sequence(sequence_id)
+    )
     event_data = _event_data(event_name, local_vars, source_obj, message_obj)
     if thread_id:
         event_data.setdefault("thread_id", thread_id)
@@ -7965,6 +8235,8 @@ def _build_event(
         "created_at": created_at,
         "data": event_data,
     }
+    if turn_id:
+        payload["turn_id"] = turn_id
     if is_terminal_event:
         if not preview:
             if (
@@ -8648,6 +8920,38 @@ def _first_string(source: dict[str, Any], names: tuple[str, ...]) -> str | None:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
+
+
+def _turn_id_for_runtime_event(
+    event_name: str,
+    local_vars: dict[str, Any],
+) -> Optional[str]:
+    explicit = _first_string(local_vars, ("turn_id",))
+    source_obj = local_vars.get("source")
+    handler_event = local_vars.get("event")
+    handler_message_id = None
+    if event_name in {"message.started", "message.completed", "message.failed"}:
+        handler_message_id = _first_attr_string(
+            handler_event,
+            ("message_id", "msg_id"),
+        )
+
+    candidate = explicit or handler_message_id
+    if candidate is not None:
+        if event_name == "message.started" and source_obj is not None:
+            try:
+                setattr(source_obj, _CANONICAL_TURN_ATTR, candidate)
+            except Exception:
+                pass
+        return candidate
+
+    if source_obj is None:
+        return None
+    try:
+        bound = getattr(source_obj, _CANONICAL_TURN_ATTR, None)
+    except Exception:
+        return None
+    return bound.strip() if isinstance(bound, str) and bound.strip() else None
 
 
 def _first_raw_string(source: dict[str, Any], names: tuple[str, ...]) -> str | None:

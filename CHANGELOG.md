@@ -5,6 +5,90 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.2.0.html).
 
+## V4.2.5 — 2026-08-02
+
+See also: [docs/release-notes-v4.2.5.md](docs/release-notes-v4.2.5.md)
+
+### Fixed
+- Canonical `turn_id` now fences quoted-turn session, sequence, terminal, native-handoff, and delivery-policy state while preserving legacy alias fallback.
+- Duplicate maintenance resume is non-destructive; maintenance commands stay bound to the confirmed Hermes checkout, and persisted resume phases reconcile external drain before readiness.
+- Doctor suggests integrity acknowledgement only for a jointly verified eligible plan, and installer `latest` resolves to a pinned stable tag or fails before mutation.
+- Package, public config template, Compose, and CI release markers are checked as one version contract.
+
+### Safety
+- Release Assets require an exact tested annotated tag and reverify the same peeled commit immediately before upload.
+- Unknown event paths remain fail-open, durable maintenance ownership remains fail-closed, and no installed Hermes source is edited by hand.
+
+## V4.2.4 — 2026-08-01
+
+See also: [docs/release-notes-v4.2.4.md](docs/release-notes-v4.2.4.md)
+
+### Fixed
+- Consecutive Feishu/Lark topic replies quoting the same message now create independent cards instead of overwriting the first reply card.
+- `message.started` uses the real incoming message ID, with the reply anchor only as a fallback; in-turn streaming deltas and tool events continue to resolve through the reply alias.
+
+### Safety
+- New-turn routing bypasses an active reply alias only for `message.started`; existing session correlation for streaming events is unchanged.
+- Unknown or unsupported event paths remain fail-open, and native duplicate suppression boundaries are unchanged.
+
+## V4.2.3 — 2026-08-01
+
+See also: [docs/release-notes-v4.2.3.md](docs/release-notes-v4.2.3.md)
+
+### Fixed
+- Feishu/Lark WebSocket update actions now forward `update_evidence_fingerprint` from the signed card value to the sidecar, so confirm and cancel can pass the existing evidence-bound transition checks.
+- Real card clicks no longer stop at the Gateway hook with an unchanged confirmation card and zero sidecar update attempts.
+
+### Safety
+- The sidecar remains fail-closed: missing or mismatched update evidence is still rejected instead of inferred or weakened.
+- The native card action keeps its fast empty acknowledgement, and cancel still never schedules the updater.
+
+## V4.2.2 — 2026-08-01
+
+See also: [docs/release-notes-v4.2.2.md](docs/release-notes-v4.2.2.md)
+
+### Fixed
+- Feishu/Lark WebSocket `/update` confirmation actions now asynchronously PATCH the original confirmation card after the callback has been acknowledged.
+- Cancel now renders the durable terminal `已取消更新` state on the original card instead of leaving an apparently clickable confirmation card behind.
+- Confirm publishes the locking/preparing transition before the independent maintenance updater starts, keeping the visible card aligned with the durable operation state.
+
+### Safety
+- The native card-action callback still returns its empty acknowledgement immediately; Feishu API work stays outside the callback deadline.
+- Cancel never schedules the updater, and confirm schedules it only after the transition-card update attempt. Existing initiator, chat, profile, expiry, preflight, drain, and fail-closed checks are unchanged.
+
+## V4.2.1 — 2026-07-31
+
+See also: [docs/release-notes-v4.2.1.md](docs/release-notes-v4.2.1.md)
+
+### Fixed
+- Gateway startup now registers the live runner before runtime control starts, so the first authenticated heartbeat can prove the complete `_active_work_count()` aggregate immediately.
+- The first bare private-chat `/update` after a Gateway restart no longer needs an unrelated warm-up message before its maintenance preflight can accept complete active-work evidence.
+
+### Safety
+- Complete active-work evidence still comes from one `_active_work_count()` sample. Missing, invalid, or failing aggregates remain fail-closed and are never treated as zero work.
+
+## V4.2.0 — 2026-07-31
+
+See also: [docs/release-notes-v4.2.0.md](docs/release-notes-v4.2.0.md)
+
+### Added
+- A bare `/update` in a Feishu private chat now opens an evidence-bound confirmation card instead of immediately mutating Hermes.
+- A private, independent maintenance runtime caches the exact HFC wheel, journals each phase, runs only `hermes update --yes`, reinstalls the same HFC version, restores hooks and services, and verifies the final runtime.
+- `maintenance provision`, `maintenance status`, `maintenance run`, and `maintenance resume` expose the recovery boundary locally.
+
+### Safety
+- Confirmation is bound to the exact initiator, chat, profile, target evidence, and 120-second window. Group, non-Feishu, alias, and parameterized update commands retain Hermes' original behavior.
+- Unrelated tracked changes, incomplete Git operations, missing maintenance evidence, version drift, CI-independent runtime drift, and verification failure stop before unsafe mutation. Untracked files are preserved and no custom Git rollback is used.
+
+## V4.1.4 — 2026-07-31
+
+See also: [docs/release-notes-v4.1.4.md](docs/release-notes-v4.1.4.md)
+
+### Fixed
+- Official `install` / `setup` can migrate a manifestless legacy owned Gateway hook when lenient removal restores the clean backup byte-for-byte, including the portable install path used on Windows (Issue #171).
+- Optional Cron and required exact Base evidence are validated independently; a missing legacy Base hook is added through the current manifest-v2 install transaction.
+- User edits outside owned blocks, mismatched backups, symlinks, missing targets, and invalid source remain fail-closed.
+
 ## V4.1.3 — 2026-07-30
 
 See also: [docs/release-notes-v4.1.3.md](docs/release-notes-v4.1.3.md)

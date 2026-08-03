@@ -2,6 +2,14 @@
 
 自动化测试不能完全证明 Feishu/Lark 客户端体验。涉及卡片 UX、topic、系统提示、命令卡片的版本，发布前需要真实飞书 smoke。
 
+## V4.1.4 Windows 旧版安装迁移验收
+
+- 在 Windows 10 / Hermes v0.19.0 上保留 Issue #171 的原始 `gateway/run.py`、`.hermes_feishu_card.bak` 与 optional Cron，不再手工创建 manifest 或调用内部 `apply_patch()`。
+- 通过官方 PowerShell `install.ps1` / `setup` 安装候选；必须看到 `manifest: rebuilt` 与 `install ok`，required exact Base backup/hook 和 `manifest_version: 2` 同步建立。
+- 重启 Hermes Gateway 后运行 doctor，install state 必须为 `installed`；sidecar/Gateway runtime package 必须来自 Hermes venv 的 `site-packages` 且版本为 4.1.4。
+- 发送一轮普通流式回答和一轮工具调用，确认卡片进入完成态、工具只出现一次、无匹配原生灰字重复。该真实飞书复测由 Issue #171 报告者确认前，不标记为已通过。
+- 另用 owned marker 外增加无敏感信息测试行的隔离副本确认安装拒绝且文件不变；不要在真实 Hermes 工作树制造用户改动。
+
 ## V4.1.3 升级恢复、TurnRunner 与 V4.1 安全控制验收
 
 - heartbeat fence：verified `installed` plan 在 startup grace 内外等待首次 heartbeat，或 Gateway 正常重启造成 heartbeat stale，均不得出现持久化 fence 或 repair mutation；新 matching `runtime.hello` 到达后应一次恢复 ready。
@@ -93,7 +101,7 @@ sidecar 最终 metrics：`events_received/events_applied=23/23`，1 次发送成
 - 手动 `/compress`：先显示蓝色“正在压缩上下文”，完成后原位显示 Hermes 的 messages/tokens 统计；no-op 和 aborted warning 也更新原卡。
 - `/model`、裸 `/resume`、`/new` confirmation：继续使用已有交互卡，选择/确认后原卡更新，不出现第二张结果卡。
 - `/learn` 或 `/blueprint`：即时确认使用命令卡，后续 Agent reasoning/answer 使用普通流式卡，不串到命令卡。
-- `/update`：重启前反馈使用命令卡；重启后状态允许由独立 `system.notice` 卡继续，不要求跨进程 PATCH 内存中的旧卡。
+- V4.0.13 当时的 `/update`：重启前反馈使用通用命令卡；该边界已由 V4.2.0 的私聊裸命令专用维护卡替代，群聊和参数化命令仍保留 Hermes 原路径。
 - 受控让 command card create/PATCH 失败：对应 Hermes 原始反馈必须通过 native fail-open 可见，不能静默丢失。
 - 媒体/附件命令继续投递原生文件；文本卡片不能吞掉附件。
 
@@ -338,3 +346,17 @@ V3.8.9 notice suppress smoke: please run terminal command date, then reply exact
 ```
 
 截图入库前需要遮挡私人头像、姓名、chat id、群名和不适合公开的上下文。
+# Private `/update` acceptance
+
+- Verify `maintenance status` is ready before opening Feishu.
+- A private bare `/update` produces one confirmation card; a group command or
+  `/update --yes` remains native Hermes behavior.
+- A different operator cannot confirm, an expired or repeated click is
+  rejected, and cancel performs no mutation.
+- With active work, the card shows draining before mutation. The same card then
+  shows hook restoration, Hermes update, exact HFC reinstall, service startup,
+  verification, and success.
+- After success, `doctor --explain` must report the expected HFC version,
+  `site-packages` import origin, installed hooks, and ready sidecar/Gateway.
+- Any tracked non-HFC edit or incomplete Git operation must show unavailable
+  and leave Hermes unchanged. Untracked user files must remain intact.

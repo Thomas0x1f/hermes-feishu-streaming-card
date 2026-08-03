@@ -2054,6 +2054,243 @@ def test_compress_handler_wrapper_is_idempotent_and_non_feishu_bypasses_card():
     assert runner.original_calls == 1
 
 
+@pytest.mark.parametrize(
+    ("platform", "chat_type", "args", "command"),
+    [
+        ("telegram", "private", "", "update"),
+        ("feishu", "group", "", "update"),
+        ("feishu", "private", "--yes", "update"),
+        ("feishu", "private", "", "upgrade"),
+    ],
+)
+def test_update_command_wrapper_preserves_original_outside_exact_private_bare_command(
+    platform,
+    chat_type,
+    args,
+    command,
+    monkeypatch,
+):
+    requests = []
+
+    async def request_update(runner, event):
+        requests.append((runner, event))
+        return True
+
+    monkeypatch.setattr(hook_runtime, "_hfc_request_update_command", request_update)
+
+    class DummyRunner:
+        adapters = {}
+
+        def __init__(self):
+            self.original_calls = 0
+
+        async def _handle_update_command(self, event):
+            self.original_calls += 1
+            return "original update"
+
+    runner = DummyRunner()
+    event = SimpleNamespace(
+        source=SimpleNamespace(
+            platform=platform,
+            chat_type=chat_type,
+            chat_id="oc_private",
+        ),
+        get_command=lambda: command,
+        get_command_args=lambda: args,
+    )
+
+    hook_runtime.install_feishu_command_card_adapter_methods(runner, event=event)
+    result = asyncio.run(runner._handle_update_command(event))
+
+    assert result == "original update"
+    assert runner.original_calls == 1
+    assert requests == []
+
+
+def test_update_command_wrapper_routes_exact_private_bare_command_and_fails_closed(
+    monkeypatch,
+):
+    outcomes = iter([True, False])
+    requests = []
+
+    async def request_update(runner, event):
+        requests.append((runner, event))
+        return next(outcomes)
+
+    monkeypatch.setattr(hook_runtime, "_hfc_request_update_command", request_update)
+
+    class DummyRunner:
+        adapters = {}
+
+        def __init__(self):
+            self.original_calls = 0
+
+        async def _handle_update_command(self, event):
+            self.original_calls += 1
+            return "original update"
+
+    runner = DummyRunner()
+    event = SimpleNamespace(
+        source=SimpleNamespace(
+            platform="feishu",
+            chat_type="private",
+            chat_id="oc_private",
+        ),
+        sender_id=SimpleNamespace(open_id="ou_owner"),
+        get_command=lambda: "update",
+        get_command_args=lambda: "",
+    )
+
+    hook_runtime.install_feishu_command_card_adapter_methods(runner, event=event)
+    assert asyncio.run(runner._handle_update_command(event)) is None
+    unavailable = asyncio.run(runner._handle_update_command(event))
+
+    assert "暂不可用" in unavailable
+    assert runner.original_calls == 0
+    assert len(requests) == 2
+
+
+def test_update_command_wrapper_requires_private_operator_identity(monkeypatch):
+    requests = []
+
+    async def request_update(runner, event):
+        requests.append((runner, event))
+        return True
+
+    monkeypatch.setattr(hook_runtime, "_hfc_request_update_command", request_update)
+
+    class DummyRunner:
+        adapters = {}
+
+        def __init__(self):
+            self.original_calls = 0
+
+        async def _handle_update_command(self, event):
+            self.original_calls += 1
+            return "original update"
+
+    runner = DummyRunner()
+    event = SimpleNamespace(
+        source=SimpleNamespace(
+            platform="feishu",
+            chat_type="private",
+            chat_id="oc_private",
+        ),
+        get_command=lambda: "update",
+        get_command_args=lambda: "",
+    )
+
+    hook_runtime.install_feishu_command_card_adapter_methods(runner, event=event)
+    result = asyncio.run(runner._handle_update_command(event))
+
+    assert "无法确认操作者" in result
+    assert runner.original_calls == 0
+    assert requests == []
+
+
+def test_maintenance_admission_fence_blocks_new_gateway_work(
+    tmp_path,
+    monkeypatch,
+):
+    from hermes_feishu_card.maintenance_store import (
+        maintenance_paths,
+        release_drain_lease,
+        reserve_drain_lease,
+    )
+
+    monkeypatch.setenv("HERMES_FEISHU_CARD_STATE_DIR", str(tmp_path / "state"))
+    paths = maintenance_paths()
+    reserve_drain_lease(paths, owner_id="job-1")
+
+    class Adapter:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, chat_id, content, **kwargs):
+            self.sent.append((chat_id, content, kwargs))
+
+    adapter = Adapter()
+    source = SimpleNamespace(chat_id="oc_private", platform="feishu")
+
+    class Runner:
+        adapters = {"feishu": adapter}
+        _profile_adapters = {}
+        _running_agents = {"active": object()}
+        _external_drain_active = True
+
+        def _active_work_count(self):
+            return 3
+
+        def _adapter_for_source(self, current_source):
+            assert current_source is source
+            return adapter
+
+    runner = Runner()
+    local_vars = {"self": runner, "event": SimpleNamespace(source=source), "source": source}
+
+    assert asyncio.run(
+        hook_runtime.maintenance_admission_from_hermes_locals(local_vars)
+    ) is True
+    assert adapter.sent and "维护升级" in adapter.sent[0][1]
+    assert hook_runtime.gateway_active_session_count() == 3
+    assert hook_runtime.gateway_external_drain_active() is True
+    assert hook_runtime.gateway_active_work_snapshot() == (3, True)
+
+    assert release_drain_lease(paths, owner_id="job-1") is True
+    assert asyncio.run(
+        hook_runtime.maintenance_admission_from_hermes_locals(local_vars)
+    ) is False
+
+
+def test_command_adapter_install_registers_gateway_runner_before_heartbeat(
+    monkeypatch,
+):
+    snapshots = []
+
+    monkeypatch.setattr(
+        hook_runtime,
+        "_ensure_runtime_control_started",
+        lambda: snapshots.append(hook_runtime.gateway_active_work_snapshot()) or True,
+    )
+
+    class Runner:
+        adapters = {}
+
+        def _active_work_count(self):
+            return 0
+
+    runner = Runner()
+
+    assert hook_runtime.install_feishu_command_card_adapter_methods(runner) is False
+    assert snapshots == [(0, True)]
+
+
+def test_gateway_drain_home_requires_runtime_home_to_match_checkout(
+    tmp_path,
+    monkeypatch,
+):
+    gateway_source = tmp_path / "home" / "hermes-agent" / "gateway" / "run.py"
+    gateway_source.parent.mkdir(parents=True)
+    gateway_source.write_text("# fixture\n", encoding="utf-8")
+    monkeypatch.setitem(
+        sys.modules,
+        "gateway.run",
+        SimpleNamespace(__file__=str(gateway_source)),
+    )
+    current_home = [gateway_source.parents[2]]
+    monkeypatch.setattr(
+        hook_runtime.importlib,
+        "import_module",
+        lambda name: SimpleNamespace(
+            get_process_hermes_home=lambda: current_home[0]
+        ),
+    )
+
+    assert hook_runtime.gateway_drain_home_verified() is True
+    current_home[0] = tmp_path / "home" / "profiles" / "secondary"
+    assert hook_runtime.gateway_drain_home_verified() is False
+
+
 def test_manual_compress_original_exception_is_not_swallowed():
     class DummyFeishuAdapter:
         name = "feishu"
@@ -9175,6 +9412,85 @@ def test_build_event_increments_sequence_per_message():
     assert second["sequence"] == 1
 
 
+def test_quoted_turn_uses_one_sequence_across_started_stream_and_terminal():
+    source = SimpleNamespace(platform="feishu", chat_id="oc_quoted")
+    handler_event = SimpleNamespace(message_id="om_turn_a")
+    started = hook_runtime.build_event(
+        "message.started",
+        {
+            "source": source,
+            "event": handler_event,
+            "message_id": "om_turn_a",
+            "conversation_id": "omt_topic",
+        },
+    )
+    delta = hook_runtime.build_event(
+        "answer.delta",
+        {
+            "source": source,
+            "message_id": "om_shared_quote",
+            "conversation_id": "omt_topic",
+            "text": "first",
+        },
+    )
+    completed = hook_runtime.build_event(
+        "message.completed",
+        {
+            "source": source,
+            "event": handler_event,
+            "message_id": "om_shared_quote",
+            "conversation_id": "omt_topic",
+            "answer": "done",
+        },
+    )
+
+    assert [started["turn_id"], delta["turn_id"], completed["turn_id"]] == [
+        "om_turn_a",
+        "om_turn_a",
+        "om_turn_a",
+    ]
+    assert [started["sequence"], delta["sequence"], completed["sequence"]] == [
+        0,
+        1,
+        2,
+    ]
+
+
+def test_source_that_rejects_private_binding_uses_legacy_identity():
+    class SlottedSource:
+        __slots__ = ("platform", "chat_id")
+
+        def __init__(self):
+            self.platform = "feishu"
+            self.chat_id = "oc_slotted"
+
+    source = SlottedSource()
+    started = hook_runtime.build_event(
+        "message.started",
+        {
+            "source": source,
+            "event": SimpleNamespace(message_id="om_real"),
+            "message_id": "om_real",
+        },
+    )
+    delta = hook_runtime.build_event(
+        "answer.delta",
+        {"source": source, "message_id": "om_quote", "text": "x"},
+    )
+
+    assert started["turn_id"] == "om_real"
+    assert "turn_id" not in delta
+    assert delta["message_id"] == "om_quote"
+    assert delta["sequence"] == 0
+
+
+def test_turn_id_raw_terminal_locals_use_bound_turn_before_reply_anchor():
+    source = SimpleNamespace(_hfc_turn_id="om_turn_a")
+    raw_locals = {"source": source, "message_id": "om_shared_quote"}
+
+    assert hook_runtime._canonical_id_from_local_vars(raw_locals) == "om_turn_a"
+
+
 def test_build_event_allocates_unique_sequences_across_threads(monkeypatch):
     class SlowSequenceStore(dict):
         def get(self, key, default=None):
@@ -9210,6 +9526,81 @@ class SenderProbe:
 async def drain_tasks():
     await asyncio.sleep(0)
     await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_quoted_turn_send_lock_and_delta_queue_use_canonical_turn_id(monkeypatch):
+    sender = SenderProbe()
+    monkeypatch.setattr(hook_runtime, "_post_json", sender)
+    monkeypatch.setenv("HERMES_FEISHU_CARD_DELTA_COALESCE_MS", "1000")
+    source = SimpleNamespace(
+        platform="feishu",
+        chat_id="oc_quote",
+        _hfc_turn_id="om_turn",
+    )
+    loop = asyncio.get_running_loop()
+
+    assert hook_runtime.emit_from_hermes_locals_threadsafe(
+        {
+            "_hfc_loop": loop,
+            "source": source,
+            "message_id": "om_quote",
+            "text": "x",
+        },
+        "answer.delta",
+    )
+    await drain_tasks()
+    await hook_runtime.flush_pending_deltas_for_message("om_turn")
+
+    assert len(sender.payloads) == 1
+    payload = sender.payloads[0][1]
+    assert payload["turn_id"] == "om_turn"
+    assert payload["sequence"] == 0
+    assert hook_runtime._send_lock("http://sidecar.test/events", payload) is (
+        hook_runtime._send_lock(
+            "http://sidecar.test/events",
+            {**payload, "message_id": "different-anchor"},
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_turn_id_raw_locals_drive_pending_presence_flush_and_discard():
+    loop = object()
+    key = (
+        id(loop),
+        "http://sidecar.test/events",
+        "om_turn_a",
+        "answer.delta",
+        "default",
+    )
+    pending = hook_runtime._PendingDelta(
+        event_name="answer.delta",
+        event_url="http://sidecar.test/events",
+        timeout_seconds=1.0,
+        loop=loop,
+        base_locals={},
+        text_parts=[],
+    )
+    raw_locals = {
+        "source": SimpleNamespace(_hfc_turn_id="om_turn_a"),
+        "message_id": "om_shared_quote",
+    }
+
+    try:
+        with hook_runtime._PENDING_DELTAS_LOCK:
+            hook_runtime._PENDING_DELTAS[key] = pending
+        assert hook_runtime._has_pending_deltas_for_local_vars(raw_locals)
+        await hook_runtime._flush_pending_deltas_for_local_vars(raw_locals)
+        with hook_runtime._PENDING_DELTAS_LOCK:
+            assert key not in hook_runtime._PENDING_DELTAS
+            hook_runtime._PENDING_DELTAS[key] = pending
+        hook_runtime._discard_pending_deltas_for_local_vars(raw_locals)
+        with hook_runtime._PENDING_DELTAS_LOCK:
+            assert key not in hook_runtime._PENDING_DELTAS
+    finally:
+        with hook_runtime._PENDING_DELTAS_LOCK:
+            hook_runtime._PENDING_DELTAS.pop(key, None)
 
 
 @pytest.mark.asyncio
@@ -10415,6 +10806,38 @@ async def test_policy_failure_is_native_and_card_decision_is_pinned_for_turn(mon
     assert len(calls) == 2
 
 
+async def test_quoted_turn_policy_decision_is_pinned_to_canonical_turn_id(monkeypatch):
+    calls = []
+
+    def policy(_url, _payload, _timeout):
+        calls.append(True)
+        return {"ok": True, "disposition": "card", "ttl_ms": 0}
+
+    posted = []
+
+    async def post(_url, payload, _timeout):
+        posted.append(payload)
+        return {"ok": True, "applied": True}
+
+    monkeypatch.setattr(hook_runtime, "_fetch_delivery_policy_sync", policy)
+    monkeypatch.setattr(hook_runtime, "_post_json_response", post)
+    source = SimpleNamespace(platform="feishu", chat_id="oc_quote")
+    handler_event = SimpleNamespace(message_id="om_turn")
+
+    assert await hook_runtime.emit_from_hermes_locals_async(
+        {"source": source, "event": handler_event, "message_id": "om_turn"},
+        "message.started",
+    )
+    assert await hook_runtime.emit_from_hermes_locals_async(
+        {"source": source, "message_id": "om_quote", "text": "x"},
+        "answer.delta",
+    )
+
+    assert calls == [True]
+    assert [item["turn_id"] for item in posted] == ["om_turn", "om_turn"]
+    assert [item["sequence"] for item in posted] == [0, 1]
+
+
 async def test_completed_topic_message_id_is_requeried_for_the_next_started_turn(
     monkeypatch,
 ):
@@ -11137,6 +11560,76 @@ def test_operations_select_acks_before_daemon_forward_and_remembers_successor_tr
         b"process-local-secret",
         "work",
     )
+
+
+def test_operations_select_forwards_update_evidence_fingerprint(monkeypatch):
+    class FakeP2Response:
+        def __init__(self):
+            self.card = None
+
+    class DummyFeishuAdapter:
+        name = "feishu"
+
+        def _allow_group_message(self, sender_id, chat_id, is_bot=False):
+            return True
+
+    class CapturedDispatcher:
+        def __init__(self):
+            self.tasks = []
+
+        def submit(self, task):
+            self.tasks.append(task)
+            return True
+
+    DummyFeishuAdapter.__module__ = hook_runtime.__name__
+    monkeypatch.setattr(
+        hook_runtime, "P2CardActionTriggerResponse", FakeP2Response, raising=False
+    )
+    dispatcher = CapturedDispatcher()
+    monkeypatch.setattr(
+        hook_runtime, "_OPERATIONS_ACTION_DISPATCHER", dispatcher
+    )
+    monkeypatch.setattr(
+        hook_runtime,
+        "load_runtime_config",
+        lambda: SimpleNamespace(event_url="http://127.0.0.1:8765/events"),
+    )
+    posted = []
+    monkeypatch.setattr(
+        hook_runtime,
+        "_post_json_sync_response",
+        lambda url, payload, timeout: posted.append((url, payload, timeout))
+        or {"ok": True},
+    )
+    token = _operation_token()
+    hook_runtime._remember_operation_transport(
+        "operation-1", "process-local-secret", "work"
+    )
+    fingerprint = "e" * 64
+    data = SimpleNamespace(
+        event=SimpleNamespace(
+            action=SimpleNamespace(
+                value={
+                    "hfc_action": "operations.select",
+                    "operation_action": "confirm_update",
+                    "token": token,
+                    "profile_scope": "opaque-scope",
+                    "update_evidence_fingerprint": fingerprint,
+                }
+            ),
+            context=SimpleNamespace(open_chat_id="oc_private"),
+            operator=SimpleNamespace(open_id="ou_owner"),
+        )
+    )
+
+    response = hook_runtime._hfc_on_feishu_card_action_trigger(
+        DummyFeishuAdapter(), data
+    )
+    dispatcher.tasks[0]()
+
+    forwarded_value = posted[0][1]["event"]["action"]["value"]
+    assert forwarded_value["update_evidence_fingerprint"] == fingerprint
+    assert response.card is None
 
 
 def test_operations_select_slow_forward_does_not_delay_callback(monkeypatch):
