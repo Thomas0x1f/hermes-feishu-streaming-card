@@ -436,7 +436,14 @@ def create_app(
     app[OPERATIONS_HERMES_ROOT_KEY] = resolve_operations_hermes_root(
         operations_hermes_root, config_path=operations_config
     )
-    app[MEDIA_HOME_FROM_ENV_FILE_KEY] = read_env_file_hermes_home(operations_env_file)
+    # 媒体白名单根依赖这个值。--env-file 缺省时回退到 config 同目录的
+    # .env（`--config ~/.hermes/config.yaml` 旁边就是 ~/.hermes/.env），
+    # 否则 allowed_root 会一路退到保底的源码安装目录，把工作区里的图全
+    # 判成越界——而且只有启动命令少一个参数时才复现，极难排查。
+    media_home = read_env_file_hermes_home(operations_env_file)
+    if not media_home:
+        media_home = read_env_file_hermes_home(operations_config.parent / ".env")
+    app[MEDIA_HOME_FROM_ENV_FILE_KEY] = media_home
     app[RUNTIME_INTEGRITY_COORDINATOR_KEY] = RuntimeIntegrityCoordinator(
         mode=integrity_mode,
         hermes_root=app[OPERATIONS_HERMES_ROOT_KEY],
@@ -5153,14 +5160,23 @@ async def _prepare_event_media(
     for raw_path in raw_paths:
         if not isinstance(raw_path, str) or not raw_path.strip():
             raise ValueError("invalid clarify media path")
+        # strict=True 在文件不存在时抛 OSError。以前它和越界共用一个错误
+        # 信息，"outside Hermes home" 会把「图没生成 / 被清理」误报成路径
+        # 越界，排查时完全指错方向——分开报，并带上真实路径。
         try:
             path = Path(raw_path).expanduser().resolve(strict=True)
         except (OSError, RuntimeError, ValueError) as exc:
-            raise ValueError("card media path is outside Hermes home") from exc
+            logger.warning("card media path unresolvable: %s (%s)", raw_path, exc)
+            raise ValueError(f"card media path unresolvable: {raw_path}") from exc
         if not _within_allowed_roots(path):
-            raise ValueError("card media path is outside Hermes home")
+            logger.warning(
+                "card media path outside allowed roots: %s (roots=%s)",
+                path,
+                [str(root) for root in allowed_roots],
+            )
+            raise ValueError(f"card media path is outside Hermes home: {path}")
         if not path.is_file():
-            raise ValueError("card media path must be a regular file")
+            raise ValueError(f"card media path must be a regular file: {path}")
         safe_paths.append(path)
 
     client = _client_for_bot(app, bot_id)
