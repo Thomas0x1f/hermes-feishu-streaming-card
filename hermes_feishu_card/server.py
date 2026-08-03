@@ -14,6 +14,7 @@ from pathlib import Path
 import secrets
 import shutil
 import subprocess
+import tempfile
 import time
 import asyncio
 import logging
@@ -5127,15 +5128,37 @@ async def _prepare_event_media(
         if hermes_home
         else Path(app[OPERATIONS_HERMES_ROOT_KEY]).expanduser().resolve()
     )
+    # 工具产出的图常落在系统临时目录（terminal/execute_code 的默认工作区），
+    # 只认 HERMES_HOME 会把这些图整批挡掉，卡片退回原生消息且图片丢失。
+    # 临时目录同样是本机进程可写的位置，纳入白名单。
+    allowed_roots = [allowed_root]
+    for extra_root in (tempfile.gettempdir(), "/tmp"):
+        try:
+            resolved_extra = Path(extra_root).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if resolved_extra not in allowed_roots:
+            allowed_roots.append(resolved_extra)
+
+    def _within_allowed_roots(candidate: Path) -> bool:
+        for root in allowed_roots:
+            try:
+                candidate.relative_to(root)
+            except ValueError:
+                continue
+            return True
+        return False
+
     safe_paths: list[Path] = []
     for raw_path in raw_paths:
         if not isinstance(raw_path, str) or not raw_path.strip():
             raise ValueError("invalid clarify media path")
         try:
             path = Path(raw_path).expanduser().resolve(strict=True)
-            path.relative_to(allowed_root)
         except (OSError, RuntimeError, ValueError) as exc:
             raise ValueError("card media path is outside Hermes home") from exc
+        if not _within_allowed_roots(path):
+            raise ValueError("card media path is outside Hermes home")
         if not path.is_file():
             raise ValueError("card media path must be a regular file")
         safe_paths.append(path)
