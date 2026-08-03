@@ -100,6 +100,9 @@ class CardSession:
     # 不能挂在某个具体闭包上——事件处理时（锁内）打标记，任何后续闭包
     # 执行时消费，闭包被顶掉也不丢副作用。
     pending_rebottom: str = ""
+    # 置底重建总开关。关掉后 _consume_pending_rebottom 丢弃待办标记、退回
+    # 朴素原地更新（旧卡不撤回）。默认开启，保持置底重建的既有行为。
+    rebottom_enabled: bool = True
     # resolved 时刻（锁内）预渲染的定格快照。闭包异步执行时 session 可能
     # 已推进（如下一个 clarify 已挂上），不能再事后渲染。
     pending_freeze_card: dict | None = None

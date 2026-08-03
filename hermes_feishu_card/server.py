@@ -3060,6 +3060,11 @@ async def _consume_pending_rebottom(
     reason = session.pending_rebottom
     if not reason or session.delivery_kind != "chat":
         return False
+    if not session.rebottom_enabled:
+        # 置底重建被配置关闭：丢弃待办标记，退回朴素原地更新（旧卡不撤回）。
+        session.pending_rebottom = ""
+        session.pending_freeze_card = None
+        return False
     session.pending_rebottom = ""
     freeze_card = session.pending_freeze_card
     session.pending_freeze_card = None
