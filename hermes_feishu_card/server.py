@@ -3068,8 +3068,11 @@ async def _consume_pending_rebottom(
     reason = session.pending_rebottom
     if not reason or session.delivery_kind != "chat":
         return False
-    if not session.rebottom_enabled:
-        # 置底重建被配置关闭：丢弃待办标记，退回朴素原地更新（旧卡不撤回）。
+    # 置底开关取 session 合并后的 card 配置（走 per-profile），未解析出
+    # 会话配置时落到 base。关掉则丢弃待办标记，退回朴素原地更新（旧卡留
+    # 在原位不撤回）。
+    card_cfg = app[SESSION_CARD_CONFIGS_KEY].get(session_key) or app[BASE_CARD_CONFIG_KEY]
+    if not card_cfg.get("rebottom_enabled", True):
         session.pending_rebottom = ""
         session.pending_freeze_card = None
         return False

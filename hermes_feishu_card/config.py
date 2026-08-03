@@ -37,6 +37,9 @@ DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
         "final_drain_timeout_ms": 900,
         "title": "Hermes Agent",
         "interaction_mode": "auto",
+        # clarify 置底重建：撤回旧卡、在会话底部重发一张新卡，保证交互卡
+        # 不被后续消息淹没。关掉则退回朴素原地更新（旧卡留在原位）。
+        "rebottom_enabled": True,
         "show_reasoning": True,
         "timeline_expanded": False,
         "max_timeline_items": 12,
