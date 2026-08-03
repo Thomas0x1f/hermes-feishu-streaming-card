@@ -2079,12 +2079,39 @@ def _expression_call(node):
     return value if isinstance(value, ast.Call) else None
 
 
+def _logical_call_parts(call):
+    """Resolve ``(owner, function, args, keywords)`` through ``asyncio.to_thread``.
+
+    Hermes 0.19.1 moved the synchronous delivery-ledger writes off the event
+    loop, so ``record_obligation(obligation_id=...)`` became
+    ``await asyncio.to_thread(record_obligation, obligation_id=...)``. The
+    wrapped callable is the first positional argument and every remaining
+    argument passes through untouched, so unwrapping it here lets the exact
+    contract below keep describing the ledger call itself rather than the
+    scheduling wrapper. Direct calls (``_record_delivery(result)`` never moved)
+    still match through the same path.
+    """
+    owner, function = _call_function(call)
+    if owner != "asyncio" or function != "to_thread" or not call.args:
+        args = list(call.args) if isinstance(call, ast.Call) else []
+        keywords = list(call.keywords) if isinstance(call, ast.Call) else []
+        return owner, function, args, keywords
+    inner = call.args[0]
+    rest = list(call.args[1:])
+    keywords = list(call.keywords)
+    if isinstance(inner, ast.Name):
+        return None, inner.id, rest, keywords
+    if isinstance(inner, ast.Attribute) and isinstance(inner.value, ast.Name):
+        return inner.value.id, inner.attr, rest, keywords
+    return None, None, [], []
+
+
 def _is_exact_ledger_call(node, *, function: str, required_keywords) -> bool:
     call = _expression_call(node)
-    owner, actual_function = _call_function(call)
-    if owner is not None or actual_function != function or call.args:
+    owner, actual_function, args, call_keywords = _logical_call_parts(call)
+    if owner is not None or actual_function != function or args:
         return False
-    keywords = {keyword.arg: keyword.value for keyword in call.keywords if keyword.arg}
+    keywords = {keyword.arg: keyword.value for keyword in call_keywords if keyword.arg}
     return all(
         name in keywords and _same_expression(keywords[name], expression)
         for name, expression in required_keywords.items()
@@ -2093,15 +2120,15 @@ def _is_exact_ledger_call(node, *, function: str, required_keywords) -> bool:
 
 def _is_exact_positional_call(node, *, function: str, args) -> bool:
     call = _expression_call(node)
-    owner, actual_function = _call_function(call)
+    owner, actual_function, call_args, call_keywords = _logical_call_parts(call)
     return (
         owner is None
         and actual_function == function
-        and not call.keywords
-        and len(call.args) == len(args)
+        and not call_keywords
+        and len(call_args) == len(args)
         and all(
             _same_expression(arg, expected)
-            for arg, expected in zip(call.args, args)
+            for arg, expected in zip(call_args, args)
         )
     )
 
@@ -2136,13 +2163,13 @@ def _is_exact_final_send_assignment(node) -> bool:
 
 def _is_exact_mark_failed_call(node) -> bool:
     call = _expression_call(node)
-    owner, function = _call_function(call)
+    owner, function, args, keywords = _logical_call_parts(call)
     return (
         owner is None
         and function == "mark_failed"
-        and len(call.args) == 2
-        and not call.keywords
-        and _same_expression(call.args[0], "_obligation_id")
+        and len(args) == 2
+        and not keywords
+        and _same_expression(args[0], "_obligation_id")
     )
 
 
@@ -2899,6 +2926,14 @@ def _render_turn_context_hook_block(renderer, indent: str, newline: str):
         (
             '"conversation_id": _approval_session_key or _status_chat_id,',
             '"conversation_id": _approval_session_key or _hfc_turn_ctx._status_chat_id,',
+        ),
+        # The clarify hook reads the status adapter straight out of the turn
+        # closure. TurnRunner moved that binding onto the context object, so
+        # without this the injected block raises NameError at clarify time and
+        # the card silently falls back to a native Feishu message.
+        (
+            '"_hfc_status_adapter": _status_adapter,',
+            '"_hfc_status_adapter": _hfc_turn_ctx._status_adapter,',
         ),
     )
     adapted = []
