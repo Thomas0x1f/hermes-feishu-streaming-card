@@ -2404,13 +2404,23 @@ def request_interaction_from_hermes_locals(
 ) -> dict[str, Any] | None:
     try:
         config = load_runtime_config()
+        # 下面三条前置闸门原本都静默返回 None，调用方只能记到
+        # "interaction end result=none"，与"sidecar 拒绝""轮询丢失"在日志里
+        # 长得一模一样，排查时无法区分是没发出去还是发出去被拒。各自说明
+        # 退回原生的理由。
         if not config.enabled:
+            _hfc_warn(
+                f"interaction skipped (card disabled via env): {interaction_id}"
+            )
             return None
         if not _policy_gate_sync(
             config,
             local_vars,
             "interaction.requested",
         ).card:
+            _hfc_warn(
+                f"interaction skipped (delivery policy says native): {interaction_id}"
+            )
             return None
         payload = build_interaction_event(
             local_vars,
@@ -2423,6 +2433,9 @@ def request_interaction_from_hermes_locals(
             timeout_seconds=timeout_seconds,
         )
         if payload is None:
+            _hfc_warn(
+                f"interaction skipped (event payload not built): {interaction_id}"
+            )
             return None
         post_result = _post_interaction_event(
             local_vars,
@@ -2438,6 +2451,10 @@ def request_interaction_from_hermes_locals(
             # 阻塞到超时。只要 sidecar 还活着就继续进 poll 循环；确认死了
             # 才回退原生。
             if not _sidecar_alive(config):
+                _hfc_warn(
+                    "interaction fallback to native (post failed, sidecar dead): "
+                    f"{interaction_id}"
+                )
                 return None
             _hfc_warn(
                 "interaction.requested post timed out; sidecar alive, "
