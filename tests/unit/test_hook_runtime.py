@@ -6290,9 +6290,9 @@ def test_clarify_rejects_unsafe_or_non_image_media(monkeypatch, safe_media):
         choices=["确认", "修改"],
     )
 
-    assert result == (
-        "[hfc clarify media unavailable; do not confirm media the user could not see]"
-    )
+    # 卡片渲染不了这些媒体，但不能就此替用户作答：返回 None 交回 hermes
+    # 原生 clarify，用户仍会被问到，非图片附件也由原生投递发出去。
+    assert result is None
 
 
 def test_clarify_media_does_not_leak_when_official_parser_is_unavailable(monkeypatch):
@@ -6312,9 +6312,8 @@ def test_clarify_media_does_not_leak_when_official_parser_is_unavailable(monkeyp
         choices=["确认", "修改"],
     )
 
-    assert result == (
-        "[hfc clarify media unavailable; do not confirm media the user could not see]"
-    )
+    # 同上：解析器缺失时同样交回原生，不伪造一个"用户没看到"的回答。
+    assert result is None
 
 
 def test_clarify_multi_select_returns_none_when_card_unavailable(monkeypatch):

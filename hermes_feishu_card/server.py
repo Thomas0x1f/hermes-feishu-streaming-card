@@ -14,7 +14,6 @@ from pathlib import Path
 import secrets
 import shutil
 import subprocess
-import tempfile
 import time
 import asyncio
 import logging
@@ -5138,17 +5137,12 @@ async def _prepare_event_media(
         if hermes_home
         else Path(app[OPERATIONS_HERMES_ROOT_KEY]).expanduser().resolve()
     )
-    # 工具产出的图常落在系统临时目录（terminal/execute_code 的默认工作区），
-    # 只认 HERMES_HOME 会把这些图整批挡掉，卡片退回原生消息且图片丢失。
-    # 临时目录同样是本机进程可写的位置，纳入白名单。
+    # 白名单只认 HERMES_HOME。曾经额外放行 tempfile.gettempdir() 与 /tmp，
+    # 理由是"工具产图落在临时目录"——但那是误诊：工具 cwd 实际在
+    # HERMES_HOME/workspace 下，当时被挡是因为 HERMES_HOME 没解析出来、
+    # allowed_root 退化成了源码安装目录。整个临时目录放行等于让 MEDIA:
+    # 指令能把 /tmp 下任意文件传进聊天，闸门形同虚设，故撤回。
     allowed_roots = [allowed_root]
-    for extra_root in (tempfile.gettempdir(), "/tmp"):
-        try:
-            resolved_extra = Path(extra_root).expanduser().resolve(strict=True)
-        except (OSError, RuntimeError, ValueError):
-            continue
-        if resolved_extra not in allowed_roots:
-            allowed_roots.append(resolved_extra)
 
     def _within_allowed_roots(candidate: Path) -> bool:
         for root in allowed_roots:

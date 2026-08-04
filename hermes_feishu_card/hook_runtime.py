@@ -7689,7 +7689,12 @@ def request_clarify_response_from_hermes_locals(
         normalized_question,
     )
     if media_required and not media_paths:
-        return _HFC_CLARIFY_MEDIA_UNAVAILABLE
+        # 卡片只能内嵌 img_key 图片，塞不下 PPT/PDF 这类附件，所以带非图片
+        # 媒体的 clarify 走不了卡片。但这里不能返回 media-unavailable 哨兵：
+        # 那个字符串会被当成"用户的回答"直接交给 agent，卡片不发、原生也不
+        # 问，用户压根没被问到。返回 None 交回 hermes 原生 clarify——原生
+        # 投递支持非图片附件，用户能收到文件也能回答，只是没有卡片。
+        return None
     if not choices and is_multi_select:
         return None
     options = []
