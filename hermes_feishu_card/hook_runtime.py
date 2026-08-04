@@ -57,6 +57,9 @@ DEFAULT_EVENT_URL = "http://127.0.0.1:8765/events"
 DEFAULT_TIMEOUT_SECONDS = 0.8
 TERMINAL_TIMEOUT_SECONDS = 10.0
 INTERACTION_DELIVERY_TIMEOUT_SECONDS = 10.0
+# clarify 附件上传要走飞书文件接口，比卡片投递慢得多（大 PDF/视频），给足
+# 余量；超时即交回原生 clarify，不会把 agent 线程长时间挂住。
+CLARIFY_DOCUMENT_TIMEOUT_SECONDS = 60.0
 NATIVE_HANDOFF_PROTOCOL = "hfc-native-handoff-v2"
 NATIVE_HANDOFF_MAX_LIFETIME_SECONDS = 3600.0
 NATIVE_HANDOFF_PLAN_PROTOCOL = "hfc-feishu-delivery-plan-v1"
@@ -7510,29 +7513,98 @@ _HFC_CLARIFY_IMAGE_EXTENSIONS = {
 
 def _clarify_media_from_question(
     local_vars: dict[str, Any], question: str
-) -> tuple[str, list[str], bool]:
+) -> tuple[str, list[str], list[str], bool]:
+    """把 clarify 问题里的 MEDIA 附件拆成"卡片内嵌图片"和"原生文档附件"。
+
+    卡片只能内嵌 image_key，所以图片走 media_paths 交 sidecar 上传，其余
+    （PDF/PPT/音视频等）走 gateway adapter 的 send_document 作为原生附件先
+    发出去。安全边界仍由官方 filter_media_delivery_paths 决定：被它挡掉的
+    路径一个都不放行，此时整体退回原生 clarify（返回两个空列表）。
+    """
     has_media_directive = bool(MEDIA_RE.search(_mask_markdown_code(question)))
     adapter = local_vars.get("_hfc_status_adapter")
     extract_media = getattr(adapter, "extract_media", None)
     filter_media = getattr(adapter, "filter_media_delivery_paths", None)
     if not callable(extract_media) or not callable(filter_media):
-        return question, [], has_media_directive
+        return question, [], [], has_media_directive
     try:
         media_files, cleaned_question = extract_media(question)
         safe_media = filter_media(media_files)
     except Exception:
-        return question, [], has_media_directive
+        return question, [], [], has_media_directive
     if not media_files:
-        return question, [], has_media_directive
-    image_paths = [
-        str(path)
-        for path, is_voice in safe_media
-        if not is_voice and Path(str(path)).suffix.lower() in _HFC_CLARIFY_IMAGE_EXTENSIONS
-    ]
+        return question, [], [], has_media_directive
     cleaned = str(cleaned_question or "").strip() or "请选择"
-    if len(image_paths) != len(media_files):
-        return cleaned, [], True
-    return cleaned, image_paths, True
+    # 有路径没过安全校验时不做部分投递：用户看不到全部材料就不该被卡片问，
+    # 交回原生（见下方 media_required 分支）。
+    if len(safe_media) != len(media_files):
+        return cleaned, [], [], True
+    image_paths: list[str] = []
+    document_paths: list[str] = []
+    for path, is_voice in safe_media:
+        text = str(path)
+        if not is_voice and Path(text).suffix.lower() in _HFC_CLARIFY_IMAGE_EXTENSIONS:
+            image_paths.append(text)
+        else:
+            document_paths.append(text)
+    return cleaned, image_paths, document_paths, True
+
+
+def _send_clarify_documents(
+    local_vars: dict[str, Any], document_paths: list[str]
+) -> bool:
+    """clarify 提问前把非图片附件作为原生文件发出去。
+
+    hermes 自己不做这件事：飞书 adapter 没有 override ``send_clarify``，基类
+    默认实现只把问题当纯文本 ``send()``，MEDIA 标记会原样进聊天而文件从不
+    投递。这里在 clarify 阻塞之前补上——附件先落地，用户才有得看。
+
+    clarify callback 是同步的（跑在 agent 线程），``send_document`` 是绑在
+    gateway loop 上的协程，所以经 ``run_coroutine_threadsafe`` 提交并阻塞等
+    结果；阻塞正是要的语义，它保证文件先于卡片出现。任一环节不成立就返回
+    False，调用方交回原生 clarify。
+    """
+    adapter = local_vars.get("_hfc_status_adapter")
+    send_document = getattr(adapter, "send_document", None)
+    loop = local_vars.get("_hfc_loop")
+    chat_id = _first_string(local_vars, ("chat_id", "_status_chat_id"))
+    if not callable(send_document) or loop is None or not chat_id:
+        _hfc_warn(
+            "clarify document send unavailable: "
+            f"adapter={callable(send_document)} loop={loop is not None} "
+            f"chat={bool(chat_id)}"
+        )
+        return False
+    thread_id = _thread_id_for_runtime_event(
+        local_vars, local_vars.get("message"), local_vars.get("source")
+    )
+    # 话题内的附件必须带 thread_id，否则落到群主流、和卡片走散。
+    metadata = {"thread_id": thread_id} if thread_id else None
+    for path in document_paths:
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                send_document(
+                    chat_id,
+                    path,
+                    file_name=Path(path).name,
+                    metadata=metadata,
+                ),
+                loop,
+            )
+            result = future.result(timeout=CLARIFY_DOCUMENT_TIMEOUT_SECONDS)
+        except Exception as exc:
+            _hfc_warn(
+                f"clarify document send failed: {exc.__class__.__name__}: {exc}"
+            )
+            return False
+        if not bool(getattr(result, "success", False)):
+            _hfc_warn(
+                "clarify document send rejected: "
+                f"{getattr(result, 'error', None) or 'unknown error'}"
+            )
+            return False
+    _hfc_warn(f"clarify documents delivered: {len(document_paths)}")
+    return True
 
 
 _HFC_CLARIFY_INTERRUPTED = "[interrupted by a new user message]"
@@ -7684,16 +7756,20 @@ def request_clarify_response_from_hermes_locals(
     # hermes 的 clarify callback 签名为 (question, choices, multi_select=False)，
     # 注入点用 **locals() 把参数整体带入。
     is_multi_select = bool(local_vars.get("multi_select"))
-    normalized_question, media_paths, media_required = _clarify_media_from_question(
-        local_vars,
+    (
         normalized_question,
-    )
-    if media_required and not media_paths:
-        # 卡片只能内嵌 img_key 图片，塞不下 PPT/PDF 这类附件，所以带非图片
-        # 媒体的 clarify 走不了卡片。但这里不能返回 media-unavailable 哨兵：
-        # 那个字符串会被当成"用户的回答"直接交给 agent，卡片不发、原生也不
-        # 问，用户压根没被问到。返回 None 交回 hermes 原生 clarify——原生
-        # 投递支持非图片附件，用户能收到文件也能回答，只是没有卡片。
+        media_paths,
+        document_paths,
+        media_required,
+    ) = _clarify_media_from_question(local_vars, normalized_question)
+    if media_required and not media_paths and not document_paths:
+        # 材料一份都放行不了（官方 filter 挡掉、或没有官方解析器）。这里不能
+        # 返回 media-unavailable 哨兵：那个字符串会被当成"用户的回答"直接交给
+        # agent，卡片不发、原生也不问，用户压根没被问到。返回 None 交回 hermes
+        # 原生 clarify，用户至少还会被问到。
+        return None
+    if document_paths and not _send_clarify_documents(local_vars, document_paths):
+        # 附件没送到，用户无法对看不见的材料作答：同样交回原生 clarify。
         return None
     if not choices and is_multi_select:
         return None

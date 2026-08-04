@@ -6256,6 +6256,146 @@ def test_clarify_media_failure_does_not_fall_back_to_unseen_confirmation(monkeyp
     )
 
 
+class _DocumentSendResult:
+    def __init__(self, success: bool = True) -> None:
+        self.success = success
+        self.error = None if success else "upload rejected"
+
+
+def _document_clarify_adapter(sent, *, success=True, media=None):
+    """带非图片附件的 clarify：extract/filter 用官方解析，send_document 记账。"""
+
+    media_files = media or [("/opt/data/workspace/report.pdf", False)]
+
+    class DocumentAdapter:
+        @staticmethod
+        def extract_media(content):
+            return list(media_files), "请审阅这份报告"
+
+        @staticmethod
+        def filter_media_delivery_paths(paths):
+            return list(paths)
+
+        @staticmethod
+        async def send_document(chat_id, file_path, **kwargs):
+            sent.append({"chat_id": chat_id, "file_path": file_path, **kwargs})
+            return _DocumentSendResult(success)
+
+    return DocumentAdapter()
+
+
+def _immediate_schedule(coroutine, loop):
+    """把 adapter 协程在当轮同步跑完，模拟 gateway loop 上的执行。"""
+
+    class _Future:
+        def __init__(self, value):
+            self._value = value
+
+        def result(self, timeout=None):
+            return self._value
+
+    return _Future(asyncio.run(coroutine))
+
+
+def test_clarify_sends_non_image_media_as_document_before_the_card(monkeypatch):
+    sent: list[dict] = []
+    captured = {}
+
+    def fake_request(local_vars, **kwargs):
+        captured.update(kwargs)
+        # 文件必须先落地：建卡时 send_document 已经完成。
+        assert sent, "document must be delivered before the clarify card"
+        return {"ok": True, "status": "completed", "choice": "确认"}
+
+    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", _immediate_schedule)
+    monkeypatch.setattr(
+        hook_runtime, "request_interaction_from_hermes_locals", fake_request
+    )
+
+    result = hook_runtime.request_clarify_response_from_hermes_locals(
+        {
+            "_hfc_loop": object(),
+            "_hfc_status_adapter": _document_clarify_adapter(sent),
+            "chat_id": "oc_abc",
+            "thread_id": "omt_topic",
+        },
+        interaction_id="doc-1",
+        question="请审阅这份报告\nMEDIA:/opt/data/workspace/report.pdf",
+        choices=["通过", "打回"],
+    )
+
+    assert result == "确认"
+    assert len(sent) == 1
+    assert sent[0]["chat_id"] == "oc_abc"
+    assert sent[0]["file_path"] == "/opt/data/workspace/report.pdf"
+    assert sent[0]["file_name"] == "report.pdf"
+    # 话题内的附件必须回到同一话题，否则落到群主流。
+    assert sent[0]["metadata"] == {"thread_id": "omt_topic"}
+    assert captured["prompt"] == "请审阅这份报告"
+    # 文档走原生附件，不塞进卡片的 media_paths（那条路只认 image_key）。
+    assert captured["media_paths"] == []
+
+
+def test_clarify_mixes_card_images_with_native_document_attachments(monkeypatch):
+    sent: list[dict] = []
+    captured = {}
+
+    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", _immediate_schedule)
+    monkeypatch.setattr(
+        hook_runtime,
+        "request_interaction_from_hermes_locals",
+        lambda local_vars, **kwargs: (
+            captured.update(kwargs)
+            or {"ok": True, "status": "completed", "choice": "确认"}
+        ),
+    )
+
+    adapter = _document_clarify_adapter(
+        sent,
+        media=[
+            ("/opt/data/workspace/preview.png", False),
+            ("/opt/data/workspace/report.pdf", False),
+        ],
+    )
+    result = hook_runtime.request_clarify_response_from_hermes_locals(
+        {"_hfc_loop": object(), "_hfc_status_adapter": adapter, "chat_id": "oc_abc"},
+        interaction_id="doc-mixed",
+        question="请审阅\nMEDIA:/opt/data/workspace/preview.png",
+        choices=["通过"],
+    )
+
+    assert result == "确认"
+    assert [item["file_path"] for item in sent] == ["/opt/data/workspace/report.pdf"]
+    assert captured["media_paths"] == ["/opt/data/workspace/preview.png"]
+
+
+def test_clarify_document_send_failure_falls_back_to_native(monkeypatch):
+    sent: list[dict] = []
+
+    def fail_request(*_args, **_kwargs):
+        raise AssertionError("card must not open when the document never landed")
+
+    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", _immediate_schedule)
+    monkeypatch.setattr(
+        hook_runtime, "request_interaction_from_hermes_locals", fail_request
+    )
+
+    result = hook_runtime.request_clarify_response_from_hermes_locals(
+        {
+            "_hfc_loop": object(),
+            "_hfc_status_adapter": _document_clarify_adapter(sent, success=False),
+            "chat_id": "oc_abc",
+        },
+        interaction_id="doc-fail",
+        question="请审阅这份报告\nMEDIA:/opt/data/workspace/report.pdf",
+        choices=["通过", "打回"],
+    )
+
+    # 附件没送到，用户无法对看不见的材料作答：交回原生 clarify，仍会被问到。
+    assert result is None
+    assert len(sent) == 1
+
+
 @pytest.mark.parametrize(
     "safe_media",
     [
@@ -6290,8 +6430,9 @@ def test_clarify_rejects_unsafe_or_non_image_media(monkeypatch, safe_media):
         choices=["确认", "修改"],
     )
 
-    # 卡片渲染不了这些媒体，但不能就此替用户作答：返回 None 交回 hermes
-    # 原生 clarify，用户仍会被问到，非图片附件也由原生投递发出去。
+    # 材料放不出来（filter 挡掉，或 adapter 没有 send_document 能力），但不能
+    # 就此替用户作答：返回 None 交回 hermes 原生 clarify，用户仍会被问到。
+    # 注意原生 send_clarify 只发纯文本，不投递附件——所以这是有损回退。
     assert result is None
 
 
