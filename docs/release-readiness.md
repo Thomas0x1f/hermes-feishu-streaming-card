@@ -2,7 +2,7 @@
 
 [中文](release-readiness.md) | [English](release-readiness.en.md)
 
-当前发布候选为 `4.2.5`。本轮审查覆盖 canonical turn 隔离、maintenance 重入/checkout/drain 恢复、doctor 可执行建议、三端 installer 的 stable-tag 解析、公开模板版本一致性和 exact tested annotated-tag Release Assets gate。完整自动化、构建、真实验收、CI、exact merge SHA、public tag/install 与 Release assets 只有完成后才会标记通过。
+当前发布候选为 `4.2.8`。本轮修复公开 v4.2.7 安装验收发现的三平台进程凭据持久化缺口。完整自动化、构建、CI、exact merge SHA、public tag/install 与 Release assets 只有完成后才会标记通过。
 
 V3.9.0 和 V3.9.1 已于 2026-07-11 发布。V4.0.13 的通用命令链仍保持“重启前反馈进入命令卡”的历史契约；V4.2.0 只把私聊裸 `/update` 收束到更严格的专用维护卡。
 
@@ -146,6 +146,38 @@ python3 -m hermes_feishu_card.cli restore --hermes-dir ~/.hermes/hermes-agent --
 - tag 后验证 macOS、Linux、Windows 与 checksums 四个 assets。
 
 `v3.9.0` tag 的 release-assets workflow 会发布 4 个 assets：macOS tarball、Linux tarball、Windows zip 和 checksums 文件，分别为 `hermes-feishu-card-v3.9.0-macos.tar.gz`、`hermes-feishu-card-v3.9.0-linux.tar.gz`、`hermes-feishu-card-v3.9.0-windows.zip`、`hermes-feishu-card-v3.9.0-checksums.txt`。
+
+## V4.2.8 发布门禁
+
+- 公开 v4.2.7 tag 的全新 macOS 安装复现：包从目标 venv `site-packages` 导入且 hook 状态完整，但环境凭据未写入所选 `.env`，后续隔离 doctor 报告凭据缺失。
+- TDD 回归覆盖 `install.sh`、`install-docker.sh` 与 `install.ps1` 的进程凭据持久化、带空格 secret、POSIX `0600` 权限和日志不泄露。
+- 安装脚本与 CLI install/setup/restore 聚焦矩阵：**`285 passed, 5 skipped`**；版本/文档契约：**`92 passed`**；PowerShell 动态用例由 Windows GitHub Actions 执行。
+- 隔离 v4.2.8 测试 venv 完整 pytest：**`2431 passed, 6 skipped`**；`git diff --check`：**通过**。
+- 本地 sdist/wheel 构建成功，metadata 均为 `4.2.8`；第二个全新 venv 安装 wheel 与公开依赖后，package/distribution 版本均为 `4.2.8`，import 来自 venv `site-packages`，CLI help exit 0。
+- PR CI、exact merge、public tag/install 与四个 Release assets：**发布流程中逐项记录**。
+
+## V4.2.7 发布门禁
+
+Accepted candidate SHA: `18d0346bd041a7c7b2c049ace116b78c720bad98`
+
+- 候选 GitHub Actions [run 30966895426](https://github.com/baileyh8/hermes-feishu-streaming-card/actions/runs/30966895426) 成功，Python 3.9/3.12、PowerShell installer、Docker Compose runtime smoke 与 Feishu SDK compat 五个 jobs 全部通过。
+- 候选聚焦回归：**`632 passed, 4 skipped`**；候选完整 pytest：**`2429 passed, 5 skipped`**；`git diff --check`：**通过**。
+- Windows 专项覆盖 30 秒 SDK/HFC 探针、POSIX manifest 写入、精确 legacy 反斜杠读取、越界拒绝、parent `HERMES_HOME`、detached runner PID 重绑和 PowerShell 非零退出传播。
+- 发布分支版本/文档契约：**`92 passed`**；Windows/installer/CLI 聚焦矩阵：**`628 passed, 4 skipped`**；完整 pytest：**`2429 passed, 5 skipped`**；`git diff --check`：**通过**。
+- 本地 sdist/wheel 构建成功，metadata 均为 `4.2.7`；全新 venv 安装 wheel 与公开依赖后，package/distribution 版本均为 `4.2.7`，import 来自 venv `site-packages`，CLI help exit 0。
+- exact merge SHA、public tag/install 与四个 Release assets：**发布流程中逐项记录**。
+
+## V4.2.6 发布门禁
+
+Accepted candidate SHA: `a03838da5f012aae112ca549cbe03727a91b578a`
+
+- 截止 2026-08-04 15:00 CST，Issue #187、#188、#189 与 PR #190 没有包含 Hermes/HFC 版本、真实场景和明确结果的有效候选复测反馈。
+- 候选 GitHub Actions [run 30880188189](https://github.com/baileyh8/hermes-feishu-streaming-card/actions/runs/30880188189) 成功，五个 jobs 全部通过。
+- 候选完整 pytest：**`2412 passed, 5 skipped`**。
+- 本机 Hermes `0.20.0` 飞书私聊裸 `/update`：预检、确认卡与独立更新流程通过；sidecar ready，版本显示为 `0.20.0`。公开记录不含本机路径、凭据或 chat id。
+- 发布分支版本/文档契约：**`103 passed`**；发布聚焦矩阵：**`1201 passed, 1 skipped`**；完整 pytest：**`2413 passed, 5 skipped`**；`git diff --check`：**通过**。
+- 本地 sdist/wheel 构建成功；wheel 与 sdist metadata 均为 `4.2.6`，隔离 `-I` import 来自 venv `site-packages`，package/distribution 版本均为 `4.2.6`。
+- PR CI、exact merge、public tag/install 与四个 Release assets：**发布流程中逐项记录**。
 
 ## V4.2.5 发布门禁
 

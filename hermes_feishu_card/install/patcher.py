@@ -2079,39 +2079,46 @@ def _expression_call(node):
     return value if isinstance(value, ast.Call) else None
 
 
-def _logical_call_parts(call):
-    """Resolve ``(owner, function, args, keywords)`` through ``asyncio.to_thread``.
+def _exact_ledger_call_arguments(node, *, function: str):
+    """Return ledger call arguments for direct or awaited ``to_thread`` calls.
 
-    Hermes 0.19.1 moved the synchronous delivery-ledger writes off the event
-    loop, so ``record_obligation(obligation_id=...)`` became
-    ``await asyncio.to_thread(record_obligation, obligation_id=...)``. The
-    wrapped callable is the first positional argument and every remaining
-    argument passes through untouched, so unwrapping it here lets the exact
-    contract below keep describing the ledger call itself rather than the
-    scheduling wrapper. Direct calls (``_record_delivery(result)`` never moved)
-    still match through the same path.
+    Hermes 0.20 moved the synchronous delivery-ledger writes behind
+    ``await asyncio.to_thread(...)``.  Keep this unwrapping deliberately local
+    to the verified ledger anchors: accepting an unawaited coroutine here would
+    let the patcher certify a delivery contract that never records its state.
     """
-    owner, function = _call_function(call)
-    if owner != "asyncio" or function != "to_thread" or not call.args:
-        args = list(call.args) if isinstance(call, ast.Call) else []
-        keywords = list(call.keywords) if isinstance(call, ast.Call) else []
-        return owner, function, args, keywords
-    inner = call.args[0]
-    rest = list(call.args[1:])
-    keywords = list(call.keywords)
-    if isinstance(inner, ast.Name):
-        return None, inner.id, rest, keywords
-    if isinstance(inner, ast.Attribute) and isinstance(inner.value, ast.Name):
-        return inner.value.id, inner.attr, rest, keywords
-    return None, None, [], []
+    if not isinstance(node, ast.Expr):
+        return None
+    value = node.value
+    awaited = isinstance(value, ast.Await)
+    if awaited:
+        value = value.value
+    if not isinstance(value, ast.Call):
+        return None
+
+    owner, actual_function = _call_function(value)
+    if owner is None and actual_function == function:
+        return value.args, value.keywords
+    if not awaited or (owner, actual_function) != ("asyncio", "to_thread"):
+        return None
+    if not value.args:
+        return None
+    target = value.args[0]
+    if not isinstance(target, ast.Name) or target.id != function:
+        return None
+    return value.args[1:], value.keywords
 
 
 def _is_exact_ledger_call(node, *, function: str, required_keywords) -> bool:
-    call = _expression_call(node)
-    owner, actual_function, args, call_keywords = _logical_call_parts(call)
-    if owner is not None or actual_function != function or args:
+    parts = _exact_ledger_call_arguments(node, function=function)
+    if parts is None:
         return False
-    keywords = {keyword.arg: keyword.value for keyword in call_keywords if keyword.arg}
+    args, raw_keywords = parts
+    if args:
+        return False
+    keywords = {
+        keyword.arg: keyword.value for keyword in raw_keywords if keyword.arg
+    }
     return all(
         name in keywords and _same_expression(keywords[name], expression)
         for name, expression in required_keywords.items()
@@ -2119,16 +2126,16 @@ def _is_exact_ledger_call(node, *, function: str, required_keywords) -> bool:
 
 
 def _is_exact_positional_call(node, *, function: str, args) -> bool:
-    call = _expression_call(node)
-    owner, actual_function, call_args, call_keywords = _logical_call_parts(call)
+    parts = _exact_ledger_call_arguments(node, function=function)
+    if parts is None:
+        return False
+    actual_args, keywords = parts
     return (
-        owner is None
-        and actual_function == function
-        and not call_keywords
-        and len(call_args) == len(args)
+        not keywords
+        and len(actual_args) == len(args)
         and all(
             _same_expression(arg, expected)
-            for arg, expected in zip(call_args, args)
+            for arg, expected in zip(actual_args, args)
         )
     )
 
@@ -2162,12 +2169,12 @@ def _is_exact_final_send_assignment(node) -> bool:
 
 
 def _is_exact_mark_failed_call(node) -> bool:
-    call = _expression_call(node)
-    owner, function, args, keywords = _logical_call_parts(call)
+    parts = _exact_ledger_call_arguments(node, function="mark_failed")
+    if parts is None:
+        return False
+    args, keywords = parts
     return (
-        owner is None
-        and function == "mark_failed"
-        and len(args) == 2
+        len(args) == 2
         and not keywords
         and _same_expression(args[0], "_obligation_id")
     )

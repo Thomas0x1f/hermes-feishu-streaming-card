@@ -67,6 +67,7 @@
 - 首轮加载和运行中工具动画必须复用 session 的 `FlushController` 更新同一卡，并保持有界；正文/工具终态到达、更新失败、session reset 或应用清理时必须停止，不能与 terminal drain 竞争或制造独立消息。
 - 群聊 `/hfc status` 只做路由诊断和 binding 提示；@机器人触发、白名单和群消息准入属于 Hermes Gateway。
 - 真实 Card JSON 上限由共享 serializer 最终裁决：5 张 table、200 tagged element、28,000 UTF-8 byte。terminal native handoff 必须幂等，不能发送半截卡后再重复原生答案。
+- `interaction.requested` 在已有 session card 时把当前状态作为新消息发到聊天底部并迁移后续 message id，本 fork 由 `pending_rebottom` 置底重建承担（上游 v4.2.6 的 promoted-card 分支未合入，两者同解一题不可并存，否则一次交互发两张卡）。delivery uuid 必须掺入进程级全局序号绕开飞书幂等去重，发送失败恢复待办标记下次渲染重试，动画任务也必须从旧 message id 切到新卡。
 
 ### `hermes_feishu_card/install/patcher.py`
 
@@ -81,6 +82,7 @@
 - patch 必须幂等、可移除、可检测 corrupt markers。
 - Hermes source-stripped Docker 目录缺少 `VERSION`，或版本 metadata 可读但格式不可解析时，只能在 gateway anchors 可验证时兜底。
 - 新 hook block 必须有 patcher 单测和 remove/restore 覆盖。
+- Hermes 0.20 将同步 delivery-ledger 写入包装为 `await asyncio.to_thread(...)`；只可在已验证的 ledger anchor 内解包这一精确结构，未 `await`、其他 wrapper 或全局 call 解包必须继续拒绝。
 - `_status_callback_sync` 是 optional `status_callback` capability；缺失时保持其他安装路径可用并由 doctor 报 partial compatibility。
 
 ### `hermes_feishu_card/install/recovery.py` and operations execution
@@ -97,6 +99,7 @@
 - 自动 repair 只适用于 known-safe state；`--no-repair` 必须保持有效，用户编辑不能被覆盖。
 - `integrity.mode=safe` 还必须验证 Git root/ancestry/current blobs、provenance、anchors、可逆 patch 和 mutation 前 fingerprint；runtime heartbeat 本身不构成 mutation 权限。修复只设置 restart required，不能自动重启 Gateway。
 - 调整 planner/executor 时运行 `tests/unit/test_recovery.py`、`tests/unit/test_operations.py`、`tests/integration/test_server.py`；涉及安装器时再加 `tests/integration/test_cli_install.py`。
+- ownership manifest 与 recovery plan 的受管相对路径统一写成 POSIX 表示。兼容旧 Windows manifest 时只可把 `\\` 规范化为 `/` 后做精确等值比较；绝对路径、父目录跳转或多余后缀仍须拒绝。
 
 ### `hermes_feishu_card/process.py` and sidecar lifecycle
 
@@ -115,11 +118,13 @@
 - 升级迁移只能停止 PID/token/health 三者一致的旧进程，未知进程保持 fail-closed。
 - `auto` 不得探测 system bus、调用 sudo/pkexec、写 `/etc` 或静默 fallback 到 system manager；`systemd-system` 只能显式使用 transient unit。
 - 调整 lifecycle 时运行 `tests/unit/test_process.py`、`tests/integration/test_cli_process.py` 和 `tests/unit/test_install_scripts.py`。
+- Windows venv launcher 与实际 runner PID 不一致时，只允许 `win32 + detached + exact token + pidfile PID == runner parent PID` 的一次重绑，并在原子写后重新读取精确记录；其他平台、manager 或不完整证据保持 fail-closed。
 
 ### Hermes Feishu SDK 能力门禁
 
 - Hermes adapter 出现 `extra_ua_tags` 调用时，Gateway venv 的 `lark_oapi.ws.Client` 必须支持同名参数；不能只看 Gateway 进程是否存活。
 - `doctor` 保持只读并报告 `feishu_sdk`；`setup/install` 仅在 adapter 确实需要该能力且当前 SDK 不兼容时安装 `lark-oapi==1.6.8`，随后以构造签名复检。
+- Windows Defender/venv 冷启动可能超过 8 秒；SDK 能力与已安装 HFC import 两个隔离子进程探针均使用 30 秒上限，超时仍按失败处理。PowerShell installer 必须显式检查 native `pip` / `setup` 的 `$LASTEXITCODE`，失败时不得继续打印完成。
 - 修改门禁时运行 `tests/integration/test_cli.py`、`tests/integration/test_cli_install.py` 和 `tests/unit/test_diagnostics.py`。
 
 ## 常见改动对应测试
@@ -163,3 +168,17 @@ Never hand-edit a job, copy secrets into it, or bypass a failed evidence check.
 If a job stops, inspect it with `maintenance status`; only resume the exact
 existing job file. Recovery deliberately uses the official Hermes updater and
 HFC patcher and does not implement a custom Git rollback.
+
+Hermes and maintenance venvs commonly expose `bin/python` as a symlink. Keep
+that lexical venv path when launching isolated commands and validating
+`site-packages`; resolving it to the backing interpreter silently discards the
+venv package boundary and can make `/update` fail before mutation.
+
+The native read-only update check and the explicit target fetch may each take
+up to five minutes on a slow remote. They must still fail closed on timeout;
+do not replace the bound `origin/main` snapshot with stale local metadata.
+
+When the root `VERSION` file is absent, version detection reads only a literal
+top-level `hermes_cli.__version__` assignment without importing Hermes before
+falling back to Git tags. This keeps 0.20+ doctor and update results from
+reporting an older nearest tag.

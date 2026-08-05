@@ -7128,7 +7128,7 @@ async def test_v4_runtime_header_and_interim_body_share_one_card(client):
     assert "gpt-5.5" in str(completed)
 
 
-async def test_v4_interaction_restores_cached_preview_on_same_card(client):
+async def test_v4_interaction_restores_cached_preview_on_promoted_card(client):
     test_client, feishu_client = client
 
     await test_client.post("/events", json=event_payload("message.started", 0))
@@ -8093,6 +8093,7 @@ async def test_interaction_request_renders_buttons_and_callback_resolves(client)
         "choice_label": "允许一次",
         "interaction_id": "approval-1",
     }
+    assert feishu_client.updated[-1][0] == "feishu-message-2"
     assert "已选择：允许一次" in str(feishu_client.updated[-1][1])
 
 

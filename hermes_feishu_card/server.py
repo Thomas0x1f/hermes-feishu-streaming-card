@@ -4819,7 +4819,11 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
             status=409,
         ), None
 
-    terminal_session_snapshot = (
+    # 只在终态拍快照供 native handoff 失败回滚。上游 v4.2.6 还为
+    # interaction.requested 拍一份供 promoted-card 发送失败回滚，本 fork 的
+    # 交互走置底重建（失败时恢复 pending_rebottom 待办下次重试），不需要，
+    # 否则每次 clarify 都白拍一次 deepcopy。
+    rollback_session_snapshot = (
         copy.deepcopy(session) if event_is_terminal else None
     )
     applied = session.apply(event)
@@ -4868,8 +4872,8 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
                 ),
             )
             if handoff_record is None:
-                if terminal_session_snapshot is not None:
-                    _restore_session_snapshot(session, terminal_session_snapshot)
+                if rollback_session_snapshot is not None:
+                    _restore_session_snapshot(session, rollback_session_snapshot)
                 metrics.events_rejected += 1
                 return web.json_response(
                     {"ok": False, "error": "native handoff state unavailable"},
