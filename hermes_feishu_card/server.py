@@ -3054,24 +3054,104 @@ async def _send_clarify_urgent(
         )
 
 
+async def _rebottom_interaction_card(
+    request: web.Request,
+    *,
+    session_key: str,
+    session: CardSession,
+    metrics: Metrics,
+    rollback_snapshot: CardSession | None,
+) -> web.Response | None:
+    """`interaction.requested` 的置底重建：在事件路径内同步把选项卡发到底部。
+
+    用户正等着点按钮，所以发卡不推迟到渲染闭包——那条路会被 flush 合并顶掉，
+    还得靠待办标记兜底。这里同步完成，成功即结束本轮（选项卡已带当前状态，
+    无需再 PATCH），失败则回滚 session 并交给调用方返回 502，让 hook 重试时
+    看到的是事件到达前的干净状态。
+
+    若紧邻的上一个事件是 `interaction.completed/failed`，它留下的定格快照会
+    在这里被一并消费：一次重建同时完成“定格旧问答 + 新卡渲染新选项”。
+
+    返回 None 表示不适用（置底关闭），调用方继续常规渲染路径。
+    """
+    app = request.app
+    if not _rebottom_enabled(app, session_key):
+        # 置底关闭：丢弃上一个事件可能留下的待办，退回朴素原地更新。
+        session.pending_rebottom = ""
+        session.pending_freeze_card = None
+        return None
+    freeze_card = session.pending_freeze_card
+    session.pending_rebottom = ""
+    session.pending_freeze_card = None
+    previous_id = app[FEISHU_MESSAGE_IDS_KEY].get(session_key)
+    recreated = await _recreate_card_at_bottom(
+        app,
+        session_key,
+        session,
+        _render_session_card_for_app(app, session),
+        app[MESSAGE_BOT_IDS_KEY].get(session_key),
+        previous_message_id=previous_id,
+        freeze_card=freeze_card,
+    )
+    if not recreated:
+        if rollback_snapshot is not None:
+            _restore_session_snapshot(session, rollback_snapshot)
+        metrics.events_rejected += 1
+        logger.warning(
+            "clarify option card rebottom failed; session rolled back for retry"
+        )
+        return web.json_response(
+            {"ok": False, "error": "feishu interaction send failed"},
+            status=502,
+        )
+    new_id = app[FEISHU_MESSAGE_IDS_KEY].get(session_key, "")
+    logger.warning(
+        "clarify rebottom done: reason=requested new=%s prev=%s freeze=%s",
+        new_id,
+        previous_id,
+        freeze_card is not None,
+    )
+    # 同步发卡也是一次真实渲染，记入节流时钟：紧随其后的 completed 闭包才会
+    # 进入 debounce 窗口，让随后到达的 delta 合并进同一次重建。
+    _flush_controller_for_session(app, session_key).mark_flushed()
+    # 选项卡已发出：排一次超时前的加急提醒。
+    _schedule_clarify_urgent(app, session_key, session, new_id)
+    metrics.events_applied += 1
+    return web.json_response(
+        {
+            "ok": True,
+            "applied": True,
+            "interaction_mode": _interaction_mode_for_session_key(app, session_key),
+        }
+    )
+
+
+def _rebottom_enabled(app: web.Application, session_key: str) -> bool:
+    """置底开关取 session 合并后的 card 配置（走 per-profile），缺则落 base。"""
+    card_cfg = (
+        app[SESSION_CARD_CONFIGS_KEY].get(session_key) or app[BASE_CARD_CONFIG_KEY]
+    )
+    return bool(card_cfg.get("rebottom_enabled", True))
+
+
 async def _consume_pending_rebottom(
     app: web.Application, session_key: str, session: CardSession
 ) -> bool:
-    """消费 clarify 置底待办（任何渲染路径的公共前置步骤）。
+    """消费 `interaction.completed/failed` 留下的置底待办。
 
+    这条路必须留在渲染路径上：定格快照要保护旧卡不被后续 PATCH 覆盖，而
     渲染闭包会被 flush 合并只执行最新一个——事件闭包可能被动画闭包顶掉，
-    所以置底/定格/分段的消费不能只挂在事件闭包上，动画闭包渲染前也必须
-    先走这里。返回 True 表示已置底重建（调用方本轮渲染可结束）；重建
-    失败时恢复待办标记，下一次渲染继续重试，更新永不丢失。
+    所以动画闭包渲染前也必须先走这里。返回 True 表示已置底重建（调用方本轮
+    渲染可结束）；重建失败时恢复待办标记，下一次渲染继续重试，更新永不丢失。
+
+    `interaction.requested` 不走这里，它在事件路径内同步发卡（见
+    `_rebottom_interaction_card`）。
     """
     reason = session.pending_rebottom
     if not reason or session.delivery_kind != "chat":
         return False
-    # 置底开关取 session 合并后的 card 配置（走 per-profile），未解析出
-    # 会话配置时落到 base。关掉则丢弃待办标记，退回朴素原地更新（旧卡留
-    # 在原位不撤回）。
-    card_cfg = app[SESSION_CARD_CONFIGS_KEY].get(session_key) or app[BASE_CARD_CONFIG_KEY]
-    if not card_cfg.get("rebottom_enabled", True):
+    if not _rebottom_enabled(app, session_key):
+        # 关掉则丢弃待办标记，退回朴素原地更新（旧卡留在原位不撤回）。
         session.pending_rebottom = ""
         session.pending_freeze_card = None
         return False
@@ -3099,14 +3179,6 @@ async def _consume_pending_rebottom(
         previous_id,
         freeze_card is not None,
     )
-    if reason == "requested":
-        # clarify 选项卡置底成功：排一次超时前的加急提醒。
-        _schedule_clarify_urgent(
-            app,
-            session_key,
-            session,
-            app[FEISHU_MESSAGE_IDS_KEY].get(session_key, ""),
-        )
     return True
 
 
@@ -4819,12 +4891,13 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
             status=409,
         ), None
 
-    # 只在终态拍快照供 native handoff 失败回滚。上游 v4.2.6 还为
-    # interaction.requested 拍一份供 promoted-card 发送失败回滚，本 fork 的
-    # 交互走置底重建（失败时恢复 pending_rebottom 待办下次重试），不需要，
-    # 否则每次 clarify 都白拍一次 deepcopy。
+    # 终态快照供 native handoff 失败回滚；interaction.requested 快照供选项卡
+    # 置底重建失败回滚——那条路在事件路径内同步发卡，失败必须让 session 退回
+    # 事件到达前的状态，hook 重试才不会看到半推进的会话。
     rollback_session_snapshot = (
-        copy.deepcopy(session) if event_is_terminal else None
+        copy.deepcopy(session)
+        if event_is_terminal or event.event == "interaction.requested"
+        else None
     )
     applied = session.apply(event)
     if applied:
@@ -4935,15 +5008,25 @@ async def _apply_event_locked(request: web.Request, event: SidecarEvent) -> tupl
     if applied and feishu_message_id is not None and render_result is not None:
         if event_is_terminal:
             _store_card_summary(request.app, event, session, feishu_message_id)
-        # 置底待办标记（锁内）：渲染闭包会被 flush 合并只执行最新一个，
-        # clarify 发起/resolved 的置底、定格、分段不能依赖某个具体闭包
-        # 存活——打在 session 上，任何后续闭包执行时消费。
+        # 置底（撤旧建新）分两条路，因为两种事件的时机要求相反：
+        # - interaction.requested：用户正等着点按钮，必须立刻可见，所以在
+        #   事件路径内同步发卡。发卡动作不挂在渲染闭包上，就不受 flush 合并
+        #   顶掉的影响；失败即回滚 session 返回 502，让 hook 重试。
+        # - interaction.completed/failed：只在锁内预拍定格快照并分段重置，
+        #   发新卡推迟到下一次渲染（待办标记驱动）。这样紧随其后的下一个
+        #   clarify 能把"定格旧问答 + 新卡渲染新选项"合并成一次重建，不会
+        #   多发一张随即被撤回的空白卡、多推一次飞书通知。
         if session.delivery_kind == "chat":
             if event.event == "interaction.requested":
-                # resolved 标记未消费时不覆盖：一次重建同时完成
-                # "定格旧问答 + 新卡渲染新选项"。
-                if session.pending_rebottom not in {"resolved", "cancelled"}:
-                    session.pending_rebottom = "requested"
+                rebottom_response = await _rebottom_interaction_card(
+                    request,
+                    session_key=session_key,
+                    session=session,
+                    metrics=metrics,
+                    rollback_snapshot=rollback_session_snapshot,
+                )
+                if rebottom_response is not None:
+                    return rebottom_response, None
             elif event.event in {"interaction.completed", "interaction.failed"}:
                 # 定格快照与分段重置必须在此刻（锁内）完成：闭包异步执行
                 # 前 session 可能已推进——快照事后拍会拍错内容，分段事后

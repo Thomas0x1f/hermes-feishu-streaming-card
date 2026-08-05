@@ -69,6 +69,15 @@ class FlushController:
     def close(self) -> None:
         self._closed = True
 
+    def mark_flushed(self) -> None:
+        """记入一次在 controller 之外完成的渲染。
+
+        clarify 选项卡的置底重建在事件路径内同步发卡，不经过 schedule；不记入
+        节流时钟的话，紧随其后的闭包会立即执行而不进入 debounce 窗口，随后到
+        达的 delta 就合并不进同一次渲染（表现为先发一张空卡再 PATCH 填内容）。
+        """
+        self._last_flush_at = time.monotonic()
+
     def snapshot(self) -> dict[str, int | float]:
         return {
             "interval_seconds": self.interval_seconds,

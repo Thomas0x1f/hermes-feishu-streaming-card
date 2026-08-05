@@ -67,7 +67,9 @@
 - 首轮加载和运行中工具动画必须复用 session 的 `FlushController` 更新同一卡，并保持有界；正文/工具终态到达、更新失败、session reset 或应用清理时必须停止，不能与 terminal drain 竞争或制造独立消息。
 - 群聊 `/hfc status` 只做路由诊断和 binding 提示；@机器人触发、白名单和群消息准入属于 Hermes Gateway。
 - 真实 Card JSON 上限由共享 serializer 最终裁决：5 张 table、200 tagged element、28,000 UTF-8 byte。terminal native handoff 必须幂等，不能发送半截卡后再重复原生答案。
-- `interaction.requested` 在已有 session card 时把当前状态作为新消息发到聊天底部并迁移后续 message id，本 fork 由 `pending_rebottom` 置底重建承担（上游 v4.2.6 的 promoted-card 分支未合入，两者同解一题不可并存，否则一次交互发两张卡）。delivery uuid 必须掺入进程级全局序号绕开飞书幂等去重，发送失败恢复待办标记下次渲染重试，动画任务也必须从旧 message id 切到新卡。
+- `interaction.requested` 在已有 session card 时把当前状态作为新消息发到聊天底部并迁移后续 message id。这条路在**事件路径内同步发卡**（吸收上游 v4.2.6 promoted-card 的时机与失败语义）：发卡不挂在渲染闭包上，失败即回滚 session 快照并返回 502 交给 hook 重试；成功后必须 `mark_flushed()` 记入节流时钟，否则紧随的 completed 闭包不进 debounce 窗口，后续 delta 合并不进同一次重建（表现为先发空卡再 PATCH）。
+- `interaction.completed/failed` 相反：只在锁内预拍定格快照并 `reset_segment_after_interaction()`，发新卡推迟到下一次渲染由 `pending_rebottom` 待办驱动。这个推迟是刚需——紧随其后的下一个 clarify 会在同步发卡时一并消费定格快照，把「定格旧问答 + 新卡渲染新选项」合并成一次重建，否则会多发一张随即被撤回的空白卡、多推一次飞书通知。待办消费必须留在所有渲染路径（含动画闭包）的公共前置，否则定格快照会被后续 PATCH 覆盖。
+- 两条路共用 `_recreate_card_at_bottom`：delivery uuid 必须掺入进程级全局序号绕开飞书幂等去重（约 1 小时窗口，稳定 key 会被去重成第一张卡）；话题内拿不到用户消息锚点时退回「先发后撤」保住话题归属；动画不需要 cancel/restart，它的 PATCH 目标动态取 `FEISHU_MESSAGE_IDS_KEY`。
 
 ### `hermes_feishu_card/install/patcher.py`
 

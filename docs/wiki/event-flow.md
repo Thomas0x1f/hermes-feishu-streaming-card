@@ -219,10 +219,11 @@ V3.10.0 的 command-card adapter hook 会在运行时包装 runner 的 `_handle_
 ## Agent clarify / approval 交互
 
 Agent 任务内的普通单选 `interaction.requested` 会渲染为当前 streaming card 里的按钮，
-不会改成 select 组件。若本轮已经存在卡片，sidecar 按置底重建把当前状态作为新消息发到
-聊天底部并把后续更新切到新 message id（`card.rebottom_enabled=false` 时退回原地更新），
-因此多轮选择始终出现在底部；resolved/cancelled 时旧卡定格为“已完成”快照留存问答，新卡
-从新分段继续渲染。
+不会改成 select 组件。若本轮已经存在卡片，sidecar 在处理该事件时就同步把当前状态作为新
+消息发到聊天底部并把后续更新切到新 message id（`card.rebottom_enabled=false` 时退回原地
+更新），所以 `/events` 响应返回时选项卡已经可见；发送失败会回滚会话并返回 502 让 hook
+重试。resolved/cancelled 则相反：旧卡定格为“已完成”快照留存问答，新卡推迟到下一次渲染
+时从新分段开始——紧随其后的下一个 clarify 会把定格与新选项合并成一次重建。
 
 Hermes 原生 `clarify` 的多选（callback 签名 `(question, choices, multi_select=False)`）
 会被 hook 直接识别：`multi_select=True` 时把 choices 渲染为 Card JSON 2.0 的

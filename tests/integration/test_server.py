@@ -11686,6 +11686,71 @@ async def test_resolution_rebottom_survives_render_coalescing(client, monkeypatc
     assert "先做哪个" not in new_segment
 
 
+async def test_option_card_rebottom_failure_rolls_back_session_for_retry(client):
+    # 选项卡置底在事件路径内同步发卡，失败必须回滚 session 并返回 502：
+    # hook 重试时看到的是事件到达前的干净状态，而不是半推进的会话。
+    test_client, feishu_client = client
+    payload = event_payload(
+        "interaction.requested",
+        1,
+        {
+            "interaction_id": "retry-q",
+            "kind": "select",
+            "prompt": "请选择",
+            "options": [{"label": "继续", "value": "go"}],
+        },
+    )
+
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    feishu_client.fail_send = True
+    failed = await test_client.post("/events", json=payload)
+
+    assert failed.status == 502
+    assert (await failed.json())["error"] == "feishu interaction send failed"
+    assert len(feishu_client.sent) == 1
+
+    feishu_client.fail_send = False
+    retried = await test_client.post("/events", json=payload)
+
+    assert retried.status == 200
+    body = await retried.json()
+    assert body["applied"] is True
+    assert body["interaction_mode"] == "callback"
+    # 重试成功后选项卡出现在底部，且带按钮。
+    assert len(feishu_client.sent) == 2
+    assert "请选择" in str(feishu_client.sent[-1][1])
+    assert any(
+        element.get("tag") == "button"
+        for element in feishu_client.sent[-1][1]["body"]["elements"]
+    )
+
+
+async def test_option_card_rebottom_is_visible_before_the_response_returns(client):
+    # 同步发卡的意义：POST 返回时选项卡已经在聊天里，用户不必等下一次渲染。
+    test_client, feishu_client = client
+    await test_client.post("/events", json=event_payload("message.started", 0))
+    assert len(feishu_client.sent) == 1
+
+    requested = await test_client.post(
+        "/events",
+        json=event_payload(
+            "interaction.requested",
+            1,
+            {
+                "interaction_id": "sync-q",
+                "kind": "select",
+                "prompt": "同步发卡了吗？",
+                "options": [{"label": "是", "value": "yes"}],
+            },
+        ),
+    )
+
+    assert requested.status == 200
+    # 没有 _wait_until：响应返回时卡片必须已经发出。
+    assert len(feishu_client.sent) == 2
+    assert "同步发卡了吗？" in str(feishu_client.sent[-1][1])
+
+
 async def test_clarify_request_does_not_urge_on_arrival(client, monkeypatch):
     # 卡片弹出时不加急：消息刚到，飞书通知已经够了。
     monkeypatch.setenv("HERMES_FEISHU_CARD_CLARIFY_URGENT", "1")
