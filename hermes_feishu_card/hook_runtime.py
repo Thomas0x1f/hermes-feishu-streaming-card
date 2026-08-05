@@ -7645,6 +7645,29 @@ def _drain_agent_pending_steer(agent: Any) -> str:
     return str(text).strip()
 
 
+def _peek_agent_pending_steer(agent: Any) -> str:
+    """只探测、不取走 clarify 等待期间的 steer 便签。
+
+    多选卡片不接受自由文本作答——一句话映射不成 ``["水牌","台卡"]`` 这样的选项
+    数组，硬猜比不猜更糟。但**发起人打字这件事本身就是信号**：他要改主意、要问
+    别的、或者压根不想选了。此前多选完全无视 steer，卡片继续干等，发起人只看到
+    一句 ``↪ Redirected current run (running: clarify)`` 然后什么也没发生。
+
+    所以这里只判断"有没有人说话"，不消费那条便签：探到就中断这张卡，文本原样留
+    给 conversation loop 正常注入，由模型自己决定是重发、改问还是换个方向。
+    """
+    if agent is None:
+        return ""
+    lock = getattr(agent, "_pending_steer_lock", None)
+    try:
+        if lock is not None:
+            with lock:
+                return str(getattr(agent, "_pending_steer", None) or "").strip()
+        return str(getattr(agent, "_pending_steer", None) or "").strip()
+    except Exception:
+        return ""
+
+
 class _ClarifyTextChannel:
     """卡片 clarify 的旁路文本通道。
 
@@ -7822,11 +7845,14 @@ def request_clarify_response_from_hermes_locals(
             if text:
                 return {"status": "text_reply", "text": text}
         # busy-interrupt 被降级成 steer 的用户消息：取出充当 clarify 答案。
-        # multi_select 需要结构化选择，自由文本无法映射，不走此通道。
+        # multi_select 需要结构化选择，自由文本无法映射，不当答案——但**要中断**：
+        # 发起人打字就是在表态，卡片不该继续干等（2026-08-05 定规）。
         if not is_multi_select:
             steered = _drain_agent_pending_steer(_agent)
             if steered:
                 return {"status": "text_reply", "text": steered}
+        elif _peek_agent_pending_steer(_agent):
+            return {"status": "interrupted"}
         return None
 
     _hfc_warn(
